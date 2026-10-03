@@ -85,17 +85,18 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g11-b
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | The engine hands a job's encode to a node at its one encode seam; the temp, the reservation, every gate and the rename stay `ProcessFile`'s | TODO |
-| 4.2 | `holdfast worker`: acquire, heartbeat, read the source through the mount by its path map, encode, upload, complete or fail | TODO |
-| 4.3 | End to end on loopback with a real tiny encode over a shared mount with a path map (line C) | TODO |
-| 4.4 | Fixtures: a free-space reservation refusal at grant and at upload start; a server restart with live leases | TODO |
-| 4.5 | The retry bound: an expiry, a `fail` or a refused upload counts against `max_failures`; the park names the node attempts | TODO |
+| 4.1 | The engine hands a job's encode to a node at its one encode seam; the temp, the reservation, every gate and the rename stay `ProcessFile`'s | DONE (PR #158, `81d7c1b`): `internal/engine/nodes.go` (`encodeAt`, `leasable`, `encodeOnNode`, `startFeeders`, `nodeGate`, `AdoptLeases`); `TestNodes_OffByDefaultThePoolAndArgvAreUnchanged`, `TestNodes_AJobThatIsNotLeasableIsEncodedByTheServer`, `TestNodes_TheWrongSourceDigestFailsBeforeTheGates`, `TestNodes_ANodesCommandLineIsTheServersOwn`, `TestNodes_FeedersLeakNoGoroutineAndNoTicket`, `TestNodes_TheNodeGateBoundsTheServersOwnWork` |
+| 4.2 | `holdfast worker`: acquire, heartbeat, read the source through the mount by its path map, encode, upload, complete or fail | DONE (PR #158): `internal/nodeworker`, `cmd/holdfast/worker.go`; `TestWorker_RefusesPlainHTTPToANonLoopbackServer`, `TestWorker_AnUnmappedSourceFailsTheLeaseAndNeverGuesses`, `TestWorkerFixture_AnAcquireAnswerThatIsNotALeaseIsNeverEncoded`, `TestWorker_ALeasedCommandLineOutsideTheServersShapeIsRefusedUnrun`, `TestWorker_ARedirectIsNeverFollowed`; mutation-diff 100.00% against the 70% floor (killed 132, lived 0) |
+| 4.3 | End to end on loopback with a real tiny encode over a shared mount with a path map (line C) | DONE (PR #158): `TestWorkerEndToEnd_SharedMountPathMapServerRegatesAndRenames` (the real `serve` and `worker` commands; the server ran no encode for the file, ran its decode-integrity pass and its VMAF run on its own temp and source path, and the final file's inode is the temp's) and `TestWorkerEndToEnd_AWorkerVerdictNeverLicensesASwap`; gate exit 0 (run 1 on `e539a97` in 2511 s, `internal/engine` 2366.4 s; final run on `26fd334` in 926 s with `cmd/holdfast` 797.9 s and the unchanged packages reused from the run on `7e38518`, `internal/engine` 2314.3 s, 64% of `TEST_TIMEOUT`); CI green; 2 fix rounds (D16) |
+| 4.4 | Fixtures: a free-space reservation refusal at grant and at upload start; a server restart with live leases | DONE (PRs #157, #158): `TestWorkerFixture_AFreeSpaceReservationRefusalAtGrantIs503AndTheSourceIsUntouched`, `TestNodeFixture_AFreeSpaceRefusalAtUploadStartIs503`, `TestWorkerFixture_AServerRestartWithLiveLeasesAdoptsOrAbandonsBeforeAnyGrant`, `TestNodeFixture_AServerRestartKeepsLiveLeases`, `TestNodes_ARestartTakesTwoLiveLeasesBackAtOnce`, `TestNodes_ARecoveredLeaseWhoseJobDoesNotComeBackIsAbandonedBeforeReady`; and `TestWorkerFixture_A404BodyOfferedAsMediaFailsTheServersGates`, `..._AnExpiredLeaseUploadIsDiscardedAndTheJobIsRetried`, `..._ADuplicateUploadFromTheRealWorkerRewritesNothing`, `..._ADigestMismatchIsRetriedWithinTheLeaseThenFails` |
+| 4.5 | The retry bound: an expiry, a `fail` or a refused upload counts against `max_failures`; the park names the node attempts | DONE (PR #158): as refined by D14; `TestWorkerFixture_TheRetryBoundParksTheFileNamingTheNodeAttempts`, `TestNodes_OneMisconfiguredWorkerDoesNotParkTheLibrary`, `TestNodes_ANodeThatCannotRunALeaseCostsTheFileNothing`, `TestNodes_APollThatLeftCostsTheFileNothing` |
+| 4.6 | Adversarial review of the branch before its gate | DONE (PR #158): no route past the server's gates; 1 HIGH (availability), 3 MED, 9 LOW, all fixed on the branch (D14, D15) |
 
 ## Phase 5 - Report
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | Gate integrity counted from the goal-start SHA | TODO |
+| 5.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `81d7c1b`): `func Test` 1834 -> 1958, no package fell (`cmd/holdfast` 259 -> 264, `internal/config` 163 -> 170, `internal/engine` 574 -> 597, `internal/node` 0 -> 54, `internal/nodeworker` 0 -> 23, `internal/server` 125 -> 129, `internal/store` 155 -> 163, every other package unchanged); `git diff --numstat 8d9c23b origin/main -- docs/design/swap.md docs/design/quality-gate.md` empty (66 and 80 lines); `*_test.go` +8471 -23, the 23 deleted lines in D12 and D17; zero `co-authored-by` in `git log 8d9c23b..origin/main --format=%B` |
 | 5.2 | Adversarial review of the report | TODO |
 
 ## Decisions taken
@@ -176,6 +177,32 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g11-b
   names another input, an attachment, an absolute path or anything before the input; the worker
   refuses redirects and a `worker_server` with userinfo; its work directory is swept at start.
 
+- D16 (2026-10-03): PR #158's two fix rounds. Round 1: the local gate passed, CI's `build` was
+  red - a new engine test failed on the runner and its cleanup then waited on a long-poll until
+  the package's 60m timeout; fixed in `7e38518` (the assertion no longer races the feeders, and
+  no test this goal added can block past a deadline in cleanup). Round 2: CI was green, the local
+  gate was red under host load on an existing serve test's 3-second readiness wait
+  ("server never became ready"); fixed in `26fd334` by a one-minute floor in the test helper
+  `waitHTTP`, which returns on the first 200. Both red tails are comments on the PR. The final
+  local run reused Go's cached results for the packages the last commit did not touch.
+- D17 (2026-10-03): the one `*_test.go` line PR #158 deleted against the goal-start tree is
+  `cmd/holdfast/flags_test.go`'s `for _, cmd := range []string{"run", "serve", "validate"} {`,
+  which gained `worker`: the pinned flag list now covers the new command too. (PR #158 also
+  rewrote 17 lines of `internal/node/scenarios_test.go`, a file this goal created in #157: a
+  reserved poll is now answered 204 at its bound and a dead ticket grants nothing.)
+- D18 (2026-10-03): PR #158's own decisions are in its PR body and `docs/design/nodes.md`: the
+  worker's configuration goes through the shared loader, so it names its own mount as a library
+  root; the worker hashes the source file after the encode; stream-copy plans are not leased; the
+  park record names the node attempts this process saw; `internal/engine` imports `internal/node`
+  for the job and ticket types.
+- D19 (2026-10-03): no item is added to the owner's queue by this goal. The only physical step
+  is a run against a real second host, which T49 keeps out of every goal and which waits for
+  goal 12 (until then the worker refuses plain `http://` to a server that is not loopback, D8);
+  goal 12 files it with the deployment it documents. The ten open holdfast items (#50-#56,
+  #202-#204) are unchanged.
+- D20 (2026-10-03): no minor release is cut (T37 optional): nodes are off by default and the
+  HTTP mode, the TLS stance and the deployment docs are goal 12's.
+
 ## Proposals awaiting the owner
 
 - Hardware encoders on a node (D4): a node's own start-time probe would have to gate the job.
@@ -188,7 +215,6 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g11-b
 
 ## Resume here
 
-PR #157 (protocol) is merged at `7b434e1`. The `holdfast-g11/worker` builder agent is finishing in
-`/cache/wt/holdfast/g11-worker` (branch `holdfast-g11/worker`, stacked on the old protocol
-branch). Next: merge `origin/main` into it (D13), a fresh adversarial review, the gate
-(`/cache/tmp/holdfast-g11/gate.sh <worktree> <log>`), the PR, CI, merge; then phase 5.
+Both PRs are merged (#157 at `7b434e1`, #158 at `81d7c1b`); no branch, worktree or open PR of this
+goal remains (#156 is another session's). Next: the adversarial review of the report (5.2), the
+COMPLETE line, `goals check`, the GOAL REPORT.
