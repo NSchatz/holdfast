@@ -340,7 +340,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := historyResponse{
-		History:      toDTOs(jobs),
+		History:      s.hub.rowDTOs(jobs),
 		HistoryTotal: s.historyTotal(r, query),
 	}
 	if more {
