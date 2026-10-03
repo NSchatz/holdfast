@@ -26,6 +26,10 @@ import (
 // answer a real server could give - and several it never would - is put to the worker. No
 // ffmpeg runs here: the encode is a function the test supplies.
 
+// waitFor bounds every wait for something that must happen. It is generous on purpose: the
+// gate runs this suite under -race on a loaded host, and a wait that passes returns at once.
+const waitFor = 120 * time.Second
+
 const (
 	testToken   = "node-credential-for-tests"
 	testVersion = "v-test"
@@ -38,6 +42,8 @@ type reply struct {
 	ctype  string
 	body   string
 	retry  string
+	// location makes the reply a redirect to that address.
+	location string
 }
 
 func jsonReply(status int, v any) reply {
@@ -132,6 +138,9 @@ func (f *fakeServer) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if rep.retry != "" {
 		w.Header().Set("Retry-After", rep.retry)
+	}
+	if rep.location != "" {
+		w.Header().Set("Location", rep.location)
 	}
 	w.WriteHeader(rep.status)
 	_, _ = io.WriteString(w, rep.body)
@@ -260,7 +269,7 @@ func (r *rig) run() (stop func() error) {
 			cancel()
 			select {
 			case runErr = <-done:
-			case <-time.After(10 * time.Second):
+			case <-time.After(waitFor):
 				r.t.Fatal("the worker did not stop")
 			}
 		})
@@ -273,7 +282,7 @@ func (r *rig) run() (stop func() error) {
 // until waits for cond.
 func until(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(waitFor)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
@@ -503,7 +512,6 @@ func TestWorkerFixture_AnAcquireAnswerThatIsNotALeaseIsNeverEncoded(t *testing.T
 func TestWorker_RunsALeaseEndToEndAgainstTheProtocol(t *testing.T) {
 	r := newRig(t)
 	l := r.lease()
-	l.Pre = []string{"-pre-option"}
 	r.f.queue("acquire", jsonReply(200, l))
 	gate := make(chan struct{})
 	inner := r.opts.Encode
@@ -546,7 +554,7 @@ func TestWorker_RunsALeaseEndToEndAgainstTheProtocol(t *testing.T) {
 	r.mu.Unlock()
 	wantOut := filepath.Join(r.work, leaseID+".7.out")
 	if len(enc) != 1 || enc[0][0] != r.mapped || enc[0][1] != wantOut ||
-		strings.Join(enc[0][2:], " ") != "-pre-option -c:v libx265 -f matroska" {
+		strings.Join(enc[0][2:], " ") != "-c:v libx265 -f matroska" {
 		t.Fatalf("encodes = %v, want one of the MAPPED source %s into %s with the lease's options", enc, r.mapped, wantOut)
 	}
 
@@ -644,11 +652,14 @@ func TestWorker_RefusesALeaseItCannotRunWithATypedFail(t *testing.T) {
 		want    string
 		encodes int
 	}{
-		"another size":    {func(_ *rig, l *node.AcquireResponse) { l.SourceSize++; l.MaxOutputBytes++ }, ReasonSourceMismatch, 0},
-		"another mtime":   {func(_ *rig, l *node.AcquireResponse) { l.SourceMtimeNS++ }, ReasonSourceMismatch, 0},
-		"a missing file":  {func(r *rig, _ *node.AcquireResponse) { _ = os.Remove(r.src) }, ReasonSourceUnreadable, 0},
-		"a directory":     {func(r *rig, l *node.AcquireResponse) { l.Path = r.lib }, ReasonSourceMismatch, 0},
-		"another encoder": {func(_ *rig, l *node.AcquireResponse) { l.Encoder = "nvenc" }, ReasonUnsupportedEncoder, 0},
+		"another size":                  {func(_ *rig, l *node.AcquireResponse) { l.SourceSize++; l.MaxOutputBytes++ }, ReasonSourceMismatch, 0},
+		"an mtime past the tolerance":   {func(_ *rig, l *node.AcquireResponse) { l.SourceMtimeNS += int64(MtimeTolerance) + 1 }, ReasonSourceMismatch, 0},
+		"an mtime before the tolerance": {func(_ *rig, l *node.AcquireResponse) { l.SourceMtimeNS -= int64(MtimeTolerance) + 1 }, ReasonSourceMismatch, 0},
+		"options before the input":      {func(_ *rig, l *node.AcquireResponse) { l.Pre = []string{"-init_hw_device", "x"} }, ReasonRefusedPlan, 0},
+		"a second input":                {func(_ *rig, l *node.AcquireResponse) { l.Body = append(l.Body, "-i", "other.mkv") }, ReasonRefusedPlan, 0},
+		"a missing file":                {func(r *rig, _ *node.AcquireResponse) { _ = os.Remove(r.src) }, ReasonSourceUnreadable, 0},
+		"a directory":                   {func(r *rig, l *node.AcquireResponse) { l.Path = r.lib }, ReasonSourceMismatch, 0},
+		"another encoder":               {func(_ *rig, l *node.AcquireResponse) { l.Encoder = "nvenc" }, ReasonUnsupportedEncoder, 0},
 		"a failed encode": {func(r *rig, _ *node.AcquireResponse) {
 			r.opts.Encode = func(context.Context, string, string, []string, []string, func(float64)) error {
 				r.mu.Lock()
@@ -735,7 +746,7 @@ func TestWorker_AGoneLeaseStopsTheEncodeAtOnceAndDiscardsTheOutput(t *testing.T)
 	r.run()
 	select {
 	case <-stopped:
-	case <-time.After(10 * time.Second):
+	case <-time.After(waitFor):
 		t.Fatal("the encode was not stopped by the 410")
 	}
 	until(t, "the worker to ask again", func() bool { return len(r.f.seen("acquire")) >= 2 })
@@ -956,7 +967,7 @@ func TestWorker_AnotherVersionIsFatalAndNamesBoth(t *testing.T) {
 		if !errors.Is(err, ErrVersionMismatch) || !strings.Contains(err.Error(), "v9.9.9") || !strings.Contains(err.Error(), testVersion) {
 			t.Fatalf("Run = %v, want the version mismatch naming %s and v9.9.9", err, testVersion)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(waitFor):
 		t.Fatal("a version mismatch did not stop the worker")
 	}
 	if r.encodeCount() != 0 {
@@ -976,9 +987,11 @@ func TestWorker_AnotherVersionIsFatalAndNamesBoth(t *testing.T) {
 func TestWorker_EverySlotAsksForItsOwnLease(t *testing.T) {
 	r := newRig(t)
 	r.opts.Slots = 3
-	r.run()
+	stop := r.run()
 	until(t, "three polls in flight", func() bool { return len(r.f.seen("acquire")) >= 3 })
-	time.Sleep(50 * time.Millisecond)
+	// Each slot is now inside its one poll, which the fake server holds. Stopping the worker
+	// ends them, and no slot can have sent a second.
+	_ = stop()
 	if n := len(r.f.seen("acquire")); n != 3 {
 		t.Errorf("%d polls in flight from 3 slots", n)
 	}
@@ -1074,5 +1087,212 @@ func TestWorker_RetryAfterReadsWholeSecondsOnly(t *testing.T) {
 	}
 	if got := fmt.Sprint(leaseRoute(node.RouteFail, "abc")); got != "/leases/abc/fail" {
 		t.Errorf("leaseRoute = %s", got)
+	}
+}
+
+// TestWorker_AModificationTimeWithinTwoSecondsIsTheSameSource: a source read through another
+// mount can show another modification time (FAT keeps two-second stamps, SMB and NFS round).
+// Up to MtimeTolerance either way the lease is run - the server's own comparison of the source
+// digest is the proof - and the size is still exact.
+func TestWorker_AModificationTimeWithinTwoSecondsIsTheSameSource(t *testing.T) {
+	if MtimeTolerance != 2*time.Second {
+		t.Fatalf("MtimeTolerance = %s, want 2s", MtimeTolerance)
+	}
+	for _, drift := range []time.Duration{0, MtimeTolerance, -MtimeTolerance, time.Nanosecond} {
+		r := newRig(t)
+		l := r.lease()
+		l.SourceMtimeNS += int64(drift)
+		r.f.queue("acquire", jsonReply(200, l))
+		r.run()
+		until(t, "the completion", func() bool { return len(r.f.seen("complete")) >= 1 })
+		if got := r.f.failReasons(); len(got) != 0 {
+			t.Errorf("a source whose mtime is %s off was failed: %v", drift, got)
+		}
+	}
+	// The size is never tolerated: one byte off is another file.
+	r := newRig(t)
+	l := r.lease()
+	l.SourceSize--
+	l.MaxOutputBytes--
+	if same, err := sameSource(r.mapped, &l); err != nil || same {
+		t.Errorf("sameSource with a size one byte off = %v, %v; want false", same, err)
+	}
+}
+
+// TestWorker_ALeaseItFailedItselfIsFollowedByABackoff: whatever stopped this worker running
+// a lease - its path map, its mount, its encoders - is still there a moment later, so it
+// backs off, exponentially, before it asks again. A lease it completed resets the backoff.
+func TestWorker_ALeaseItFailedItselfIsFollowedByABackoff(t *testing.T) {
+	r := newRig(t)
+	r.opts.PathMap = nil // every lease is unmapped
+	lease := jsonReply(200, r.lease())
+	r.f.queue("acquire", lease, lease, lease, lease)
+	r.run()
+	until(t, "four failed leases and the poll after them", func() bool { return len(r.f.seen("acquire")) >= 5 })
+	r.mu.Lock()
+	m := r.opts.MinBackoff
+	want := []time.Duration{m / 2, m, 2 * m, 4 * m}
+	for i, w := range want {
+		if len(r.sleeps) <= i || r.sleeps[i] != w {
+			t.Fatalf("waits after each failed lease = %v, want %v: the backoff must grow, not reset", r.sleeps, want)
+		}
+	}
+	r.mu.Unlock()
+	if got := r.f.failReasons(); len(got) != 4 {
+		t.Errorf("failed %d lease(s), want 4", len(got))
+	}
+
+	// A completed lease is followed by no wait at all.
+	ok := newRig(t)
+	ok.opts.Sleep = func(ctx context.Context, d time.Duration) error {
+		if d != time.Second { // the heartbeat's own wait
+			ok.mu.Lock()
+			ok.sleeps = append(ok.sleeps, d)
+			ok.mu.Unlock()
+		}
+		return sleep(ctx, 2*time.Millisecond)
+	}
+	ok.f.queue("acquire", jsonReply(200, ok.lease()))
+	ok.run()
+	until(t, "the poll after a completed lease", func() bool { return len(ok.f.seen("acquire")) >= 2 })
+	ok.mu.Lock()
+	defer ok.mu.Unlock()
+	if len(ok.sleeps) != 0 {
+		t.Errorf("the worker waited %v after a lease it completed", ok.sleeps)
+	}
+}
+
+// TestWorker_ALeasedCommandLineOutsideTheServersShapeIsRefusedUnrun: the worker runs what the
+// lease carries, so it holds the lease to the shape the server's leasable plans have. An
+// input, an attachment, an overwrite switch, a second progress channel, a filter script, an
+// end-of-options marker, an absolute path, a path that climbs: each is failed `refused_plan`
+// and never reaches ffmpeg. What the server really emits is run.
+func TestWorker_ALeasedCommandLineOutsideTheServersShapeIsRefusedUnrun(t *testing.T) {
+	real := []string{"-map", "0", "-map", "-0:d?", "-c", "copy", "-c:v", "libx265", "-preset", "slow", "-crf", "22",
+		"-pix_fmt", "yuv420p10le", "-x265-params", "log-level=error:colorprim=bt709", "-vf", "yadif=0:-1:0,scale=-2:720:flags=lanczos",
+		"-color_primaries", "bt709", "-metadata:s:v:0", "title=a/b ../c", "-f", "matroska"}
+	if why := refusedPlan(&node.AcquireResponse{Body: real}); why != "" {
+		t.Fatalf("the server's own command line was refused: %s", why)
+	}
+	for name, tc := range map[string]struct {
+		pre, extra []string
+		want       string
+	}{
+		"options before the input": {[]string{"-f", "lavfi"}, nil, "before the input"},
+		"an input":                 {nil, []string{"-i", "x.mkv"}, "-i"},
+		"an attachment":            {nil, []string{"-attach", "cover.jpg"}, "-attach"},
+		"an attachment dump":       {nil, []string{"-dump_attachment:t", "out"}, "-dump_attachment"},
+		"the overwrite switch":     {nil, []string{"-y"}, "-y"},
+		"a progress channel":       {nil, []string{"-progress", "pipe:1"}, "-progress"},
+		"a filter script":          {nil, []string{"-filter_script:v", "graph.txt"}, "-filter_script"},
+		"a complex filter script":  {nil, []string{"-filter_complex_script", "graph.txt"}, "-filter_complex_script"},
+		"an end of options":        {nil, []string{"--"}, "--"},
+		"an absolute path":         {nil, []string{"-passlogfile", "/etc/cron.d/x"}, "absolute path"},
+		"a climbing path":          {nil, []string{"-passlogfile", "../../etc/x"}, "climbs"},
+		"a bare parent":            {nil, []string{".."}, "climbs"},
+		"a path ending in parent":  {nil, []string{"a/.."}, "climbs"},
+		"a path through a parent":  {nil, []string{"a/../b"}, "climbs"},
+	} {
+		l := &node.AcquireResponse{Pre: tc.pre, Body: append(append([]string(nil), real...), tc.extra...)}
+		if why := refusedPlan(l); !strings.Contains(why, tc.want) {
+			t.Errorf("%s: refusedPlan = %q, want a refusal naming %q", name, why, tc.want)
+		}
+	}
+	if ReasonRefusedPlan != "refused_plan" {
+		t.Errorf("ReasonRefusedPlan = %q", ReasonRefusedPlan)
+	}
+}
+
+// TestWorker_StartSweepsOnlyItsOwnLeftOutputs: a killed worker leaves its output behind.
+// The next start removes it - and only files of its own output naming: the directory may be
+// shared, and nothing else in it is this worker's to remove.
+func TestWorker_StartSweepsOnlyItsOwnLeftOutputs(t *testing.T) {
+	r := newRig(t)
+	if err := os.MkdirAll(filepath.Join(r.work, leaseID+".3.out"+".d"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mine := []string{leaseID + ".1.out", strings.Repeat("a", 32) + ".12345.out"}
+	notMine := []string{"notes.txt", leaseID + ".out", leaseID + ".1.out.bak", "x" + leaseID + ".1.out",
+		strings.Repeat("A", 32) + ".1.out", leaseID[:31] + ".1.out", leaseID + ".one.out", leaseID + "..out", "movie.mkv"}
+	for _, n := range append(append([]string(nil), mine...), notMine...) {
+		if err := os.WriteFile(filepath.Join(r.work, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A directory under its naming is not an output either.
+	dirName := strings.Repeat("b", 32) + ".1.out"
+	if err := os.Mkdir(filepath.Join(r.work, dirName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stop := r.run()
+	until(t, "a poll", func() bool { return len(r.f.seen("acquire")) >= 1 })
+	_ = stop()
+	for _, n := range mine {
+		if _, err := os.Stat(filepath.Join(r.work, n)); err == nil {
+			t.Errorf("a left output survived the start: %s", n)
+		}
+	}
+	for _, n := range append(notMine, dirName) {
+		if _, err := os.Stat(filepath.Join(r.work, n)); err != nil {
+			t.Errorf("the start removed something that is not this worker's output: %s", n)
+		}
+	}
+	if got := outputName(leaseID, 7); got != leaseID+".7.out" || !outputNamed.MatchString(got) {
+		t.Errorf("outputName = %q, which the sweep would not recognise", got)
+	}
+}
+
+// TestWorker_ARedirectIsNeverFollowed: Go's client would carry the Authorization header to a
+// redirect's target and send an upload's body again to wherever a 307 points. The worker
+// follows none: a 3xx to an acquire is not a lease, and a 3xx to an upload is a refusal.
+func TestWorker_ARedirectIsNeverFollowed(t *testing.T) {
+	var elsewhere []call
+	var mu sync.Mutex
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		elsewhere = append(elsewhere, call{method: r.Method, path: r.URL.Path, auth: r.Header.Get("Authorization"), body: body})
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer target.Close()
+	redirect := func(status int) reply { return reply{status: status, location: target.URL + "/elsewhere"} }
+
+	r := newRig(t)
+	r.f.queue("acquire", redirect(307), redirect(302), jsonReply(200, r.lease()))
+	r.f.queue("output", redirect(307), redirect(308))
+	r.run()
+	until(t, "the lease to be failed", func() bool { return len(r.f.failReasons()) >= 1 })
+	if got := r.f.failReasons(); got[0] != ReasonUploadRefused {
+		t.Errorf("an upload answered with a redirect was failed %v, want upload_refused", got)
+	}
+	if n := len(r.f.seen("output")); n != 1 {
+		t.Errorf("%d upload(s), want 1: a redirected upload is not sent again", n)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(elsewhere) != 0 {
+		t.Errorf("the worker followed a redirect and sent %d request(s) elsewhere, the first %s %s with Authorization %q",
+			len(elsewhere), elsewhere[0].method, elsewhere[0].path, elsewhere[0].auth)
+	}
+}
+
+// TestWorker_AServerAddressCarryingMoreThanAnAddressIsRefused: userinfo, a query or a
+// fragment in worker_server refuses to start, naming the key and echoing none of it.
+func TestWorker_AServerAddressCarryingMoreThanAnAddressIsRefused(t *testing.T) {
+	for _, server := range []string{
+		"https://alice:hunter2@holdfast.example.net", "https://alice@holdfast.example.net",
+		"https://holdfast.example.net/?token=hunter2", "https://holdfast.example.net/?",
+		"https://holdfast.example.net/#hunter2", "http://alice:hunter2@127.0.0.1:8080",
+	} {
+		err := CheckServer(server)
+		if err == nil || !strings.Contains(err.Error(), "worker_server") {
+			t.Errorf("CheckServer(%q) = %v, want a refusal naming worker_server", server, err)
+			continue
+		}
+		if strings.Contains(err.Error(), "hunter2") || strings.Contains(err.Error(), "alice") {
+			t.Errorf("the refusal echoes the address: %v", err)
+		}
 	}
 }

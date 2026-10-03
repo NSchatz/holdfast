@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,6 +70,7 @@ const (
 	ReasonEncodeFailed       = "encode_failed"
 	ReasonOutputTooLarge     = "output_too_large"
 	ReasonUploadRefused      = "upload_refused"
+	ReasonRefusedPlan        = "refused_plan"
 	ReasonWorkerStopping     = "worker_stopping"
 )
 
@@ -85,7 +87,12 @@ var ErrVersionMismatch = errors.New("the worker and the server run different hol
 func CheckServer(raw string) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" {
-		return fmt.Errorf("worker_server %q is not an http or https URL", raw)
+		return errors.New("worker_server is not an http or https URL")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+		// Named without echoing it: what sits there may be a credential.
+		return errors.New("worker_server must not carry userinfo, a query or a fragment: the node credential is " +
+			"node_token and nothing else is sent")
 	}
 	switch u.Scheme {
 	case "https":
@@ -99,7 +106,7 @@ func CheckServer(raw string) error {
 			"request. Point worker_server at an https:// address (a reverse proxy in front of the server "+
 			"is enough)", ErrInsecureServer, u.Host)
 	}
-	return fmt.Errorf("worker_server %q is not an http or https URL", raw)
+	return errors.New("worker_server is not an http or https URL")
 }
 
 // EncodeFunc runs one leased encode: ffmpeg over in, writing out, with the lease's options.
@@ -173,6 +180,12 @@ func New(o Options) (*Worker, error) {
 	if o.HTTP == nil {
 		o.HTTP = &http.Client{}
 	}
+	// No redirect is ever followed: Go's client would carry the Authorization header to a
+	// same-host redirect target and re-send an upload's body to wherever a 307 points. A
+	// 3xx is therefore the answer itself, and no answer the protocol has is a 3xx.
+	client := *o.HTTP
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	o.HTTP = &client
 	if o.Log == nil {
 		o.Log = slog.Default()
 	}
@@ -209,6 +222,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	if err := os.MkdirAll(w.o.WorkDir, 0o700); err != nil {
 		return fmt.Errorf("worker_work_dir %s: %w", w.o.WorkDir, err)
 	}
+	w.sweepWorkDir()
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	var wg sync.WaitGroup
@@ -226,6 +240,32 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	wg.Wait()
 	return fatal
+}
+
+// outputName is the name an encode's output is written under in the work directory, and
+// outputNamed recognises exactly that shape: 32 hex characters, a dot, the epoch, `.out`.
+func outputName(leaseID string, epoch int64) string {
+	return leaseID + "." + strconv.FormatInt(epoch, 10) + ".out"
+}
+
+var outputNamed = regexp.MustCompile(`^[0-9a-f]{32}\.[0-9]+\.out$`)
+
+// sweepWorkDir removes the outputs a previous run of this worker left: a killed worker
+// removes nothing on its way out. Only a regular file whose name is this worker's own output
+// naming is touched - the directory may be shared, and nothing else in it is this worker's.
+func (w *Worker) sweepWorkDir() {
+	ents, err := os.ReadDir(w.o.WorkDir)
+	if err != nil {
+		return
+	}
+	for _, ent := range ents {
+		if !ent.Type().IsRegular() || !outputNamed.MatchString(ent.Name()) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(w.o.WorkDir, ent.Name())); err == nil {
+			w.o.Log.Info("worker: removed an output a previous run left", "file", ent.Name())
+		}
+	}
 }
 
 // backoff is the exponential backoff of one slot: min, doubling to max, each wait jittered
@@ -258,9 +298,14 @@ func (w *Worker) slot(ctx context.Context) error {
 			return err
 		}
 		if lease != nil {
-			b.reset()
-			w.runLease(ctx, lease)
-			continue
+			if w.runLease(ctx, lease) {
+				b.reset()
+				continue
+			}
+			// This worker failed the lease itself. Whatever stopped it - a path map, a
+			// mount, an encoder - is very likely still there, so it backs off before it
+			// asks again instead of failing the next file a moment later.
+			wait = b.next(0)
 		}
 		if w.o.Sleep(ctx, wait) != nil {
 			return nil
@@ -403,43 +448,94 @@ func (w *Worker) supports(enc string) bool {
 	return false
 }
 
-// sameSource reports whether the file at path is the size and modification time the lease
-// was granted on.
+// MtimeTolerance is how far a source's modification time on the worker's mount may sit from
+// the one the server leased on. FAT keeps two-second timestamps and SMB and NFS servers round
+// in their own ways, so one file read through two mounts can show two times. This is only
+// the EARLY refusal of an obviously different file: the proof that the node read the server's
+// source is the sha-256 the server compares before its gates.
+const MtimeTolerance = 2 * time.Second
+
+// sameSource reports whether the file at path is the size the lease was granted on, exactly,
+// and its modification time within MtimeTolerance.
 func sameSource(path string, l *node.AcquireResponse) (bool, error) {
 	st, err := os.Stat(path)
 	if err != nil {
 		return false, err
 	}
-	return st.Mode().IsRegular() && st.Size() == l.SourceSize && st.ModTime().UnixNano() == l.SourceMtimeNS, nil
+	drift := time.Duration(st.ModTime().UnixNano() - l.SourceMtimeNS)
+	if drift < 0 {
+		drift = -drift
+	}
+	return st.Mode().IsRegular() && st.Size() == l.SourceSize && drift <= MtimeTolerance, nil
+}
+
+// refusedOptions are the ffmpeg options a leased command line may not carry. The server's
+// own plans never emit one between the input and the output: an input, an attachment read
+// from or dumped to a file, the overwrite switch, a second progress channel and a filter
+// graph read from a file are each a way for a lease to make this worker's ffmpeg read or
+// write something other than the mapped source and its own output.
+var refusedOptions = map[string]bool{
+	"-i": true, "-attach": true, "-dump_attachment": true, "-y": true, "-progress": true,
+	"-filter_script": true, "-filter_complex_script": true, "--": true,
+}
+
+// refusedPlan says why a lease's command line is one this worker will not run, and "" for
+// one it will. A worker holds the node credential's word for what to execute, so it checks
+// the shape the server's leasable plans have and refuses anything outside it, unrun: options
+// before the input (the device arguments no leased plan carries), a refused option, with or
+// without a stream specifier, and any argument that is an absolute path or climbs out of a
+// directory.
+func refusedPlan(l *node.AcquireResponse) string {
+	if len(l.Pre) > 0 {
+		return "it carries options before the input"
+	}
+	for _, a := range l.Body {
+		name, _, _ := strings.Cut(a, ":")
+		switch {
+		case refusedOptions[a] || refusedOptions[name]:
+			return "it carries the option " + name
+		case strings.HasPrefix(a, "/"):
+			return "it carries an absolute path"
+		case a == ".." || strings.HasPrefix(a, "../") || strings.HasSuffix(a, "/..") || strings.Contains(a, "/../"):
+			return "it carries a path that climbs out of its directory"
+		}
+	}
+	return ""
 }
 
 // runLease carries one lease to its end: map and check the source, encode, hash, upload,
-// complete. The local output is removed on every way out.
-func (w *Worker) runLease(ctx context.Context, l *node.AcquireResponse) {
+// complete. The local output is removed on every way out this process lives through. It
+// reports false when this worker failed the lease itself.
+func (w *Worker) runLease(ctx context.Context, l *node.AcquireResponse) (ok bool) {
 	log := w.o.Log.With("lease", l.LeaseID, "epoch", l.Epoch, "path", l.Path)
 	src, err := node.MapSource(w.o.PathMap, l.Path)
 	if err != nil {
 		log.Warn("worker: no worker_path_map entry covers the leased source; it is never guessed at", "err", err)
 		w.fail(l, ReasonUnmappedSource)
-		return
+		return false
+	}
+	if why := refusedPlan(l); why != "" {
+		log.Warn("worker: the leased command line is not one this worker runs", "why", why)
+		w.fail(l, ReasonRefusedPlan)
+		return false
 	}
 	if !w.supports(l.Encoder) {
 		w.fail(l, ReasonUnsupportedEncoder)
-		return
+		return false
 	}
 	same, err := sameSource(src, l)
 	if err != nil {
 		log.Warn("worker: the mapped source could not be read", "mapped", src, "err", err)
 		w.fail(l, ReasonSourceUnreadable)
-		return
+		return false
 	}
 	if !same {
 		log.Warn("worker: the mapped source is not the size and modification time the lease was granted on", "mapped", src)
 		w.fail(l, ReasonSourceMismatch)
-		return
+		return false
 	}
 
-	out := filepath.Join(w.o.WorkDir, l.LeaseID+"."+strconv.FormatInt(l.Epoch, 10)+".out")
+	out := filepath.Join(w.o.WorkDir, outputName(l.LeaseID, l.Epoch))
 	defer func() { _ = os.Remove(out) }()
 
 	// The lease's own context: a 410 from any call cancels it, which stops the encode at once.
@@ -469,14 +565,14 @@ func (w *Worker) runLease(ctx context.Context, l *node.AcquireResponse) {
 	switch {
 	case gone.Load():
 		log.Warn("worker: the lease is gone; the encode was stopped and its output discarded")
-		return
+		return true
 	case ctx.Err() != nil:
 		w.fail(l, ReasonWorkerStopping)
-		return
+		return false
 	case err != nil:
 		log.Warn("worker: the encode failed", "err", err)
 		w.fail(l, ReasonEncodeFailed)
-		return
+		return false
 	}
 	progress.Store(math.Float64bits(1))
 
@@ -491,19 +587,19 @@ func (w *Worker) runLease(ctx context.Context, l *node.AcquireResponse) {
 	if err != nil {
 		log.Warn("worker: the source could not be hashed as leased", "err", err)
 		w.fail(l, ReasonSourceMismatch)
-		return
+		return false
 	}
 	outSum, size, err := hashFile(out)
 	if err != nil {
 		log.Warn("worker: the output could not be read back", "err", err)
 		w.fail(l, ReasonEncodeFailed)
-		return
+		return false
 	}
 	if size < 1 || size > l.MaxOutputBytes {
 		log.Warn("worker: the output is not strictly smaller than the source, so the server would refuse it",
 			"output_bytes", size, "max_output_bytes", l.MaxOutputBytes)
 		w.fail(l, ReasonOutputTooLarge)
-		return
+		return false
 	}
 	digest := node.FormatDigest(outSum)
 	if !w.upload(lctx, l, out, size, digest, &gone) {
@@ -514,12 +610,14 @@ func (w *Worker) runLease(ctx context.Context, l *node.AcquireResponse) {
 			w.fail(l, ReasonWorkerStopping)
 		default:
 			w.fail(l, ReasonUploadRefused)
+			return false
 		}
-		return
+		return true
 	}
 	w.complete(lctx, l, node.CompleteRequest{Epoch: l.Epoch, OutputDigest: digest,
 		SourceDigest: node.FormatDigest(srcSum), OutputBytes: size, EncodeSec: encodeSec}, &gone)
 	log.Info("worker: lease done", "output_bytes", size, "encode_sec", encodeSec)
+	return true
 }
 
 // hashFile is the sha-256 and length of a file, read sequentially.
