@@ -21,8 +21,9 @@ const (
 	plexPathMapKey   = "plex_path_map"
 )
 
-// pathMapKeys are the three path-map keys, in the order Load parses them.
-var pathMapKeys = []string{radarrPathMapKey, sonarrPathMapKey, plexPathMapKey}
+// pathMapKeys are the path-map keys, in the order Load parses them: the three media-server
+// maps and the worker's.
+var pathMapKeys = []string{radarrPathMapKey, sonarrPathMapKey, plexPathMapKey, workerPathMapKey}
 
 // MediaTarget is one media-server target as the configuration states it.
 type MediaTarget struct {
