@@ -914,6 +914,43 @@ hold and the warning to read before enabling an arr target are in
 reference that turns on the Sonarr and Radarr webhook intake, which reads `sonarr_path_map` and
 `radarr_path_map` in reverse ([docs/docker.md](docker.md#telling-holdfast-about-one-file-sonarr--radarr)).
 
+## The worker-node keys
+
+<a id="worker-nodes"></a>
+
+```yaml
+node_token: ""              # a secret reference; unset, worker nodes are off
+node_lease_ttl_sec: 60      # ASSUMED; a node heartbeats every quarter of it
+node_max_leases: 4          # ASSUMED; live leases across every node
+node_max_leases_per_node: 1 # ASSUMED; live leases one node may hold
+node_max_transfers: 2       # ASSUMED; uploads in flight across every node
+node_gate_slots: 1          # ASSUMED; node outputs the server gates at once
+```
+
+Six daemon-wide keys read by `serve`. With `node_token` unset - the default - no lease is granted,
+the endpoints under `/api/node/v1` answer 403, and the other five are not read. `node_token` is a
+credential reference and must be a secret of its own: the same reference as `server_auth_token`,
+`server_read_token` or `webhook_token` refuses to start. `node_lease_ttl_sec` accepts 4 to 86400
+and the four counts 1 to 256; 0 means the default, and anything else refuses naming the key. The
+five defaults are **ASSUMED**: nobody has measured a node deployment.
+
+```yaml
+worker_server: ""     # the server a `holdfast worker` leases from
+worker_name: ""       # this node's name
+worker_slots: 1       # encodes this worker runs at once
+worker_work_dir: ""   # where the worker writes an encode before it uploads it
+worker_path_map: []   # the server's view of the library to this worker's mounts
+```
+
+Five keys a `holdfast worker` reads; `run` and `serve` read none of them. `worker_server` is an
+absolute http or https URL with no userinfo, query or fragment; `worker_name` is 1 to 64 characters
+from letters, digits, `.`, `_` and `-`; `worker_slots` accepts 1 to 256; `worker_work_dir` is an
+absolute path. `worker_path_map` has the form and the rules of the media-server path maps, with no
+environment form, and one difference in how it is used: a source path no entry covers is refused
+rather than passed through. None of the eleven is a profile knob: a library root cannot carry one
+and none moves a profile digest. The rule they serve, and what this build does and does not yet
+have, is in [docs/design/nodes.md](design/nodes.md#leases).
+
 ## Where the working file lives
 
 `scratch_dir` is a separate question - it moves where the encode WORKS, not what it

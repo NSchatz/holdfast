@@ -69,6 +69,9 @@ var knownKeys = map[string]bool{
 	sonarrURLKey: true, sonarrAPIKeyKey: true, sonarrPathMapKey: true,
 	plexURLKey: true, plexTokenKey: true, plexPathMapKey: true,
 	webhookTokenKey: true,
+	nodeTokenKey:    true, nodeLeaseTTLKey: true, nodeMaxLeasesKey: true, nodeMaxLeasesPerNodeKey: true,
+	nodeMaxTransfersKey: true, nodeGateSlotsKey: true,
+	workerServerKey: true, workerNameKey: true, workerSlotsKey: true, workerPathMapKey: true, workerWorkDirKey: true,
 	excludePathsKey: true, includePathsKey: true,
 	audioLanguagesKey: true, subtitleLanguagesKey: true,
 	keepCommentaryKey: true, remuxOnlyKey: true, subtitleSidecarsKey: true, cropKey: true, dolbyVisionP7Key: true,
@@ -159,6 +162,17 @@ func defaultLayer() map[string]any {
 		// The webhook intake is OFF until its credential is written: with no webhook_token
 		// both intake endpoints answer 403 and queue nothing.
 		webhookTokenKey: "",
+		// Worker nodes are OFF until node_token is written (I5): with it unset no lease is
+		// granted and /api/node/v1 answers 403. The five figures are ASSUMED defaults
+		// (docs/design/nodes.md); they are read only once a node credential exists.
+		nodeTokenKey:            "",
+		nodeLeaseTTLKey:         DefaultNodeLeaseTTLSec,
+		nodeMaxLeasesKey:        DefaultNodeMaxLeases,
+		nodeMaxLeasesPerNodeKey: DefaultNodeMaxLeasesPerNode,
+		nodeMaxTransfersKey:     DefaultNodeMaxTransfers,
+		nodeGateSlotsKey:        DefaultNodeGateSlots,
+		// What a `holdfast worker` reads. None of them is read by `run` or `serve`.
+		workerServerKey: "", workerNameKey: "", workerSlotsKey: DefaultWorkerSlots, workerWorkDirKey: "",
 		// Stream selection, every value reproducing what this tool did before the keys
 		// existed: carry every audio and subtitle stream, keep commentary, re-encode the
 		// video. A knob in profileKnobs is seeded from the top-level value of the same
@@ -794,6 +808,37 @@ type Config struct {
 	// and nothing else, and no other credential is accepted on them. A literal here, or in
 	// HOLDFAST_WEBHOOK_TOKEN, is a startup REFUSAL.
 	WebhookToken string `yaml:"webhook_token"`
+
+	// --- worker nodes (docs/design/nodes.md) ---
+
+	// NodeToken is a SECRET REFERENCE (secrets K1) to the one credential the lease
+	// endpoints under /api/node/v1 accept, and the credential a `holdfast worker` presents.
+	// Empty (default) leaves nodes OFF: no lease is granted and the endpoints answer 403. It
+	// can lease a job and upload its output and nothing else, and no other credential is
+	// accepted there. A literal here, or in HOLDFAST_NODE_TOKEN, is a startup REFUSAL.
+	NodeToken string `yaml:"node_token"`
+	// NodeLeaseTTLSec is how long a lease lives without a heartbeat (default 60, ASSUMED);
+	// a node heartbeats every quarter of it.
+	NodeLeaseTTLSec int `yaml:"node_lease_ttl_sec"`
+	// NodeMaxLeases caps the live leases across every node (default 4, ASSUMED), and
+	// NodeMaxLeasesPerNode those one node holds (default 1, ASSUMED).
+	NodeMaxLeases        int `yaml:"node_max_leases"`
+	NodeMaxLeasesPerNode int `yaml:"node_max_leases_per_node"`
+	// NodeMaxTransfers caps the uploads in flight across every node (default 2, ASSUMED).
+	NodeMaxTransfers int `yaml:"node_max_transfers"`
+	// NodeGateSlots is how many node outputs the server gates at once (default 1, ASSUMED).
+	NodeGateSlots int `yaml:"node_gate_slots"`
+
+	// WorkerServer is the address of the server a `holdfast worker` leases from, and
+	// WorkerName the name it gives. WorkerSlots is how many encodes it runs at once
+	// (default 1). WorkerPathMap translates the server's view of the library to this
+	// worker's mounts (see PathMap; written in the file only), and WorkerWorkDir is where
+	// the worker writes an encode before it uploads it.
+	WorkerServer  string  `yaml:"worker_server"`
+	WorkerName    string  `yaml:"worker_name"`
+	WorkerSlots   int     `yaml:"worker_slots"`
+	WorkerPathMap PathMap `yaml:"worker_path_map"`
+	WorkerWorkDir string  `yaml:"worker_work_dir"`
 }
 
 // SecretBearingKeys is the closed list of configuration keys whose value is a credential,
@@ -814,8 +859,12 @@ type Config struct {
 // `webhook_token` is the credential a Sonarr or Radarr Webhook connection presents to the
 // intake endpoints. It is a bearer credential like the two server tokens, and is here for the
 // reason they are.
+//
+// `node_token` is the credential a worker node presents to the lease endpoints, and the one
+// a `holdfast worker` reads to present it. It is a bearer credential too, and a worker runs
+// ffmpeg children of its own.
 var SecretBearingKeys = []string{"server_auth_token", "server_read_token", "notify_url", "tautulli_api_key",
-	radarrAPIKeyKey, sonarrAPIKeyKey, plexTokenKey, webhookTokenKey}
+	radarrAPIKeyKey, sonarrAPIKeyKey, plexTokenKey, webhookTokenKey, nodeTokenKey}
 
 // SecretRefs parses every secret-bearing key into a reference, and is the ONE place
 // that reading happens: Validate calls it so every subcommand refuses a literal at start,
@@ -826,7 +875,7 @@ var SecretBearingKeys = []string{"server_auth_token", "server_read_token", "noti
 // naming the key and how to convert it, with no part of the value in the message.
 func (c *Config) SecretRefs() ([]secret.Ref, error) {
 	raw := []string{c.ServerAuthToken, c.ServerReadToken, c.NotifyURL, c.TautulliAPIKey,
-		c.RadarrAPIKey, c.SonarrAPIKey, c.PlexToken, c.WebhookToken}
+		c.RadarrAPIKey, c.SonarrAPIKey, c.PlexToken, c.WebhookToken, c.NodeToken}
 	refs := make([]secret.Ref, 0, len(SecretBearingKeys))
 	for i, key := range SecretBearingKeys {
 		r, err := secret.ParseRef(key, raw[i])
@@ -1378,7 +1427,7 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
-	// The three path maps, read as the file CARRIED them and before the weakly typed decoder
+	// The path maps, read as the file CARRIED them and before the weakly typed decoder
 	// below could drop a misspelled side: an entry is exactly a from and a to.
 	pathMaps := make(map[string]PathMap, len(pathMapKeys))
 	for _, key := range pathMapKeys {
@@ -1410,6 +1459,7 @@ func Load(path string) (*Config, error) {
 	c.VideoExts = normalizeExts(c.VideoExts)
 	c.Roots = roots
 	c.RadarrPathMap, c.SonarrPathMap, c.PlexPathMap = pathMaps[radarrPathMapKey], pathMaps[sonarrPathMapKey], pathMaps[plexPathMapKey]
+	c.WorkerPathMap = pathMaps[workerPathMapKey]
 
 	if err := checkX265CPUs(c.X265CPUs); err != nil {
 		return nil, fmt.Errorf("%w, in %s", err, path)
@@ -1824,6 +1874,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateWebhookToken(); err != nil {
+		return err
+	}
+	if err := c.validateNodes(); err != nil {
 		return err
 	}
 

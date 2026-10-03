@@ -1075,15 +1075,53 @@ dry_run: false
 #                              #   The arr's paths are mapped back through sonarr_path_map
 #                              #   and radarr_path_map above, read in reverse.
 
-# --- THE EIGHT SECRET KEYS (secrets K1) ---------------------------------------
+# --- WORKER NODES (docs/design/nodes.md) -----------------------------------------
+# OFF by default: with no node_token the server leases nothing and every endpoint under
+# /api/node/v1 answers 403. A node only ENCODES: the server names the working file, takes
+# the node's output as a candidate, and re-runs every gate and the rename itself. In this
+# build only mapped mode exists (the node reads the source through its own mount), and the
+# `holdfast worker` command lands in a following change.
+#
+# node_token: ""               # A SECRET REFERENCE to the nodes' own credential:
+#                              #     node_token: file:/run/secrets/holdfast-node-token
+#                              #   It can lease a job and upload its output and NOTHING
+#                              #   else, and no other token is accepted on those
+#                              #   endpoints: it must be a secret of its own (the same
+#                              #   reference as server_auth_token, server_read_token or
+#                              #   webhook_token refuses to start). A worker reads the
+#                              #   same key to present it.
+#
+# The server's side. Every default below is ASSUMED - nobody has measured a node
+# deployment - and each is read only once node_token is set. 0 means the default.
+# node_lease_ttl_sec: 60       # A lease lives this long without a heartbeat (4-86400); a
+#                              #   node heartbeats every quarter of it.
+# node_max_leases: 4           # Live leases across every node (1-256).
+# node_max_leases_per_node: 1  # Live leases one node may hold (1-256).
+# node_max_transfers: 2        # Uploads in flight across every node (1-256).
+# node_gate_slots: 1           # Node outputs the server gates at once (1-256).
+#
+# The worker's side, read by `holdfast worker` only.
+# worker_server: ""            # The server's address, e.g. https://holdfast.example.test
+# worker_name: ""              # This node's name: letters, digits, '.', '_', '-'; 64 at most.
+# worker_slots: 1              # Encodes this worker runs at once (1-256).
+# worker_work_dir: ""          # An absolute directory the worker writes an encode into
+#                              #   before it uploads it.
+# worker_path_map: []          # The server's view of the library to this worker's mounts:
+#                              #     worker_path_map:
+#                              #       - {from: /media, to: /mnt/library}
+#                              #   A source no entry covers is REFUSED, never read at its
+#                              #   unmapped name; a worker with the server's own paths maps
+#                              #   the directory to itself. No HOLDFAST_* form.
+
+# --- THE NINE SECRET KEYS (secrets K1) ----------------------------------------
 # server_auth_token, server_read_token, notify_url, tautulli_api_key, radarr_api_key,
-# sonarr_api_key, plex_token and webhook_token carry a REFERENCE
+# sonarr_api_key, plex_token, webhook_token and node_token carry a REFERENCE
 # to a credential, never a credential. Two forms, and deliberately no third:
 #
 #   file:/run/secrets/holdfast-token     the file's CONTENTS are the value
 #   cmd:/usr/local/bin/fetch-my-secret   the command's STDOUT is the value
 #
-# A LITERAL credential in any of those eight keys - in this file OR in the matching
+# A LITERAL credential in any of those nine keys - in this file OR in the matching
 # HOLDFAST_* environment variable - REFUSES TO START, naming the key and how to convert
 # it. That is deliberate, and the reason is the encoder: holdfast starts ffmpeg and
 # ffprobe as child processes, and a child inherits its parent's environment, so a

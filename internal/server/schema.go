@@ -42,6 +42,7 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/health"
+	"github.com/NSchatz/holdfast/internal/node"
 	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/version"
 )
@@ -320,7 +321,8 @@ func describedKey(declared map[string][]Response, method, path string) (string, 
 // 401 and 403 are the token gates' own answers and belong to every endpoint behind one:
 // requireReadToken answers 401 on the reads while a read token is configured, and
 // requireToken answers 403 with control disabled and 401 on a wrong credential, and
-// requireWebhookToken answers the same two on the webhook intake.
+// requireWebhookToken answers the same two on the webhook intake, as requireNodeToken does
+// on the worker-node lease endpoints.
 func declaredResponses() (map[string][]Response, error) {
 	var firstErr error
 	body := func(v any) Shape {
@@ -444,6 +446,37 @@ func declaredResponses() (map[string][]Response, error) {
 			}
 		}
 	}
+	// The worker-node lease endpoints (internal/node). Every refusal past the node gate is
+	// one typed JSON body; the gate's own two answers are text, as every gate's are.
+	nodeRefusal := func(statuses ...int) []Response {
+		out := []Response{text(http.StatusUnauthorized), text(http.StatusForbidden)}
+		for _, st := range statuses {
+			out = append(out, jsonOK(st, node.ErrorResponse{}))
+		}
+		return out
+	}
+	declared["POST "+NodePathPrefix+node.RouteLeases] = append([]Response{
+		jsonOK(http.StatusOK, node.AcquireResponse{}),
+		// No work arrived inside the long-poll: no body, and a Retry-After.
+		{Status: http.StatusNoContent, MediaType: "", Body: Shape{Kind: kindEmpty}},
+	}, nodeRefusal(http.StatusBadRequest, http.StatusConflict, http.StatusServiceUnavailable)...)
+	declared["POST "+NodePathPrefix+node.RouteHeartbeat] = append([]Response{
+		jsonOK(http.StatusOK, node.HeartbeatResponse{}),
+	}, nodeRefusal(http.StatusBadRequest, http.StatusNotFound, http.StatusGone,
+		http.StatusInternalServerError, http.StatusServiceUnavailable)...)
+	declared["PUT "+NodePathPrefix+node.RouteOutput] = append([]Response{
+		jsonOK(http.StatusOK, node.UploadResponse{}),
+	}, nodeRefusal(http.StatusBadRequest, http.StatusNotFound, http.StatusRequestTimeout,
+		http.StatusConflict, http.StatusGone, http.StatusLengthRequired,
+		http.StatusRequestEntityTooLarge, http.StatusInternalServerError, http.StatusServiceUnavailable)...)
+	declared["POST "+NodePathPrefix+node.RouteComplete] = append([]Response{
+		jsonOK(http.StatusOK, node.CompleteResponse{}),
+	}, nodeRefusal(http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusGone,
+		http.StatusInternalServerError, http.StatusServiceUnavailable)...)
+	declared["POST "+NodePathPrefix+node.RouteFail] = append([]Response{
+		jsonOK(http.StatusOK, node.FailResponse{}),
+	}, nodeRefusal(http.StatusBadRequest, http.StatusNotFound, http.StatusGone,
+		http.StatusInternalServerError, http.StatusServiceUnavailable)...)
 	if firstErr != nil {
 		return nil, firstErr
 	}

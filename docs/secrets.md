@@ -1,12 +1,12 @@
 # Secrets: a credential is reached by reference
 
-holdfast reads eight credential-bearing configuration keys, and none of them holds a
+holdfast reads nine credential-bearing configuration keys, and none of them holds a
 credential. Each holds a **reference** - the name of a secret and the kind of place it
 lives - and the value is resolved at the point of use. That is the whole design, and it
 exists because a secret an agent or an operator *read* is a secret in a transcript,
 whether or not it ever reached a file.
 
-The eight keys:
+The nine keys:
 
 | key | what the credential is | what happens when it is absent |
 |---|---|---|
@@ -18,6 +18,7 @@ The eight keys:
 | `sonarr_api_key` | the Sonarr API key, sent in the `X-Api-Key` header | Sonarr is not asked to rescan after a swap |
 | `plex_token` | a Plex **admin** token, sent in the `X-Plex-Token` header | Plex is not asked for a partial scan after a swap, and no file is held for being played |
 | `webhook_token` | the credential a Sonarr or Radarr `Connect > Webhook` connection presents to `/api/webhook/sonarr` and `/api/webhook/radarr`, as a bearer token or as the password of HTTP Basic authentication | both intake endpoints answer 403 and queue nothing |
+| `node_token` | the bearer token a worker node presents to the lease endpoints under `/api/node/v1`, and the one a `holdfast worker` reads to present it | worker nodes are off: no lease is granted and those endpoints answer 403 |
 
 `tautulli_url`, `radarr_url`, `sonarr_url`, `plex_url` and `server_addr` are addresses, not
 credentials. The three media-server addresses accept a scheme, a host and an optional base path
@@ -33,6 +34,12 @@ token are not accepted on those endpoints, a `webhook_token` written as the same
 `server_auth_token` or `server_read_token` refuses to start, and `serve` refuses one that resolves
 to the same value as either. It is never read from a URL
 ([docs/api-reference.md](api-reference.md#webhook-intake)).
+
+`node_token` is the other credential holdfast receives. It opens the lease endpoints and nothing
+else, no other token is accepted on them, a `node_token` written as the same reference as
+`server_auth_token`, `server_read_token` or `webhook_token` refuses to start, and `serve` refuses
+one that resolves to the same value as any of them
+([docs/design/nodes.md](design/nodes.md#leases)).
 
 ## The reference forms
 
@@ -112,7 +119,7 @@ At **start**, before the library is walked and before a single frame is encoded:
 `holdfast validate` performs step 1 and not step 2: proving that a reference *resolves*
 means reaching into a secret store, which belongs to a run rather than to a configuration
 check. `run` and `serve` both do both - `run` consumes only the three media-server
-credentials itself, and still resolves all eight, because a configuration error an operator
+credentials itself, and still resolves all nine, because a configuration error an operator
 finds after a four-hour pass was reported too late.
 
 An **unresolvable reference is a configuration error and is not an outage**. A Tautulli

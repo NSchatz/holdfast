@@ -1306,7 +1306,7 @@ func atShippedVersion(t *testing.T, path string, version int) {
 	}
 	// A fixture below this build's version must be recognisably an OLDER database rather
 	// than this one wearing an older number, and what says so is the shape the NEWEST step
-	// adds. That shape is a whole TABLE again (the health sweep's), so the question is
+	// adds. That shape is a whole TABLE again (the node leases'), so the question is
 	// asked of sqlite_master.
 	if version < len(migrations) && hasTable(t, db, newestStepTable) {
 		t.Fatalf("a v%d fixture already carries the %s table, which the newest step creates - it is not an older database",
@@ -1325,7 +1325,7 @@ func atShippedVersion(t *testing.T, path string, version int) {
 // migrations slice: a step appended after this one moves it, along with the wind-back
 // fixtures. Where that step adds a column instead, this becomes a column name and the two
 // readers ask pragma_table_info rather than sqlite_master.
-const newestStepTable = "health_sweeps"
+const newestStepTable = "node_leases"
 
 // stampedFromVersion is the step that added the per-record version stamp. It is looked up
 // in the history rather than written out, so appending a step cannot move it by accident.

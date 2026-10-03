@@ -26,13 +26,16 @@ per-field reference `README.md` points at rather than restates.
 | `POST /api/exclusions` | control | withhold one path. It only ever takes a file OUT; nothing here writes `config.yaml` |
 | `DELETE /api/exclusions` | control | stop withholding one path, after which it is eligible again on the next scan |
 | `POST /api/webhook/sonarr`, `POST /api/webhook/radarr` (each also `PUT`) | webhook | the native intake for a Sonarr or Radarr `Connect > Webhook` connection: an import, an upgrade or a rename queues the file through the same targeted scan `POST /api/scan` feeds - see *The webhook intake* below |
+| `POST /api/node/v1/leases`, `POST /api/node/v1/leases/{id}/heartbeat`, `PUT /api/node/v1/leases/{id}/output`, `POST /api/node/v1/leases/{id}/complete`, `POST /api/node/v1/leases/{id}/fail` | node | the worker-node lease protocol: a node leases one job's encode, heartbeats, uploads the output and reports completion or failure - see *The node lease endpoints* below |
 
 **read** = required only while `server_read_token` is set, which it is not by default;
 **control** = always required, and the endpoint answers 403 until `server_auth_token` is
 configured. The control token is accepted on a read; a read token is never accepted for a
 mutation. **webhook** = always required, and the endpoint answers 403 until `webhook_token`
 is configured. The webhook token opens the two intake endpoints and nothing else, and
-neither the control token nor the read token is accepted on them.
+neither the control token nor the read token is accepted on them. **node** = always required,
+and the endpoint answers 403 until `node_token` is configured. The node token opens the five
+lease endpoints and nothing else, and no other token is accepted on them.
 
 ### `GET /api/schema` - the surface describing itself
 
@@ -323,6 +326,36 @@ submission naming either of them is refused - even in a deployment running with
 **On shutdown**, work already in flight is finished before the job store is closed, and
 submissions still waiting in the queue are discarded - unprocessed, and with no ledger row,
 because nothing looked at those files and a row would be a record of a decision nobody took.
+
+### The node lease endpoints - `/api/node/v1`
+
+<a id="node-leases"></a>
+
+The worker-node lease protocol. A node only encodes: an upload lands in a working file the server
+named and is a candidate for the server's own gates, never more. The rule and its reasons are in
+[docs/design/nodes.md](design/nodes.md#leases). In this build only **mapped mode** exists (the
+node reads the source through its own mount), and until the engine's hand-off is wired a server
+with `node_token` set answers these endpoints 503.
+
+**Authentication.** `Authorization: Bearer <token>` with the value `node_token` points at, and
+nothing else: no Basic form, nothing from the URL. With no `node_token` configured all five answer
+**403** naming the key; a missing or wrong credential - the control, read and webhook tokens
+included - is **401**. Every refusal past the credential check is JSON,
+`{"error": "<typed reason>", "detail": "..."}`.
+
+| endpoint | request | answers |
+|---|---|---|
+| `POST /leases` | `{"node", "version", "slots", "mode": "mapped", "encoders": [...]}` | **200** one lease: `lease_id`, `epoch`, `ttl_sec`, `heartbeat_sec`, `mode`, `path`, `source_size`, `source_mtime_ns`, `encoder`, `pre`, `body`, `max_output_bytes`. **204** with `Retry-After`: no work arrived inside the long-poll. **400** `bad_request`, or `unsupported_mode` for any mode but `mapped`. **409** `version_mismatch`, with `server_version` and `worker_version`. **503** with `Retry-After`: `not_ready`, `node_cap`, `global_cap`, `no_room`, `refused`, `draining` |
+| `POST /leases/{id}/heartbeat` | `{"epoch", "progress"}` (progress 0 to 1) | **200** `{"ttl_sec"}`. **410** `lease_gone` |
+| `PUT /leases/{id}/output` | the output as the body, with `Content-Length`, `Content-Digest: sha-256=:<base64>:` and `Holdfast-Lease-Epoch` | **200** `{"state", "output_bytes", "output_digest"}`, also for a repeat of the accepted upload, which rewrites nothing. **400** `digest_mismatch` (the working file is deleted; the upload may be sent again, and the third mismatch fails the lease), `bad_digest`, `short_body`, `bad_request`. **408** `upload_stalled`. **409** `digest_conflict` (a different output after acceptance), `upload_in_progress`. **410** `lease_gone`. **411** `length_required`. **413** `too_large` (past `max_output_bytes`, one byte under the source). **503** with `Retry-After`: `transfers_full`, `no_room`, `not_ready` |
+| `POST /leases/{id}/complete` | `{"epoch", "output_digest", "source_digest", "output_bytes", "encode_sec"}` | **200** `{"state", "output_bytes", "output_digest", "source_digest"}`, idempotent on a repeat. **409** `not_uploaded`, `digest_conflict`. **410** `lease_gone` |
+| `POST /leases/{id}/fail` | `{"epoch", "reason"}` (1 to 64 characters from a-z, 0-9 and `_`) | **200** `{"state", "reason"}`, idempotent on a repeat. **410** `lease_gone` |
+
+Every call on one lease also answers **404** `unknown_lease` for an id no lease carries, **500**
+`internal` when the ledger could not record it, and **503** `not_ready` until the server has
+recovered its leases after a start. An upload or a completion on a lease the server is not
+waiting on is **503** `not_ready` too. Every **410** carries `Cache-Control: no-store`. No endpoint
+here restores, requeues, resolves or re-opens anything.
 
 ### The webhook intake - `POST /api/webhook/sonarr` and `POST /api/webhook/radarr`
 

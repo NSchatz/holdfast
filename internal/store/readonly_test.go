@@ -75,8 +75,8 @@ func windBackOneSchemaVersion(t *testing.T, path string) int {
 		t.Fatalf("raw open %s: %v", path, err)
 	}
 	defer func() { _ = db.Close() }()
-	// Exactly what the NEWEST migration added, undone. That is the health sweep's two
-	// tables and not any step before it: this helper has to track the END of the migrations slice,
+	// Exactly what the NEWEST migration added, undone. That is the node lease
+	// table and not any step before it: this helper has to track the END of the migrations slice,
 	// because the whole point of it is to produce the database the PREVIOUS build wrote, and
 	// a wind-back that undid a step which is no longer the last one leaves a database still
 	// missing a column Open will never re-add - which is a shape no build ever wrote, not an
@@ -84,9 +84,9 @@ func windBackOneSchemaVersion(t *testing.T, path string) int {
 	//
 	// Any index goes first, mirroring the create order backwards.
 	for _, stmt := range []string{
-		`DROP INDEX IF EXISTS idx_health_checks_result`,
-		`DROP TABLE IF EXISTS health_checks`,
-		`DROP TABLE IF EXISTS health_sweeps`,
+		`DROP INDEX IF EXISTS idx_node_leases_ended`,
+		`DROP INDEX IF EXISTS idx_node_leases_state`,
+		`DROP TABLE IF EXISTS node_leases`,
 		fmt.Sprintf(`PRAGMA user_version = %d`, prev),
 	} {
 		if _, err := db.Exec(stmt); err != nil {
