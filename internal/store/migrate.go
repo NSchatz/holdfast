@@ -676,6 +676,60 @@ CREATE TABLE IF NOT EXISTS health_checks (
 CREATE INDEX IF NOT EXISTS idx_health_checks_result ON health_checks(sweep_id, result);
 `,
 	},
+	{
+		// v25 - the worker-node leases (docs/design/nodes.md#leases): one row per GRANT of
+		// one job's encode to one node.
+		//
+		// A TABLE OF ITS OWN and no column on jobs, for the reason the health sweep's are:
+		// a jobs row is rewritten by Claim, while a lease is the record a restarted server
+		// reads to tell a live node's work from a stale one's, and its terminal rows are the
+		// epoch history a later grant of the same path counts up from.
+		//
+		// epoch is the fencing token. It is unique per path, so two grants of one path can
+		// never carry the same figure whatever raced. expires_at is the server's clock in
+		// unix seconds, and nothing a node sends moves it except through a renewal the
+		// server itself timed. temp_path is the working file the SERVER named for this
+		// grant; an upload is written there and nowhere else.
+		//
+		// The three recorded figures (output_digest, output_bytes, source_digest) and
+		// ended_at are NULL until the event that records them: a lease nothing was uploaded
+		// on has no output digest, and an empty string or a zero there would say it had one.
+		//
+		// The first index serves the read every grant and every restart makes (the leases
+		// still granted or uploaded); the second the bounded prune of terminal rows.
+		name: "node leases",
+		// One empty table and two indexes. A lease is granted by the daemon, never by a
+		// migration.
+		rows: noRowChange,
+		sql: `
+CREATE TABLE IF NOT EXISTS node_leases (
+	id              TEXT PRIMARY KEY,
+	path            TEXT NOT NULL,
+	job_key         TEXT NOT NULL,
+	node            TEXT NOT NULL,
+	epoch           INTEGER NOT NULL,
+	state           TEXT NOT NULL,
+	expires_at      INTEGER NOT NULL,
+	temp_path       TEXT NOT NULL,
+	reserved_bytes  INTEGER NOT NULL,
+	args_digest     TEXT NOT NULL,
+	source_size     INTEGER NOT NULL,
+	source_mtime_ns INTEGER NOT NULL,
+	output_digest   TEXT,
+	output_bytes    INTEGER,
+	source_digest   TEXT,
+	upload_attempts INTEGER NOT NULL,
+	reason          TEXT NOT NULL,
+	granted_at      INTEGER NOT NULL,
+	updated_at      INTEGER NOT NULL,
+	ended_at        INTEGER,
+	schema_version  INTEGER,
+	UNIQUE (path, epoch)
+);
+CREATE INDEX IF NOT EXISTS idx_node_leases_state ON node_leases(state);
+CREATE INDEX IF NOT EXISTS idx_node_leases_ended ON node_leases(ended_at);
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

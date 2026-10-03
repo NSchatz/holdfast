@@ -663,12 +663,12 @@ func bumpSchemaVersion(t *testing.T, dbPath string, version int) {
 
 // olderSchemaVersion is the schema this repository shipped immediately before the NEWEST
 // migration appended its own step: the shape a database written by the previous holdfast
-// has. That newest step is now the health sweep's two tables, so the version below
+// has. That newest step is now the node lease table, so the version below
 // and the objects seedOlderLedger removes both moved with it. It is a literal because
 // cmd/holdfast cannot see the store's unexported version counter - and
 // TestExport_TheDaemonsDoorIsWhatMigratesAndThatIsWhyTheExportDoesNotUseIt keeps the literal
 // honest by asserting store.Open really does move a fixture built from it.
-const olderSchemaVersion = 23
+const olderSchemaVersion = 24
 
 // seedOlderLedger builds a real ledger with rows and then removes exactly what the NEWEST
 // migration added, restoring the previous version stamp. Not a current database wearing an
@@ -696,9 +696,9 @@ func seedOlderLedger(t *testing.T, stateDir string) {
 	defer func() { _ = db.Close() }()
 	// Any index goes first, mirroring the create order backwards.
 	for _, stmt := range []string{
-		`DROP INDEX IF EXISTS idx_health_checks_result`,
-		`DROP TABLE IF EXISTS health_checks`,
-		`DROP TABLE IF EXISTS health_sweeps`,
+		`DROP INDEX IF EXISTS idx_node_leases_ended`,
+		`DROP INDEX IF EXISTS idx_node_leases_state`,
+		`DROP TABLE IF EXISTS node_leases`,
 		fmt.Sprintf(`PRAGMA user_version = %d`, olderSchemaVersion),
 	} {
 		if _, err := db.Exec(stmt); err != nil {
