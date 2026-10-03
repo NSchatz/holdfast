@@ -75,20 +75,20 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g12-b
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | `GET /api/node/v1/leases/{id}/source` on a live lease at its epoch; the server hashes what it streams; `worker_mode: http` downloads, checks and encodes with no mount | TODO |
-| 3.2 | The source digest checked both ways, the output digest as in goal 11; fixtures for an error page offered as the source, a short source and a source changed in transit | TODO |
-| 3.3 | End to end on loopback in http mode with a real tiny encode (line C) | TODO |
-| 3.4 | Built-in TLS: `server_tls_cert`, `server_tls_key` by reference in `config.SecretBearingKeys`; `worker_tls_ca`; the worker refuses plain `http://` to a non-loopback server unless `worker_insecure_http: true`, logged at every start (line D) | TODO |
-| 3.5 | `make api-schema-diff`: additions only | TODO |
-| 3.6 | Adversarial review of the branch before its gate | TODO |
+| 3.1 | `GET /api/node/v1/leases/{id}/source` on a live lease at its epoch; the server hashes what it streams; `worker_mode: http` downloads, checks and encodes with no mount | DONE (PR #159, `f48d4e0`): `internal/node/source.go`, `internal/nodeworker/source.go`; `TestNodeFixture_AnHTTPModeLeaseIsGrantedInHTTPModeAndItsSourceIsStreamedAndHashed`, `TestWorker_HTTPMode_DownloadsTheSourceEncodesItAndReportsTheDigestOfWhatArrived`; gate exit 0 in 2542 s on `b957e1d` (`internal/engine` 2373.4 s, 65.9% of `TEST_TIMEOUT`; `cmd/holdfast` 985.2 s; `internal/node` 6.0 s; `internal/nodeworker` 2.8 s); CI green (`build`, `package`, `mutation`); mutation-diff 100.00% against the 70% floor (killed 118, lived 0); 0 fix rounds |
+| 3.2 | The source digest checked both ways, the output digest as in goal 11; fixtures for an error page offered as the source, a short source and a source changed in transit | DONE (PR #159): `TestNodeLease_ACompletionIsHeldToWhatTheServerStreamed`, `TestNodeFixture_ASourceChangedInTransitFailsTheLeaseBeforeAnyGate`, `TestWorkerFixture_HTTPMode_AnAnswerThatIsNotTheSourceIsNeverEncoded` (12 cases: the 55-byte `404`, short, long, wrong length), `TestNodeFixture_ASourceRequestOnALeaseThatIsNotLiveIs410NoStore`, `TestNodeFixture_AMappedLeasesSourceIsRefused`, `TestNodeFixture_ARangedSourceRequestRecordsNoStreamedDigest`, `TestWorkerFixture_HTTPMode_ARangedDownloadIsStillProvenByTheServersOwnHash`, `TestNodeFixture_SourceStreamsAndUploadsShareTheTransferCap`, `TestNodeFixture_AStalledSourceDownloadIsCutByTheWriteDeadline` |
+| 3.3 | End to end on loopback in http mode with a real tiny encode (line C) | DONE (PR #159): `TestWorkerEndToEnd_HTTPModeNoMountSourceAndOutputDigestsCheckedBothWaysServerRegatesAndRenames` in `cmd/holdfast` (the real `serve` and `worker`; the worker has no mount; the lease row's source and output digests are the true sha-256 figures; the server ran no encode and its rename moved the working file's inode). Removing either transport comparison turns it red by a named assertion (the builder's mutations, D8) |
+| 3.4 | Built-in TLS: `server_tls_cert`, `server_tls_key` by reference in `config.SecretBearingKeys`; `worker_tls_ca`; the worker refuses plain `http://` to a non-loopback server unless `worker_insecure_http: true`, logged at every start (line D) | DONE (PR #159): `cmd/holdfast/tls.go`; `TestWorkerEndToEnd_TLS_ServeWithItsOwnCertificateAndAWorkerThatTrustsIt`, `TestServeTLS_APairThatCannotBeListenedWithRefusesToStart`, `TestWorker_TLS_AServerWhoseCertificateIsNotTrustedReceivesNoRequest`, `TestSecretKeys_ServerTLSKeyIsSecretBearingAndRefusesALiteral`, `TestServerTLS_BothOrNeither`, `TestWorker_RefusesPlainHTTPToANonLoopbackServer` (goal 11's, unchanged), `TestWorker_InsecureHTTPIsAnOverrideSaidLoudlyAtEveryStart`, `TestWorker_TransportAndModeRefusalsAndTheInsecureOverride` |
+| 3.5 | `make api-schema-diff`: additions only | DONE (PR #159): 20 additions, 0 breaks; `.api-schema-breaks.yaml` still `[]` |
+| 3.6 | Adversarial review of the branch before its gate | DONE (PR #159, `7ae9c7e`): no HIGH, 1 MED, 5 LOW, all fixed with a fixture each (D9) |
 
 ## Phase 4 - The documents (track `holdfast-g12/docs`)
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | The distributed statement rewritten in `README.md` and `docs/migration.md` | TODO |
-| 4.2 | `docs/design/nodes.md`: the transport rule with anchors and the warnings of P4 rule 10; its `CLAUDE.md` line | TODO |
-| 4.3 | `docs/docker.md`: a worker deployment (both modes, TLS or a reverse proxy, the read token, the read-only mount) | TODO |
+| 4.1 | The distributed statement rewritten in `README.md` and `docs/migration.md` | DOING |
+| 4.2 | `docs/design/nodes.md`: the transport rule with anchors and the warnings of P4 rule 10; its `CLAUDE.md` line | DONE (PR #159, `f48d4e0`): `docs/design/nodes.md#transport` and `#http-mode`; `CLAUDE.md` line 71 (199 lines) |
+| 4.3 | `docs/docker.md`: a worker deployment (both modes, TLS or a reverse proxy, the read token, the read-only mount) | DOING |
 | 4.4 | The owner's queue: a run against a real second host (goal 11's D19) | TODO |
 
 ## Phase 5 - Report
@@ -126,16 +126,63 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g12-b
 - D6 (2026-10-03): PR #156 (`speed/gate`) and the dependency PRs #108 to #110 are not this
   goal's and were open at its start; this goal touches none of their branches (§0.13).
 
+- D7 (2026-10-03): PR #159's own decisions, in its body and `docs/design/nodes.md`: no schema
+  change - a lease's mode and streamed digest live in the hub's memory, so after a restart a
+  recovered lease's source is refused rather than served on a guess (the job is then proven by the
+  server's own hash, or the server encodes it); the comparison with the streamed digest is taken
+  at `complete`, inside the lease's transaction; the source is served only while the lease is
+  `granted`; only a `200` is media for the worker, never a `206` (a departure from the letter of
+  P4 rule 6, which also names `206`, following D4: the worker sends no `Range`); the
+  `Repr-Digest` trailer goes out only where the protocol carries one and is never load-bearing;
+  new lease endings that charge the file nothing: `source_download_failed`, `work_dir_full`,
+  `source_withdrawn`; `ASSUMED` values: 3 download attempts, a 60 s idle cut on the worker, the
+  source write deadline of 30 s plus 1 s per 64 KiB (the upload's figures); `holdfast validate`
+  accepts an http worker's file with no `library_roots` and runs the worker's own start refusals
+  on it.
+- D8 (2026-10-03): line C's proof that both comparisons bite is the builder's, on the branch
+  before the review: with the streamed comparison removed the test fails "the server did not
+  compare the node's source digest with the digest of what it streamed"; with the upload's
+  `Content-Digest` comparison removed, "the server did not hold the upload to its Content-Digest";
+  the engine's own-hash comparison is held by
+  `TestWorkerFixture_HTTPMode_ARangedDownloadIsStillProvenByTheServersOwnHash`. The report's
+  reviewer repeats them.
+- D9 (2026-10-03): the branch review's findings, all fixed in `7ae9c7e`. MED: a `503` for a full
+  transfer cap counted as a download attempt, so good http leases failed and good nodes cooled
+  off at the shipped caps; a `503` is now waited out. LOW: a link swapped in at the leased path
+  was followed (now opened with `O_NOFOLLOW`; the engine already skips linked sources);
+  conditional request headers drew undeclared `304` and `412` (now ignored); a source the server
+  withdrew cooled the node off (now `source_withdrawn`, which does not); the room check was per
+  lease (now reserved per worker, and a full disk while writing is `work_dir_full`); `validate`
+  passed a file `worker` refuses (both now run `workerPreflight`).
+- D10 (2026-10-03): the 15 `*_test.go` lines PR #159 removed against the goal-start tree, each
+  replaced: six in `internal/node/scenarios_test.go` (two pipe writes now go through a helper
+  that fails by name instead of blocking, goal 11's D21); five where
+  `TestNodeFixture_HTTPModeIsRefusedNamingMappedMode` became
+  `TestNodeFixture_AnUnknownModeIsRefusedNamingBothModes` (http is served now; `"HTTP"`, `""` and
+  an unknown word are still refused); four in `internal/server/node_token_test.go` (the lease
+  routes are six, not five). No assertion is weaker.
+- D11 (2026-10-03): of goal 11's D21, one fixture is fixed
+  (`TestNodeFixture_UploadOnAnExpiredLeaseIs410AndLeavesNoFile` now reds by named assertion); the
+  two in `internal/engine/nodes_test.go` are unchanged and stay recorded there.
+
 ## Proposals awaiting the owner
 
 Carried from goal 11, unchanged: hardware encoders on a node; which lease endings count against a
 file's `max_failures`; the park at the retry bound; no maximum lease lifetime; files queued
 outside a pass are encoded by the server.
 
+New in this goal:
+
+- No server key forbids http mode (D3): any holder of `node_token` can read the source of a job
+  leased to it. A key that keeps a server mapped-only would be an addition.
+- The worker takes only a `200` as the source, never a `206` (D7), where P4 rule 6 names both.
+- A lease's mode is not durable (D7): a server restart mid-download costs that node the
+  download, never the file a failure.
+
 ## Resume here
 
-The baseline gate passed. The documents track is committed locally (`d0bfced` on
-`holdfast-g12/docs`, worktree `/cache/wt/holdfast/g12-docs`, not pushed) and waits to be checked
-against the transport code; the transport agent is building in
-`/cache/wt/holdfast/g12-transport`. Next: review the transport branch (fresh adversarial agent),
-push, PR, gate, CI, merge; then the documents PR.
+PR #159 (transport) is merged at `f48d4e0`. PR #160 (`holdfast-g12/docs`, worktree
+`/cache/wt/holdfast/g12-docs`, head `add09f4`) is open; its local gate writes
+`/cache/tmp/holdfast-g12/gate-docs-1.log`. Next: paste the gate tail into #160, wait for CI,
+merge; file the owner's queue item for a run against a real second host; gate integrity; the
+adversarial review of the report; `goals check`; the COMPLETE line.
