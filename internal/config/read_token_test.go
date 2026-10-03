@@ -5,14 +5,20 @@ import (
 	"testing"
 )
 
-// readTokenNotices returns the notices this configuration emits that are ABOUT the read
-// surface, which is every notice naming server_read_token. Notices() also carries the
-// undo-window line and whatever else the configuration happens to mean, so a test that
-// counted the whole list would be asserting about the other notices too - and "exactly
-// one" is a claim this spec makes about THIS notice, not about the list's length.
+// readTokenNotices returns the statements this configuration makes ABOUT the read surface
+// to the process that serves it: ReadSurfaceNotices in the serving scope, narrowed to the
+// ones naming server_read_token. The filter is kept although that list holds nothing else
+// today, because "exactly one" is a claim about THIS statement and must stay one if the
+// list ever grows.
+//
+// It read Notices() until S0175 moved the two statements out of the list every command
+// logs: a oneshot `run` binds no listener, so it has no read surface to describe. The three
+// directions below are graded on the serving scope, which is where each is a fact; the
+// scoping itself is graded by TestNotices_CarryNoReadSurfaceStatement and
+// TestReadSurfaceNotices_ValidatingScopeIsHedged.
 func readTokenNotices(c *Config) []string {
 	var out []string
-	for _, n := range c.Notices() {
+	for _, n := range c.ReadSurfaceNotices(ReadSurfaceServing) {
 		if strings.Contains(n, "server_read_token") {
 			out = append(out, n)
 		}
@@ -47,7 +53,7 @@ func TestNotices_WarnsOnNonLoopbackBindWithNoReadToken(t *testing.T) {
 				c := &Config{LibraryRoots: []string{"/mnt/media"}, ServerAddr: addr}
 				got := readTokenNotices(c)
 				if len(got) != 1 {
-					t.Fatalf("Notices() carried %d notices naming server_read_token, want exactly 1:\n%v", len(got), got)
+					t.Fatalf("ReadSurfaceNotices(serving) carried %d notices naming server_read_token, want exactly 1:\n%v", len(got), got)
 				}
 				// It must name BOTH keys: one says where the exposure is, the other says
 				// what closes it, and a notice carrying only one of them leaves an
@@ -122,7 +128,7 @@ func TestNotices_StatesTheRootPageIsStillOpenWhenAReadTokenIsSet(t *testing.T) {
 	}
 	got := readTokenNotices(c)
 	if len(got) != 1 {
-		t.Fatalf("Notices() carried %d notices naming server_read_token, want exactly 1:\n%v", len(got), got)
+		t.Fatalf("ReadSurfaceNotices(serving) carried %d notices naming server_read_token, want exactly 1:\n%v", len(got), got)
 	}
 	low := strings.ToLower(got[0])
 	for _, phrase := range []string{
@@ -133,6 +139,110 @@ func TestNotices_StatesTheRootPageIsStillOpenWhenAReadTokenIsSet(t *testing.T) {
 	} {
 		if !strings.Contains(low, phrase) {
 			t.Errorf("the read-token notice never says %q:\n%s", phrase, got[0])
+		}
+	}
+}
+
+// readSurfaceBinds is every bind the tests below put a configuration on: the non-loopback
+// spellings and the loopback ones, so a scoping claim is made over both sides of the rule.
+var readSurfaceBinds = []string{":8080", "0.0.0.0:8080", "[::]:8080", "192.168.1.10:8080", "holdfast.lan:8080",
+	"", "127.0.0.1:8080", "[::1]:8080", "localhost:8080"}
+
+// TestNotices_CarryNoReadSurfaceStatement (S0175 AC-1's unit half): Notices() is the list
+// EVERY command states, `run` included, and a oneshot run opens no listener. So on no bind
+// and with the token set or unset does it name server_read_token or say anything is served
+// without a credential - while the undo-window statement, which IS true of a run, stays in
+// the same list. The second half is what makes the first a scoping and not a deletion.
+func TestNotices_CarryNoReadSurfaceStatement(t *testing.T) {
+	for _, addr := range readSurfaceBinds {
+		for _, token := range []string{"", "file:/run/secrets/holdfast-read-token"} {
+			c := &Config{LibraryRoots: []string{"/mnt/media"}, ServerAddr: addr, ServerReadToken: token}
+			var undo bool
+			for _, n := range c.Notices() {
+				low := strings.ToLower(n)
+				if strings.Contains(low, "server_read_token") || strings.Contains(low, "without a credential") {
+					t.Errorf("addr %q token %q: Notices() describes a read surface a oneshot run does not open:\n%s",
+						addr, token, n)
+				}
+				undo = undo || strings.Contains(n, "undo_window_hours is 0")
+			}
+			if !undo {
+				t.Errorf("addr %q token %q: Notices() lost the undo-window statement: %v", addr, token, c.Notices())
+			}
+		}
+	}
+}
+
+// TestReadSurfaceNotices_ValidatingScopeIsHedged (S0175 AC-3, AC-4, AC-5 at the unit): what
+// `validate` is told. It sees the file and its own environment only, so on a non-loopback
+// bind with no token it says the key is not set IN THIS CONFIG, names where else it may be
+// supplied, and states the exposure as a consequence - never as "is served", which is the
+// assertion it cannot observe. The serving scope on the same configuration is asserted
+// beside it to be the unhedged one, so the two cannot be swapped unnoticed.
+func TestReadSurfaceNotices_ValidatingScopeIsHedged(t *testing.T) {
+	for _, addr := range []string{":8080", "0.0.0.0:8080", "[::]:8080", "192.168.1.10:8080", "holdfast.lan:8080"} {
+		t.Run(addr, func(t *testing.T) {
+			c := &Config{LibraryRoots: []string{"/mnt/media"}, ServerAddr: addr}
+			got := c.ReadSurfaceNotices(ReadSurfaceValidating)
+			if len(got) != 1 {
+				t.Fatalf("the validating scope made %d statements, want exactly 1:\n%v", len(got), got)
+			}
+			low := strings.ToLower(got[0])
+			for _, want := range []string{"server_read_token", "not set in this config", "may be supplied by",
+				"holdfast_server_read_token", "server_addr", strings.ToLower(addr), "every media path",
+				"without a credential", "no library datum"} {
+				if !strings.Contains(low, want) {
+					t.Errorf("the validating statement never says %q:\n%s", want, got[0])
+				}
+			}
+			if strings.Contains(low, "is served without a credential") {
+				t.Errorf("the validating statement ASSERTS an exposure `validate` cannot observe:\n%s", got[0])
+			}
+
+			serving := c.ReadSurfaceNotices(ReadSurfaceServing)
+			if len(serving) != 1 {
+				t.Fatalf("the serving scope made %d statements, want exactly 1:\n%v", len(serving), serving)
+			}
+			sl := strings.ToLower(serving[0])
+			for _, hedge := range []string{"not set in this config", "may be supplied by"} {
+				if strings.Contains(sl, hedge) {
+					t.Errorf("the SERVING statement is hedged (%q); the process that serves knows:\n%s", hedge, serving[0])
+				}
+			}
+			if !strings.Contains(sl, "is served without a credential") {
+				t.Errorf("the serving statement does not assert the exposure:\n%s", serving[0])
+			}
+			// The zero value is the serving scope: a caller that forgets to choose says the
+			// loud statement, never the soft one.
+			var zero ReadSurfaceScope
+			if z := c.ReadSurfaceNotices(zero); len(z) != 1 || z[0] != serving[0] {
+				t.Errorf("the zero ReadSurfaceScope is not the serving scope: %v", z)
+			}
+		})
+	}
+
+	// Loopback, including an absent server_addr: nothing in either scope.
+	for _, addr := range []string{"", "127.0.0.1:8080", "127.0.0.53:8080", "[::1]:8080", "localhost:8080", "LOCALHOST:8080"} {
+		c := &Config{LibraryRoots: []string{"/mnt/media"}, ServerAddr: addr}
+		if got := c.ReadSurfaceNotices(ReadSurfaceValidating); len(got) != 0 {
+			t.Errorf("a loopback bind (%q) made the validating scope say:\n%v", addr, got)
+		}
+	}
+
+	// A token the command CAN see: the set-token statement, identical in both scopes, and
+	// neither carries the reference.
+	const ref = "file:/run/secrets/holdfast-read-token"
+	for _, addr := range readSurfaceBinds {
+		c := &Config{LibraryRoots: []string{"/mnt/media"}, ServerAddr: addr, ServerReadToken: ref}
+		v, s := c.ReadSurfaceNotices(ReadSurfaceValidating), c.ReadSurfaceNotices(ReadSurfaceServing)
+		if len(v) != 1 || len(s) != 1 || v[0] != s[0] {
+			t.Fatalf("addr %q with a token set: the scopes disagree or do not make exactly one statement:\n%v\n%v", addr, v, s)
+		}
+		low := strings.ToLower(v[0])
+		for _, banned := range []string{"not set in this config", "every media path", ref, "/run/secrets"} {
+			if strings.Contains(low, banned) {
+				t.Errorf("addr %q: the set-token statement carries %q:\n%s", addr, banned, v[0])
+			}
 		}
 	}
 }
