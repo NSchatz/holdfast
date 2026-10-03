@@ -126,7 +126,7 @@ func s0163Serve(t *testing.T, extra string) string {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
 	go func() { done <- runServer(ctx, cfg, log, &bytes.Buffer{}) }()
-	waitHTTP(t, "http://"+addr+"/api/summary", 10*time.Second)
+	waitHTTP(t, "http://"+addr+"/api/summary", serverReady)
 	cancel()
 	select {
 	case code := <-done:

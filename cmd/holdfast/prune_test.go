@@ -411,7 +411,7 @@ func TestS0168AC9_NoPassSweepOrWatchOfAServeRunListsAPrunedDirectory(t *testing.
 			t.Error("runServer did not shut down after its context was cancelled")
 		}
 	}()
-	waitHTTP(t, "http://"+addr+"/api/summary", 30*time.Second)
+	waitHTTP(t, "http://"+addr+"/api/summary", serverReady)
 
 	deadline := time.Now().Add(60 * time.Second)
 	for countRecords(sink, "scan finished") < 3 || len(watchRecords(t, sink, lib)) == 0 {

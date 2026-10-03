@@ -160,7 +160,7 @@ func TestServe_AC1_AC2_TheResolvedTokenIsAcceptedAndNoValueIsEverEmitted(t *test
 	go func() { done <- runServer(ctx, cfg, log, &serveErr) }()
 
 	base := "http://" + lab.addr
-	waitHTTP(t, base+"/api/summary", 10*time.Second)
+	waitHTTP(t, base+"/api/summary", serverReady)
 
 	// AC-1: the resolved token is accepted; a wrong one is not.
 	if code := httpPostCode(t, base+"/api/pause", tokenSentinel); code != http.StatusOK {
@@ -249,7 +249,7 @@ func TestServe_AC1_TheResolvedTautulliKeyReachesItsOwnRequest(t *testing.T) {
 	go func() { done <- runServer(ctx, cfg, log, &serveErr) }()
 
 	base := "http://" + lab.addr
-	waitHTTP(t, base+"/api/summary", 10*time.Second)
+	waitHTTP(t, base+"/api/summary", serverReady)
 	// A rescan consults the scheduler's gate, which consults Tautulli. It is ACCEPTED
 	// (202) rather than completed, because the scan runs in the background.
 	//
