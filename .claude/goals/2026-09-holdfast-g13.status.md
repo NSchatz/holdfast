@@ -81,14 +81,14 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g13-b
 
 | # | Item | State |
 |---|---|---|
-| 4.0 | `main`'s CI went red once on a race in a goal-12 test of `internal/node`; the three reads that expect a streamed digest wait for its record (D15) | DOING |
+| 4.0 | `main`'s CI went red twice (the runs for `25e0c9c` and `fe5c7bf`) on a race in a goal-12 test of `internal/node`; the three reads that expect a streamed digest wait for its record (D15) | DONE (PR #166, `2f1f4ed`): gate exit 0 in 2211 s on `76786b5` (`internal/engine` 1983.0 s, 55.1% of `TEST_TIMEOUT`; `cmd/holdfast` 803.9 s); CI green (`build`, `package`, `mutation`); mutation-diff: no mutant in scope (a test file only); 40 runs of the three tests under `-race` green; with the record delayed 30 ms the tests as on `main` fail by CI's message; 0 fix rounds |
 
 ## Phase 5 - Report
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | Gate integrity counted from the goal-start SHA | TODO |
-| 5.2 | Adversarial review of the report | TODO |
+| 5.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `2f1f4ed`): `func Test` 2004 -> 2033, no package fell (`cmd/holdfast` 269 -> 280, `internal/config` 174 -> 176, `internal/server` 129 -> 137, `internal/sourceoffer` 9 -> 10, `internal/ui` 0 -> 7, every other package unchanged); `git diff --numstat d636e7f origin/main -- docs/design/swap.md docs/design/quality-gate.md` empty (66 and 80 lines); `*_test.go` +1456 -10, the 10 deleted lines in D16; zero `co-authored-by` in `git log d636e7f..origin/main --format=%B` |
+| 5.2 | Adversarial review of the report | DOING |
 
 ## Decisions taken
 
@@ -219,14 +219,12 @@ None filed, none addressed to holdfast (T6, §0.13). The owner's queue: no new i
 
 ## Resume here
 
-- Merged: PR #161 (`0c3b25d`, the UI track) and PR #165 (`ff3f4f5`, S0175). Their worktrees and
-  branches are gone.
-- Open: PR #166, `holdfast-g13/node-flake` in `/cache/wt/holdfast/g13-flake` (D15). Running:
-  its `make mutation-diff`, its full gate (logs `mutation-flake-1.log`, `gate-flake-1.log`) and
-  then its CI watch (`pr166-checks-1.log`). Next: paste the gate tail into the PR, merge when
-  both are green.
-- Then: row 5.1 with the counts at the final `origin/main` (so far: `func Test` 2004 to 2033,
-  no package fell; 8 deleted test lines, D16; the two design documents untouched), a check
-  that `main`'s CI is green, `goals needs list` (no new item), a ledger commit, a fresh
-  adversarial review of the report's lines against the repos, the COMPLETE line,
-  `goals check /workspace/holdfast 2026-09-holdfast 13`, the GOAL REPORT.
+All three PRs of this goal are merged: #161 (`0c3b25d`), #165 (`ff3f4f5`), #166 (`2f1f4ed`).
+No branch or worktree of this goal is left, and no PR of it is open (the open ones are
+Dependabot's and another program's `speed/gate`, D13). The owner's queue has no new item.
+
+Left: `main`'s CI run for `2f1f4ed` (watched; log `main-ci.log`), the fresh adversarial review
+of the report's lines A to G against the repos (row 5.2), then the COMPLETE line,
+`goals check /workspace/holdfast 2026-09-holdfast 13` and the GOAL REPORT. Evidence files are
+under `/cache/tmp/holdfast-g13/` (`gate-ui-1.log`, `gate-notices-2.log`, `gate-flake-1.log`,
+`evidence/`, `pr161-smoke.txt`); the directory is deleted at the goal's end.
