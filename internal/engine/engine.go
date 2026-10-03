@@ -469,8 +469,14 @@ type Engine struct {
 	nodeGateOnce sync.Once
 	// nodeAttempts remembers, per path, the node attempts that failed in this process, for
 	// the one record that names them when the retry bound parks the file.
-	nodeAttemptsMu sync.Mutex
-	nodeAttempts   map[string][]string
+	nodeAttemptsMu   sync.Mutex
+	nodeAttempts     map[string][]string
+	nodeAttemptsKeep map[string]bool
+	// NodeRedemand is how long a job whose node stopped waiting before the grant waits for
+	// another node to ask for work; 0 is DefaultNodeRedemand.
+	NodeRedemand time.Duration
+	// nodeFeederIdle replaces defaultFeederIdle. Unexported test seam.
+	nodeFeederIdle time.Duration
 
 	// DoviTool and HDR10PlusTool are the dovi_tool and hdr10plus_tool binaries a carried
 	// dynamic-HDR job runs (cmd/holdfast sets them from HOLDFAST_DOVI_TOOL and
@@ -2694,6 +2700,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			_ = os.Remove(tmp)
 			return ctx.Err()
 		}
+		if errors.Is(err, errNodeInterrupted) {
+			// The lease was ended by the server's own shutdown: the same interruption.
+			_ = os.Remove(tmp)
+			return context.Canceled
+		}
 		// An encode the memory watchdog aborted leaves through this same branch, and says so
 		// in its own one record with the figures it was aborted on. Its class is transient
 		// on purpose: the next attempt may run beside less, so max_failures decides the retries.
@@ -3200,9 +3211,6 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// (rather than a generic finish emit plus a separate rich one) keeps a metrics
 	// consumer's per-outcome counters from double-counting done.
 	e.finishStore(ctx, final, finalKey, store.Done, out)
-	if e.Nodes != nil {
-		e.forgetNodeAttempts(f)
-	}
 	e.emit(Event{Path: final, Status: store.Done, Worker: worker, Outcome: out})
 	// Prune the superseded pre-swap row (the source's old identity), so the table
 	// doesn't accumulate one dangling row per transcoded file. The swap always changes the
@@ -3734,6 +3742,9 @@ func (e *Engine) countTerminalRow(s store.Status) {
 // unwritten park as a park - would be a park that exists only in a process that has since
 // exited, which is not a park at all.
 func (e *Engine) finishStore(ctx context.Context, path, key string, s store.Status, o *store.Outcome) {
+	if e.Nodes != nil {
+		e.forgetNodeAttempts(path)
+	}
 	if err := e.Store.Finish(ctx, path, key, s, o, e.Cfg.MaxFailures); err != nil {
 		e.Log.Warn("store finish failed", "file", path, "status", s, "err", err)
 		return

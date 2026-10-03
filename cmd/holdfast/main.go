@@ -1458,12 +1458,11 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	httpSrv := &http.Server{Addr: addr, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("serve listening",
+		listening := []any{
 			"addr", addr,
 			"control_enabled", !secrets.Get("server_auth_token").Empty(),
 			"read_gated", !secrets.Get("server_read_token").Empty(),
 			"webhook_enabled", !secrets.Get(config.WebhookTokenKey).Empty(),
-			"nodes_enabled", cfg.NodesEnabled(),
 			"scan_interval_sec", cfg.ScanIntervalSec,
 			"health_sweep_interval_hours", cfg.HealthSweepIntervalHours,
 			"queue_order", cfg.EffectiveQueueOrder(),
@@ -1473,7 +1472,13 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 			"max_load", cfg.MaxLoad,
 			"tautulli", tautulli != nil,
 			"version", version.Version,
-		)
+		}
+		if cfg.NodesEnabled() {
+			// Said only where nodes are on, so an existing configuration's record is the
+			// one it always was.
+			listening = append(listening, "nodes_enabled", true)
+		}
+		log.Info("serve listening", listening...)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

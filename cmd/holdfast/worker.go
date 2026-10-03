@@ -176,7 +176,7 @@ func startNodes(ctx context.Context, cfg *config.Config, eng *engine.Engine, st 
 	if len(live) > 0 {
 		log.Info("nodes: taking back the leases that were live when the server stopped", "leases", len(live))
 	}
-	joinAdopted := eng.AdoptLeases(ctx, live)
+	joinAdopted := eng.AdoptLeases(ctx, live, cfg.NodeLeaseTTL())
 	hub.Ready()
 	srv.SetNodes(hub)
 	done := make(chan struct{})

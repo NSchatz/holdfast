@@ -2,13 +2,16 @@ package engine
 
 import (
 	"context"
-	"encoding/hex"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/node"
@@ -38,7 +41,31 @@ type Nodes interface {
 	Adopt(ctx context.Context, leaseID string, job node.Job, progress func(fraction float64)) (node.Result, error)
 	// Abandon ends a recovered lease the engine will not take back.
 	Abandon(ctx context.Context, leaseID string) error
+	// Report says how a lease of that node ended: "" for an output the server took, and
+	// otherwise why it ended without one. The hub cools a node off on a run of those.
+	Report(node, reason string)
 }
+
+// DefaultNodeRedemand is how long a job whose node stopped waiting before the grant waits
+// for another node to ask for work before the server encodes it itself: two long-poll
+// bounds. ASSUMED, like the long-poll it is taken from.
+const DefaultNodeRedemand = 2 * node.DefaultLongPoll
+
+// defaultFeederIdle is how long a feeder holds a node's poll with no file arriving from the
+// feed before it lets the poll go and asks again. ASSUMED.
+const defaultFeederIdle = time.Second
+
+// The stages of an adoption: its job has not reached the seam, has reached it and taken the
+// lease back, or the lease was abandoned first.
+const (
+	adoptPending int32 = iota
+	adoptReached
+	adoptAbandoned
+)
+
+// errNodeInterrupted is a lease the SERVER ended because it is stopping. It is an
+// interruption, exactly as a cancelled local encode is: nothing is recorded against the file.
+var errNodeInterrupted = errors.New("the node lease was ended because the server is stopping")
 
 // nodeJob is what a job offered to a node carries from the feeder (or from the restart's
 // adoption) to the seam, through its context: the ticket of the node that asked for work, or
@@ -53,11 +80,12 @@ type nodeJob struct {
 	// its lease, or has ended without doing so. nil on a feeder's job.
 	reached     chan struct{}
 	reachedOnce sync.Once
+	// stage is where an adoption stands (adoptPending, adoptReached, adoptAbandoned): the
+	// job's own goroutine and the start-up deadline race for it, and exactly one wins.
+	stage atomic.Int32
 	// spent says the seam has run once for this job: a second encode of the same job (the
 	// hardware fallback's) is the server's own.
 	spent bool
-	// leased says the lease reached the hub, by Encode or by Adopt.
-	leased bool
 	// releaseSlot gives back the node gate slot this job holds; nil while it holds none.
 	releaseSlot func()
 }
@@ -88,7 +116,9 @@ type nodeGate struct {
 	mu            sync.Mutex
 	slots         int
 	held, waiting int
-	changed       chan struct{}
+	// parked is how many feeders are held in waitRoom right now.
+	parked  int
+	changed chan struct{}
 }
 
 func newNodeGate(slots int) *nodeGate {
@@ -155,11 +185,17 @@ func (g *nodeGate) waitRoom(ctx context.Context) error {
 			return nil
 		}
 		changed := g.changed
+		g.parked++
 		g.mu.Unlock()
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
 		case <-changed:
+		}
+		g.mu.Lock()
+		g.parked--
+		g.mu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 	}
 }
@@ -190,14 +226,11 @@ func (e *Engine) settle(ctx context.Context, nj *nodeJob) {
 		// Releasing a used ticket does nothing, so this is safe on every way out.
 		e.Nodes.Release(nj.ticket, nil)
 	}
-	if nj.adopt != "" && !nj.leased && ctx.Err() == nil {
-		// The job never reached the seam - the guards now skip the file, it is gone, its plan
-		// is no longer one a node can run - so the lease is ended rather than left to run out.
-		// A shutdown is not that: the lease stays for the next start to recover.
-		if err := e.Nodes.Abandon(ctx, nj.adopt); err != nil {
-			e.Log.Warn("node: a recovered lease could not be abandoned; it runs out after its grace",
-				"lease", nj.adopt, "err", err)
-		}
+	if nj.adopt != "" && ctx.Err() == nil && nj.stage.CompareAndSwap(adoptPending, adoptAbandoned) {
+		// The job never reached the seam - the guards now skip the file, it is gone - so
+		// the lease is ended rather than left to run out. A shutdown is not that: the lease
+		// stays for the next start to recover.
+		e.abandon(ctx, nj.adopt)
 	}
 	nj.markReached()
 	if nj.releaseSlot != nil {
@@ -237,8 +270,10 @@ func (e *Engine) startFeeders(ctx context.Context, wg *sync.WaitGroup, feed <-ch
 				if err != nil {
 					return
 				}
+				idle := time.NewTimer(e.feederIdle())
 				select {
 				case f, ok := <-feed:
+					idle.Stop()
 					if !ok {
 						e.Nodes.Release(t, nil)
 						return
@@ -249,7 +284,13 @@ func (e *Engine) startFeeders(ctx context.Context, wg *sync.WaitGroup, feed <-ch
 					if done {
 						return
 					}
+				case <-idle.C:
+					// Nothing to offer - the feed is paused, or every file is with a local
+					// worker. The poll is not held for a file that may never come: it goes
+					// back, so the node is answered by its own long-poll bound.
+					e.Nodes.Release(t, nil)
 				case <-ctx.Done():
+					idle.Stop()
 					e.Nodes.Release(t, nil)
 					return
 				}
@@ -259,37 +300,79 @@ func (e *Engine) startFeeders(ctx context.Context, wg *sync.WaitGroup, feed <-ch
 	return stop
 }
 
+// feederIdle is how long a feeder holds a poll with no file arriving.
+func (e *Engine) feederIdle() time.Duration {
+	if e.nodeFeederIdle > 0 {
+		return e.nodeFeederIdle
+	}
+	return defaultFeederIdle
+}
+
+// abandon ends a recovered lease the engine will not take back.
+func (e *Engine) abandon(ctx context.Context, leaseID string) {
+	if err := e.Nodes.Abandon(ctx, leaseID); err != nil {
+		e.Log.Warn("node: a recovered lease could not be abandoned; it runs out after its grace",
+			"lease", leaseID, "err", err)
+	}
+}
+
 // AdoptLeases takes back the leases a restart recovered (node.Hub.Recover), before anything
-// new is granted: each lease's path is run through ProcessFile again, which claims the row,
-// re-takes the free-space hold and the working file through its ordinary code, re-derives the
-// plan, and at the seam re-attaches the lease (Adopt) - which refuses a job that is not the
-// leased one. A lease whose job never reaches the seam is abandoned. It returns once EVERY
-// lease has re-taken its holds and reached Adopt, or has been abandoned; the caller then lets
-// the hub grant (Ready). The jobs themselves run on, and wait joins them.
+// new is granted: each lease's path is run through ProcessFile again - all of them at once -
+// which claims the row, re-takes the free-space hold and the working file through its
+// ordinary code, re-derives the plan, and at the seam re-attaches the lease (Adopt), which
+// refuses a job that is not the leased one. A lease whose job ends before the seam is
+// abandoned. It returns once EVERY lease has re-taken its holds and reached Adopt, or has
+// been abandoned; the caller then lets the hub grant (Ready). The jobs themselves run on, and
+// wait joins them.
+//
+// It is bounded by within (one lease TTL in production): a lease whose job has not reached
+// the seam by then is abandoned, and that job carries on as the server's own. So a job held
+// up before its seam - waiting for room, probing a slow mount - cannot hold the listener.
 //
 // The rows a dead process left active are reset first, so each recovered path is claimable.
-func (e *Engine) AdoptLeases(ctx context.Context, leases []node.Lease) (wait func()) {
+func (e *Engine) AdoptLeases(ctx context.Context, leases []node.Lease, within time.Duration) (wait func()) {
 	if e.Nodes == nil || len(leases) == 0 {
 		return func() {}
 	}
 	e.recoverStale(ctx)
 	var wg sync.WaitGroup
+	jobs := make([]*nodeJob, len(leases))
 	for i, l := range leases {
 		nj := &nodeJob{adopt: l.ID, reached: make(chan struct{})}
+		jobs[i] = nj
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			jctx := withNodeJob(ctx, nj)
-			err := e.ProcessFile(jctx, "adopt"+strconv.Itoa(i), l.Path)
+			err := e.ProcessFile(withNodeJob(ctx, nj), "adopt"+strconv.Itoa(i), l.Path)
 			e.settle(ctx, nj)
 			if err != nil && ctx.Err() == nil {
 				e.Log.Warn("node: taking a recovered lease back failed", "file", l.Path, "lease", l.ID, "err", err)
 			}
 		}()
+	}
+	late := time.NewTimer(within)
+	defer late.Stop()
+	for i, nj := range jobs {
 		select {
 		case <-nj.reached:
+			continue
 		case <-ctx.Done():
+			return wg.Wait
+		case <-late.C:
 		}
+		// The bound ran out. Every lease whose job is not at the seam yet is abandoned now;
+		// a job that gets there afterwards finds its lease gone and encodes on the server.
+		for k, rest := range jobs[i:] {
+			if rest.stage.CompareAndSwap(adoptPending, adoptAbandoned) {
+				l := leases[i+k]
+				e.Log.Warn("node: a recovered lease was not taken back within the start-up bound, so it is "+
+					"abandoned and its job carries on as the server's own", "file", l.Path, "lease", l.ID,
+					"node", l.Node, "bound", within.String())
+				e.abandon(ctx, l.ID)
+				rest.markReached()
+			}
+		}
+		break
 	}
 	return wg.Wait
 }
@@ -365,6 +448,11 @@ func (e *NodeVerdictError) Error() string {
 
 // encodeAt is the encode seam as ProcessFile calls it. A job that carries no node job - every
 // job with nodes off, and every local worker's job with them on - is Engine.encode, untouched.
+//
+// A node job is leased where it can be. Where it cannot - its plan is not leasable, no lease
+// was granted, or the node could not run the lease it was given - the SERVER encodes it, in
+// this same attempt, inside a node gate slot, and nothing is recorded against the file: none
+// of those is a fact about the file.
 func (e *Engine) encodeAt(ctx context.Context, worker, key string, fi os.FileInfo, in, out string,
 	props *probe.VideoProps, job *EncodePlan) error {
 	nj := nodeJobFrom(ctx)
@@ -374,36 +462,13 @@ func (e *Engine) encodeAt(ctx context.Context, worker, key string, fi os.FileInf
 	first := !nj.spent
 	nj.spent = true
 	if first {
-		supports := func(string) bool { return true }
-		if nj.ticket != nil {
-			supports = nj.ticket.Supports
+		handled, err := e.encodeOnNode(ctx, nj, worker, key, fi, in, out, props, job)
+		if handled {
+			return err
 		}
-		pre, body, why := job.leasable(supports)
-		if why == "" {
-			leased, err := e.encodeOnNode(ctx, nj, worker, in, props, job, node.Job{
-				Path: in, Key: key, Temp: out, Pre: pre, Body: body, Encoder: job.Video.Encoder.Key,
-				SourceSize: fi.Size(), SourceModTime: fi.ModTime(), ReservedBytes: fi.Size(),
-			})
-			if leased || err == nil {
-				return err
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			why = "no lease was granted: " + err.Error()
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		e.Log.Info("node: this job is encoded by the server", "file", in, "worker", worker, "why", why)
-		// The poll goes back to its node, or the recovered lease is ended: the server encodes.
-		if nj.ticket != nil {
-			e.Nodes.Release(nj.ticket, nil)
-		} else if !nj.leased {
-			nj.leased = true
-			if err := e.Nodes.Abandon(ctx, nj.adopt); err != nil {
-				e.Log.Warn("node: a recovered lease could not be abandoned; it runs out after its grace",
-					"lease", nj.adopt, "err", err)
-			}
-		}
-		nj.markReached()
 	}
 	if err := e.takeSlot(ctx, nj); err != nil {
 		return err
@@ -411,70 +476,209 @@ func (e *Engine) encodeAt(ctx context.Context, worker, key string, fi os.FileInf
 	return e.encode(ctx, worker, in, out, props, job)
 }
 
-// encodeOnNode leases the job (or takes its recovered lease back) and waits for the node's
-// output to be admitted and completed into the working file. leased reports whether a lease
-// reached the hub: false with an error means nothing was granted, and the server encodes.
-//
-// A nil error is a CANDIDATE in the working file, and two things about it are then checked
-// here, before any gate: the server hashes ITS OWN copy of the source and compares it with
-// the digest of the bytes the node read - a mismatch is a wrong worker_path_map entry or a
-// stale mount on the node, and the job fails - and the working file is the length the lease
-// recorded.
-func (e *Engine) encodeOnNode(ctx context.Context, nj *nodeJob, worker, in string, props *probe.VideoProps,
-	job *EncodePlan, lj node.Job) (leased bool, err error) {
-	// The plan the leased command line was built from is announced exactly where a local
-	// encode announces its own, so "the command line and the gates read one plan" is as
-	// checkable for a node's job as for the server's.
-	e.observePlan(planStageEncode, job.Streams)
-	e.observeEncodePlan(planStageEncode, job)
+// nodeCouldNotRun are the typed reasons a worker fails a lease with when IT could not run
+// the job: its path map, its mount, its encoders, its own refusal of the command line, its
+// own shutdown. They say something about the node and nothing about the file.
+var nodeCouldNotRun = map[string]bool{
+	"unmapped_source": true, "source_mismatch": true, "source_unreadable": true,
+	"unsupported_encoder": true, "refused_plan": true, "worker_stopping": true,
+}
 
-	progress := e.nodeProgress(worker, in, props)
-	var res node.Result
-	if nj.adopt != "" {
-		nj.leased = true
-		// The holds are re-taken: the working file is held, the free-space reservation is
-		// held, the row is claimed. The hub may grant again once every recovered lease is here.
-		nj.markReached()
-		res, err = e.Nodes.Adopt(ctx, nj.adopt, lj, progress)
-	} else {
-		res, err = e.Nodes.Encode(ctx, nj.ticket, lj, progress)
-		var ended *node.LeaseError
-		if err != nil && !errors.As(err, &ended) {
-			return false, err
+// encodeOnNode leases the job (or takes its recovered lease back) and waits for the node's
+// output to be admitted and completed into the working file. handled reports whether the
+// node path concluded the encode step: with a nil error the working file holds a candidate
+// that passed the two checks below; with an error the lease was really attempted and the job
+// fails. handled false means the server encodes the job itself, and the one record saying
+// why has been written.
+//
+// How a lease that ended without an output is read (docs/design/nodes.md#endings):
+//
+//   - the node stopped waiting before the grant: the job waits for another node to ask, for
+//     up to NodeRedemand, and is leased to that one;
+//   - the node could not run it (nodeCouldNotRun), the lease was not the re-derived job's, or
+//     the hub granted nothing: the server encodes it. Not charged to the file;
+//   - the lease was really attempted - it expired, the node's encode failed, its uploads
+//     failed the digest bound: the job fails, transient, and max_failures counts it.
+//
+// A nil error from the hub is a CANDIDATE, and two things about it are checked before any
+// gate: the server hashes ITS OWN copy of the source and compares it with the digest of the
+// bytes the node read - a mismatch is a wrong worker_path_map entry or a stale mount on the
+// node, and the job fails - and the working file is the length the lease recorded.
+func (e *Engine) encodeOnNode(ctx context.Context, nj *nodeJob, worker, key string, fi os.FileInfo, in, out string,
+	props *probe.VideoProps, job *EncodePlan) (handled bool, err error) {
+	server := func(why string, args ...any) (bool, error) {
+		e.Log.Info("node: this job is encoded by the server", append([]any{"file", in, "worker", worker, "why", why}, args...)...)
+		return false, nil
+	}
+	if nj.adopt != "" && !nj.stage.CompareAndSwap(adoptPending, adoptReached) {
+		return server("its recovered lease was abandoned before the job came back for it", "lease", nj.adopt)
+	}
+	var redemandUntil time.Time
+	for {
+		supports := func(string) bool { return true }
+		if nj.ticket != nil {
+			supports = nj.ticket.Supports
 		}
-		nj.leased = true
+		pre, body, why := job.leasable(supports)
+		if why != "" {
+			// The poll goes back to its node, or the recovered lease is ended.
+			if nj.ticket != nil {
+				e.Nodes.Release(nj.ticket, nil)
+			} else {
+				e.abandon(ctx, nj.adopt)
+				nj.markReached()
+			}
+			return server(why)
+		}
+		lj := node.Job{Path: in, Key: key, Temp: out, Pre: pre, Body: body, Encoder: job.Video.Encoder.Key,
+			SourceSize: fi.Size(), SourceModTime: fi.ModTime(), ReservedBytes: fi.Size()}
+		// The plan the leased command line was built from is announced exactly where a local
+		// encode announces its own, so "the command line and the gates read one plan" is as
+		// checkable for a node's job as for the server's.
+		e.observePlan(planStageEncode, job.Streams)
+		e.observeEncodePlan(planStageEncode, job)
+
+		progress := e.nodeProgress(worker, in, props)
+		var res node.Result
+		if nj.adopt != "" {
+			// The holds are re-taken: the working file is held, the free-space reservation is
+			// held, the row is claimed. The hub may grant again once every recovered lease is
+			// here.
+			nj.markReached()
+			res, err = e.Nodes.Adopt(ctx, nj.adopt, lj, progress)
+		} else {
+			res, err = e.Nodes.Encode(ctx, nj.ticket, lj, progress)
+		}
+		if err == nil {
+			return true, e.acceptNodeOutput(ctx, nj, worker, in, lj, res)
+		}
+		if ctx.Err() != nil {
+			return true, ctx.Err()
+		}
+		var ended *node.LeaseError
+		leaseEnded := errors.As(err, &ended)
+		switch {
+		case errors.Is(err, node.ErrPollGone) || (leaseEnded && ended.Reason == node.ReasonPollGone):
+			// The node's request ended, or its long-poll ran out, between the reservation
+			// and the grant. Nothing is wrong with the file and no node saw it: the job waits
+			// for a node that is asking.
+			if nj.ticket == nil {
+				return server("no node holds its recovered lease", "err", err.Error())
+			}
+			if redemandUntil.IsZero() {
+				redemandUntil = time.Now().Add(e.nodeRedemand())
+			}
+			wctx, stop := context.WithDeadline(ctx, redemandUntil)
+			t, werr := e.Nodes.WaitDemand(wctx)
+			stop()
+			if werr != nil {
+				if ctx.Err() != nil {
+					return true, ctx.Err()
+				}
+				return server("the node it was offered to stopped waiting, and no other node asked for work "+
+					"within "+e.nodeRedemand().String(), "node", nj.ticket.Node())
+			}
+			nj.ticket = t
+			continue
+		case leaseEnded && (ended.Reason == node.ReasonCanceled || ended.Reason == node.ReasonRestart):
+			// The server itself ended it: it is stopping.
+			return true, fmt.Errorf("%w: %w", errNodeInterrupted, err)
+		case leaseEnded && ended.Reason == node.ReasonNotAdopted:
+			return server("the job re-derived after the restart is not the one that was leased",
+				"node", ended.Node, "lease", ended.LeaseID, "epoch", ended.Epoch)
+		case leaseEnded && ended.Reason == node.ReasonNodeFailed && nodeCouldNotRun[ended.Detail]:
+			// The NODE could not run it. That is a fact about the node - the hub counts it
+			// towards the node's cool-off - and not about the file.
+			e.Nodes.Report(ended.Node, ended.Detail)
+			return server("the node could not run the lease", "node", ended.Node, "lease", ended.LeaseID,
+				"epoch", ended.Epoch, "reason", ended.Detail)
+		case leaseEnded:
+			// The lease was really attempted and ended without an output.
+			reason := string(ended.Reason)
+			if ended.Detail != "" {
+				reason = ended.Detail
+			}
+			e.Nodes.Report(ended.Node, reason)
+			return true, err
+		}
+		// Not a lease's ending: the hub granted nothing (a cap, a held path), or could not
+		// take the recovered lease back. That lease is ended rather than left to run out.
+		if nj.adopt != "" {
+			e.abandon(ctx, nj.adopt)
+		}
+		return server("no lease was granted", "err", err.Error())
 	}
-	if err != nil {
-		return true, err
+}
+
+// nodeRedemand is how long a job whose node stopped waiting waits for another.
+func (e *Engine) nodeRedemand() time.Duration {
+	if e.NodeRedemand > 0 {
+		return e.NodeRedemand
 	}
-	// The server's own heavy work for this output starts here, inside a node gate slot.
+	return DefaultNodeRedemand
+}
+
+// acceptNodeOutput is the server's own two checks of a completed lease, before any gate,
+// taken inside a node gate slot. It tells the hub how the lease ended either way.
+func (e *Engine) acceptNodeOutput(ctx context.Context, nj *nodeJob, worker, in string, lj node.Job, res node.Result) error {
+	// The server's own heavy work for this output starts here.
 	if err := e.takeSlot(ctx, nj); err != nil {
-		return true, err
+		return err
 	}
 	e.Log.Info("node encode", "file", in, "worker", worker, "node", res.Node, "lease", res.LeaseID,
 		"epoch", res.Epoch, "output_bytes", res.OutputBytes, "output_digest", res.OutputDigest,
 		"source_digest", res.SourceDigest, "node_encode_sec", res.EncodeSeconds)
-	refuse := func(why string) (bool, error) {
-		return true, &NodeVerdictError{Node: res.Node, LeaseID: res.LeaseID, Epoch: res.Epoch, Why: why}
+	refuse := func(reason, why string) error {
+		e.Nodes.Report(res.Node, reason)
+		return &NodeVerdictError{Node: res.Node, LeaseID: res.LeaseID, Epoch: res.Epoch, Why: why}
 	}
-	sum, _, err := fileDigest(in)
+	own, err := sourceDigest(ctx, in)
 	if err != nil {
-		return refuse("the server could not hash its own copy of the source to compare with the node's: " + err.Error())
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return refuse("source_unhashed", "the server could not hash its own copy of the source to compare with the node's: "+err.Error())
 	}
-	raw, _ := hex.DecodeString(sum)
-	if own := node.FormatDigest(raw); own != res.SourceDigest {
-		return refuse(fmt.Sprintf("the source the node read is not the server's (the node read %s, the server's "+
-			"copy is %s): a wrong worker_path_map entry or a stale mount on the node; nothing was gated and "+
-			"the source is untouched", res.SourceDigest, own))
+	if own != res.SourceDigest {
+		return refuse("source_digest_mismatch", fmt.Sprintf("the source the node read is not the server's (the node read %s, the "+
+			"server's copy is %s): a wrong worker_path_map entry or a stale mount on the node; nothing was gated "+
+			"and the source is untouched", res.SourceDigest, own))
 	}
 	st, err := os.Stat(lj.Temp)
 	if err != nil {
-		return refuse("the working file the lease completed into could not be read: " + err.Error())
+		return refuse("output_unreadable", "the working file the lease completed into could not be read: "+err.Error())
 	}
 	if st.Size() != res.OutputBytes {
-		return refuse(fmt.Sprintf("the working file is %d bytes and the lease recorded %d", st.Size(), res.OutputBytes))
+		return refuse("output_size_mismatch", fmt.Sprintf("the working file is %d bytes and the lease recorded %d", st.Size(), res.OutputBytes))
 	}
-	return true, nil
+	e.Nodes.Report(res.Node, "")
+	return nil
+}
+
+// sourceDigest is the sha-256 of the file at path in the form a lease records one, read
+// sequentially and abandoned as soon as ctx ends: a source is as large as a film, and a
+// stopping server does not finish reading one.
+func sourceDigest(ctx context.Context, path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	buf := make([]byte, 1<<20)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, err := f.Read(buf)
+		h.Write(buf[:n])
+		if err == io.EOF {
+			return node.FormatDigest(h.Sum(nil)), nil
+		}
+		if err != nil {
+			return "", err
+		}
+	}
 }
 
 // nodeProgress turns a heartbeat's fraction into the live progress event a local encode
@@ -517,6 +721,12 @@ func (e *Engine) nodeFailure(path string, err error) bool {
 		e.nodeAttempts = map[string][]string{}
 	}
 	e.nodeAttempts[path] = append(e.nodeAttempts[path], attempt)
+	if e.nodeAttemptsKeep == nil {
+		e.nodeAttemptsKeep = map[string]bool{}
+	}
+	// The failed row this attempt is about to write is the one terminal outcome that keeps
+	// what was remembered (forgetNodeAttempts).
+	e.nodeAttemptsKeep[path] = true
 	e.nodeAttemptsMu.Unlock()
 	return true
 }
@@ -538,11 +748,18 @@ func (e *Engine) reportNodePark(ctx context.Context, path, key string) {
 		"node_attempts", strings.Join(attempts, " "))
 }
 
-// forgetNodeAttempts drops what was remembered about a file whose job ended some other way.
+// forgetNodeAttempts runs at every terminal outcome of a file: what was remembered about its
+// node attempts is dropped, unless the outcome is the node failure that was just remembered.
+// So the map holds an entry only for a file whose LAST outcome was a failed node attempt, and
+// that entry goes when the file is parked, swapped, skipped or failed some other way.
 func (e *Engine) forgetNodeAttempts(path string) {
 	e.nodeAttemptsMu.Lock()
+	defer e.nodeAttemptsMu.Unlock()
+	if e.nodeAttemptsKeep[path] {
+		delete(e.nodeAttemptsKeep, path)
+		return
+	}
 	delete(e.nodeAttempts, path)
-	e.nodeAttemptsMu.Unlock()
 }
 
 // RunLeased runs one leased encode on a node: ffmpeg over in, writing out, with the options
