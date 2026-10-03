@@ -248,3 +248,5 @@ feed of new files while anything at all is streaming, and it runs under `serve` 
   `GET /api/v3/series`, which answers the whole library, once per swap. Nothing is cached.
 - **What the services then do** is theirs. The tests here prove the requests holdfast sends
   against fakes; only a live check against your own services shows their reaction.
+  `scripts/client-report.sh` is that check: it sends these requests to your own Plex, Sonarr or
+  Radarr and writes a redacted report ([`docs/client-reports.md`](client-reports.md)).

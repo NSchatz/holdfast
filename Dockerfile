@@ -359,6 +359,15 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -tags
       -X github.com/NSchatz/holdfast/internal/version.Date=${DATE} \
       -X 'github.com/NSchatz/holdfast/internal/sourceoffer.URL=${SOURCE_URL}'" \
     -o /out/holdfast ./cmd/holdfast
+# The owner's live check of their own Plex, Sonarr or Radarr (scripts/client-report.sh
+# --image, docs/client-reports.md): the same clients as the binary above, behind a command
+# that only reports. It rides the image so the owner needs no Go toolchain to run it, and
+# nothing in the image ever invokes it.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+    -ldflags="-s -w \
+      -X github.com/NSchatz/holdfast/internal/version.Version=${VERSION} \
+      -X github.com/NSchatz/holdfast/internal/version.Commit=${COMMIT}" \
+    -o /out/holdfast-client-report ./scripts/clientreport
 
 # --- runtime -----------------------------------------------------------------
 # distroless cc: glibc + libgcc_s + ca-certificates, no shell, no package manager,
@@ -419,6 +428,7 @@ COPY --from=dynhdr /dynhdr/hdr10plus_tool /usr/local/bin/hdr10plus_tool
 # refreshes it.
 COPY --from=build /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=build /out/holdfast /usr/local/bin/holdfast
+COPY --from=build /out/holdfast-client-report /usr/local/bin/holdfast-client-report
 # The image redistributes prebuilt GPL ffmpeg binaries, so it ships their licence and
 # source offer with them (NOTICE), alongside holdfast's own AGPL text.
 COPY --from=build /src/LICENSE /src/NOTICE /usr/share/doc/holdfast/

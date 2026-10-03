@@ -90,6 +90,15 @@ $got"
   ok "bundled $got runs"
 done
 
+# 2c. The owner's live-check command (scripts/client-report.sh --image) is in the image and
+#     runs. Only its usage text is asked for: nothing here names a service, and no check in
+#     any gate contacts one.
+got="$(run_in_image --entrypoint /usr/local/bin/holdfast-client-report "$IMAGE" --help 2>&1)" \
+  || fail "the bundled holdfast-client-report does not run inside the image:
+$got"
+grep -q -- '--refresh-dir DIR' <<<"$got" || fail "the bundled holdfast-client-report printed no usage text"
+ok "bundled holdfast-client-report runs"
+
 # 3. It does not run as root by default.
 user="$(docker inspect -f '{{.Config.User}}' "$IMAGE")"
 [ -n "$user" ] && [ "$user" != "root" ] && [ "$user" != "0" ] \
