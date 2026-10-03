@@ -1,0 +1,51 @@
+:root {
+  color-scheme: light dark;
+  --fg: #1b1f24;
+  --fg-muted: #57606a;
+  --bg: #ffffff;
+  --bg-raised: #f6f8fa;
+  --border: #d0d7de;
+  --ok: #1a7f37;
+  --bad: #b3261e;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6edf3;
+    --fg-muted: #9198a1;
+    --bg: #0d1117;
+    --bg-raised: #161b22;
+    --border: #30363d;
+    --ok: #3fb950;
+    --bad: #ff7b72;
+  }
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+#app {
+  flex: 1;
+}
+
+/* The Corresponding Source offer. The server writes it into the page it sends, so it
+   is on screen whether or not this stylesheet or any script loads. */
+#source-offer {
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+#source-offer a {
+  color: inherit;
+}

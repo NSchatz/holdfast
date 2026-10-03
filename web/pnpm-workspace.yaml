@@ -1,0 +1,20 @@
+# The decisions pnpm reads for this project. pnpm 11 and later read no non-auth setting
+# from .npmrc (https://pnpm.io/blog/releases/11.0, read 2026-09-29; re-run against pnpm
+# 12.8.1 on 2026-10-03), so this file is the decision surface and scripts/check-pins.sh
+# section 8 reads it.
+packages:
+  - "."
+
+# No lifecycle script runs at install: not this project's own, and no dependency's.
+ignoreScripts: true
+
+# A version is installable once it has been public for a day (minutes). Set explicitly:
+# left to its default the rule is not strict, and pnpm answers a younger pin by writing
+# itself a minimumReleaseAgeExclude list, which section 8 refuses.
+minimumReleaseAge: 1440
+
+# The one dependency in the lockfile that declares an install script: fsevents, an
+# optional macOS-only dependency of vite, runs `node-gyp rebuild`. It is never built
+# here, on any platform; vite falls back to polling without it.
+allowBuilds:
+  fsevents: false

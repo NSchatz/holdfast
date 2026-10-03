@@ -60,6 +60,7 @@ PLATFORM ?= linux/amd64
         api-schema api-schema-baseline api-schema-diff api-schema-diff-selftest \
         happy-path-log-selftest \
         mutation-diff mutation-full mutation-shape mutation-selftest \
+        ui-toolchain ui-install ui-lint ui-typecheck ui-test ui-build \
         tidy clean image image-smoke compose-check
 
 build:
@@ -99,6 +100,42 @@ TEST_PKGS ?= ./...
 
 test:
 	go test -race -covermode=atomic -timeout $(TEST_TIMEOUT) $(TEST_PKGS)
+
+# --- the web UI (web/) ----------------------------------------------------------
+# Every target here is scripts/ui.sh and nothing else. The script reads the Node pin from
+# web/.node-version and the pnpm pin from web/package.json's packageManager field, runs
+# the step on exactly that pair, and REFUSES where it cannot get it - so this file
+# restates neither version, and a gate run on some other Node is a red gate rather than a
+# gate about that Node. Svelte, Vite and every other package are exact versions in
+# web/package.json, resolved by the committed lockfile; scripts/check-pins.sh section 12
+# holds each of those pins to its shape.
+#
+# No browser: lint, a typecheck, unit tests under jsdom, and the production build
+# (decided by the owner, T22).
+ui-toolchain:
+	./scripts/ui.sh toolchain
+
+# --frozen-lockfile: the lockfile is installed as written or the step fails. Lifecycle
+# scripts do not run (web/pnpm-workspace.yaml, which check-pins section 8 reads).
+ui-install: ui-toolchain
+	./scripts/ui.sh install
+
+ui-lint: ui-install
+	./scripts/ui.sh lint
+
+ui-typecheck: ui-install
+	./scripts/ui.sh typecheck
+
+ui-test: ui-install
+	./scripts/ui.sh test
+
+# Builds web/dist and COPIES it into internal/ui/dist, the directory the binary embeds,
+# beside the committed placeholder that keeps `go build` and `go vet` passing on a tree
+# with no UI built. It runs before `build` and `test` in `check`, so the binary the gate
+# builds and the tests it runs see the UI this tree produces. A plain `make build` embeds
+# whatever is in that directory: run `make ui-build build` for a binary with the UI.
+ui-build: ui-install
+	./scripts/ui.sh build
 
 fmt:
 	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then echo "gofmt needs:"; echo "$$out"; exit 1; fi
@@ -313,7 +350,13 @@ install-hooks:
 # the two places it runs. What is hermetic - that .gremlins.yaml and
 # docs/mutation-testing.md still agree about the floor and the domain, and that the
 # workflow still plans an unscoped run with no diff scope - rides the gate.
-check: check-pins check-pins-selftest install-ffmpeg-selftest install-dynhdr-tools-selftest secret-scan secret-scan-selftest identity-scan identity-scan-selftest api-schema-diff mutation-shape fmt vet build test staticcheck govulncheck govulncheck-selftest
+#
+# The web UI's four steps - `ui-lint`, `ui-typecheck`, `ui-test`, `ui-build` - sit between
+# `vet` and `build`. `fmt` and `vet` run first and so pass on whatever the embed directory
+# holds, a fresh clone's placeholder included (internal/ui proves the placeholder case on
+# every run, in a copy); `ui-build` then puts this tree's UI where `build` and `test`
+# embed it.
+check: check-pins check-pins-selftest install-ffmpeg-selftest install-dynhdr-tools-selftest secret-scan secret-scan-selftest identity-scan identity-scan-selftest api-schema-diff mutation-shape fmt vet ui-lint ui-typecheck ui-test ui-build build test staticcheck govulncheck govulncheck-selftest
 
 # The gate tiers: tier-fast for a quick run while working, tier-full at a goal's end and nightly on
 # main; each prints its elapsed time. tier-full is `check`. tier-fast is `check` with every package
@@ -396,4 +439,5 @@ tidy:
 
 clean:
 	rm -f holdfast transcode
-	rm -rf dist out
+	rm -rf dist out web/dist
+	find internal/ui/dist -mindepth 1 -maxdepth 1 ! -name .gitkeep -exec rm -rf {} +
