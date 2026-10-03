@@ -41,7 +41,9 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g13-b
 
 | What | Value | Source |
 |---|---|---|
-| `make check` under `goals-heavy` then `flock -o` `holdfast-heavy` | running at the time of this commit; the figure lands with the next ledger commit | `gate-baseline.log` |
+| `make check` under `goals-heavy` then `flock -o` `holdfast-heavy` | exit 0 in 2021 s | `gate-baseline.log` |
+| `internal/engine` under `go test -race` (from that run) | ok, 89.0% coverage, 1869.2 s (51.9% of `TEST_TIMEOUT` 60m) | `gate-baseline.log` |
+| `cmd/holdfast`, `internal/server` (from that run) | ok, 731.5 s; 325.8 s | `gate-baseline.log` |
 | `func Test` count, all packages | 2004 | `rg -c '^func Test' -g '*_test.go'`, `functest-start.txt` |
 | `docs/design/swap.md`, `docs/design/quality-gate.md` lines | 66, 80 | `wc -l` |
 | `CLAUDE.md` lines | 199 | `wc -l` |
@@ -55,7 +57,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g13-b
 |---|---|---|
 | 1.1 | Precondition checked (header above) | DONE (`d636e7f`): goal 12's COMPLETE line is on `origin/main` |
 | 1.2 | Ledger created as the goal's first commit, straight to `main` | DONE (the commit that adds this file): fast docs checks passed first |
-| 1.3 | Baseline gate with timings | DOING |
+| 1.3 | Baseline gate with timings | DONE (`d636e7f`): `make check` exit 0 in 2021 s; the table above (D4: the first run lacked ffmpeg on `PATH`) |
 
 ## Phase 2 - Triage rows (line B)
 
@@ -146,15 +148,14 @@ None filed, none addressed to holdfast (T6, §0.13). The owner's queue: no new i
 
 ## Resume here
 
-Both tracks are built and pushed or committed, neither is merged, no PR is open yet.
-
-- `holdfast-g13/ui` in `/cache/wt/holdfast/g13-ui` (5 commits, head `25fcade`, not pushed yet):
-  targeted tests green; a fresh adversarial review of the branch is running; its
-  `make mutation-diff` is queued behind the baseline (log `mutation-ui-1.log`). Next: apply the
-  review, run the gate under the heavy locks with D4's `PATH`, push, open the PR with the gate
-  tail, wait for CI (`build`, `package`, `mutation`), merge.
-- `holdfast-g13/notices` in `/cache/wt/holdfast/g13-notices` (pushed, head `90a1d01`): S0175,
-  AC-1 to AC-8 graded by `cmd/holdfast/server_notice_scope_test.go`. Next, after the UI PR
-  merges: merge `origin/main` into it, gate, PR, CI, merge.
-- The baseline gate is running in `/cache/wt/holdfast/g13-baseline` (log `gate-baseline.log`);
-  its figures go in the Baselines table.
+- `holdfast-g13/ui`: PR #161 is open at head `ea2be7e` (the branch review is applied: no HIGH,
+  5 MED, 11 LOW; selftest 88/88). Its CI is running; its `make mutation-diff` and then its full
+  gate run under the heavy locks (logs `mutation-ui-1.log`, `gate-ui-1.log`). Next: paste the
+  gate tail, wall-clock and engine seconds into the PR body, wait for CI green (`build`,
+  `package`, `mutation`), merge with `gh pr merge --squash --delete-branch`. A red is a fix
+  round (at most 3).
+- `holdfast-g13/notices` in `/cache/wt/holdfast/g13-notices` (pushed, head `90a1d01`): S0175.
+  After #161 merges: `git merge origin/main`, check its statement against the merged serving
+  code, gate, PR, CI, merge.
+- Then: gate integrity counts, the owner's queue check, the COMPLETE line, `goals check`, the
+  adversarial review of the report.
