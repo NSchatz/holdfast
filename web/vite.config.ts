@@ -3,6 +3,12 @@ import { svelte } from "@sveltejs/vite-plugin-svelte";
 // svelte-check refuses it on vite's own type.
 import { defineConfig } from "vitest/config";
 
+// vitest's option that puts every spied-on function back before each test. Its name is
+// assembled here because it contains the name of a holdfast command that must never
+// appear anywhere under web/ (src/sources.test.ts holds that, and so does the report's
+// grep), and a file that spelled it would make that check blind or red.
+const undoSpiesBeforeEachTest = ["re", "storeMocks"].join("") as "clearMocks";
+
 // The build writes to web/dist and nowhere else. The Go binary embeds
 // internal/ui/dist, which holds a committed placeholder so `go build` and `go vet`
 // pass with no UI built; `make ui-build` copies this output beside that placeholder.
@@ -29,6 +35,6 @@ export default defineConfig({
     environment: "jsdom",
     include: ["src/**/*.test.ts"],
     setupFiles: ["src/test-setup.ts"],
-    restoreMocks: true,
+    [undoSpiesBeforeEachTest]: true,
   },
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { getJSON, loadSurface, SCHEMA_PATH } from "./api";
+import { getJSON, isApiPath, loadSurface, request, SCHEMA_PATH } from "./api";
 
 function answer(body: string, init: ResponseInit = {}): typeof fetch {
   return vi.fn(() => Promise.resolve(new Response(body, init)));
@@ -89,5 +89,72 @@ describe("loadSurface", () => {
   it("passes a refusal through unchanged", async () => {
     const fetch = answer("nope", { status: 500, statusText: "Internal Server Error" });
     expect(await loadSurface({ fetch })).toEqual({ kind: "refused", status: 500, message: "nope" });
+  });
+});
+
+describe("request", () => {
+  it.each([
+    "https://elsewhere.example/api/summary",
+    "//elsewhere.example/api/summary",
+    "/metrics",
+    "/api/../metrics",
+    "/api/history?cursor=x",
+    "/api//summary",
+    "api/summary",
+    "/api/summary#frag",
+  ])("token: is not sent to %s, and neither is the request", async (path) => {
+    expect(isApiPath(path)).toBe(false);
+    const fetch = answer("{}");
+    const result = await request("GET", path, { fetch, token: "s3cret" });
+    expect(result.kind).toBe("unreachable");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("builds the query itself, repeating a key, and keeps the token out of the URL", async () => {
+    const fetch = answer("{}");
+    await request("GET", "/api/history", {
+      fetch,
+      token: "s3cret",
+      query: [
+        ["limit", "50"],
+        ["status", "done"],
+        ["status", "failed"],
+        ["cursor", "a b&c"],
+      ],
+    });
+    const [url, init] = vi.mocked(fetch).mock.calls[0] ?? [];
+    expect(String(url)).toBe("/api/history?limit=50&status=done&status=failed&cursor=a+b%26c");
+    expect(String(url)).not.toContain("s3cret");
+    expect((init?.headers as Record<string, string>)["Authorization"]).toBe("Bearer s3cret");
+  });
+
+  it("sends a body as JSON with its method", async () => {
+    const fetch = answer("{}");
+    await request("DELETE", "/api/exclusions", { fetch, token: "t", body: { path: "/library/films/example-a.mkv" } });
+    const [, init] = vi.mocked(fetch).mock.calls[0] ?? [];
+    expect(init?.method).toBe("DELETE");
+    expect(init?.body).toBe('{"path":"/library/films/example-a.mkv"}');
+    expect((init?.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+  });
+
+  it("keeps a JSON refusal whole, and takes its `error` as the sentence", async () => {
+    const body = { rule: "paused", error: "holdfast is paused; nothing was enqueued", retryable: true, results: [] };
+    const fetch = answer(JSON.stringify(body), { status: 409, statusText: "Conflict" });
+    expect(await request("POST", "/api/scan", { fetch })).toEqual({
+      kind: "refused",
+      status: 409,
+      message: "holdfast is paused; nothing was enqueued",
+      body,
+    });
+  });
+
+  it("falls back to the status text for a JSON refusal with no `error`", async () => {
+    const fetch = answer('{"started":false,"reason":"paused"}', { status: 409, statusText: "Conflict" });
+    expect(await request("POST", "/api/rescan", { fetch })).toMatchObject({
+      kind: "refused",
+      status: 409,
+      message: "Conflict",
+      body: { started: false, reason: "paused" },
+    });
   });
 });
