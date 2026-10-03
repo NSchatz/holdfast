@@ -136,8 +136,8 @@ func TestServeSmoke(t *testing.T) {
 	base := "http://" + addr
 	waitHTTP(t, base+"/api/summary", 3*time.Second)
 
-	// The root path serves the plain-text page: holdfast ships no frontend, so what a
-	// browser gets at / is the endpoint banner and the AGPL section 13 source offer.
+	// The root path serves the plain-text page to a request that does not ask for HTML:
+	// what it gets at / is the endpoint banner and the AGPL section 13 source offer.
 	// Both halves are asserted - a banner with no offer would be a licence failure the
 	// binary is meant to make impossible.
 	if bdy := httpGet(t, base+"/"); !strings.Contains(bdy, "/api/summary") ||

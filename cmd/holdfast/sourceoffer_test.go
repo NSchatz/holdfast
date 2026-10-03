@@ -206,8 +206,8 @@ func TestVersionSubcommandAndTheServedPageNameTheSameBuild(t *testing.T) {
 		t.Fatal("the version subcommand printed nothing")
 	}
 
-	// The page from that same binary, over a real listener. holdfast ships no frontend,
-	// so the root handler's plain-text body IS the offer.
+	// The page from that same binary, over a real listener: the plain-text page the root
+	// answers a request that does not ask for HTML with, whose body IS the offer.
 	ts := httptest.NewServer(server.RootHandler())
 	defer ts.Close()
 	offer := rootOfferOf(t, httpGet(t, ts.URL+"/"))

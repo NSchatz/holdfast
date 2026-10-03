@@ -267,8 +267,8 @@ func TestReadEndpoints_RequireTheReadTokenWhenSet(t *testing.T) {
 		}
 	})
 
-	// The plain-text root page, which this key deliberately does NOT gate. holdfast ships
-	// no frontend, so the root carries the endpoint banner and the AGPL section 13 source
+	// The plain-text root page, which this key deliberately does NOT gate, as it does not
+	// gate the web UI's page. It carries the endpoint banner and the AGPL section 13 source
 	// offer and no library datum at all - there is nothing behind it for a credential to
 	// protect. Asserted as SAME BYTES rather than merely 200, because a gate that served a
 	// different body to an uncredentialled client would also be 200.
