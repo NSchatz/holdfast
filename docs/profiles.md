@@ -923,7 +923,7 @@ node_token: ""              # a secret reference; unset, worker nodes are off
 node_lease_ttl_sec: 60      # ASSUMED; a node heartbeats every quarter of it
 node_max_leases: 4          # ASSUMED; live leases across every node
 node_max_leases_per_node: 1 # ASSUMED; live leases one node may hold
-node_max_transfers: 2       # ASSUMED; uploads in flight across every node
+node_max_transfers: 2       # ASSUMED; source streams and uploads in flight across every node
 node_gate_slots: 1          # ASSUMED; node outputs the server gates at once
 ```
 
@@ -935,21 +935,52 @@ and the four counts 1 to 256; 0 means the default, and anything else refuses nam
 five defaults are **ASSUMED**: nobody has measured a node deployment.
 
 ```yaml
+server_tls_cert: ""   # a plain path to the PEM certificate chain `serve` presents
+server_tls_key: ""    # a secret reference to its PEM private key; both or neither
+```
+
+Two daemon-wide keys read by `serve`. With both set the listener on `server_addr` speaks TLS
+(1.2 at least) for the whole surface; with neither it listens exactly as before. One without the
+other refuses to start naming the missing key, a literal `server_tls_key` refuses as every
+literal credential does, and a pair that does not parse or does not match refuses without
+printing the key. `server_tls_cert` is an absolute path. A probe of a TLS listener must speak
+`https://` and trust the certificate. There is no client certificate and no user login.
+
+```yaml
 worker_server: ""     # the server a `holdfast worker` leases from
 worker_name: ""       # this node's name
 worker_slots: 1       # encodes this worker runs at once
-worker_work_dir: ""   # where the worker writes an encode before it uploads it
-worker_path_map: []   # the server's view of the library to this worker's mounts
+worker_work_dir: ""   # where the worker writes an encode (and, in http mode, the source)
+worker_mode: mapped   # mapped: read the source through a mount; http: download it on the lease
+worker_path_map: []   # mapped mode: the server's view of the library to this worker's mounts
+worker_insecure_http: false  # true accepts plain http:// to a server that is not loopback
+worker_tls_ca: ""     # a PEM bundle trusted beside the system roots
 ```
 
-Five keys a `holdfast worker` reads; `run` and `serve` read none of them. `worker_server` is an
+Eight keys a `holdfast worker` reads; `run` and `serve` read none of them. `worker_server` is an
 absolute http or https URL with no userinfo, query or fragment; `worker_name` is 1 to 64 characters
 from letters, digits, `.`, `_` and `-`; `worker_slots` accepts 1 to 256; `worker_work_dir` is an
 absolute path. `worker_path_map` has the form and the rules of the media-server path maps, with no
 environment form, and one difference in how it is used: a source path no entry covers is refused
-rather than passed through. None of the eleven is a profile knob: a library root cannot carry one
-and none moves a profile digest. The rule they serve, and what this build does and does not yet
-have, is in [docs/design/nodes.md](design/nodes.md#leases).
+rather than passed through.
+
+`worker_mode` is `mapped` (the default: a worker configured before the key existed behaves as it
+did) or `http`. In http mode the worker has no mount: its file names **no** `library_roots` and
+no `worker_path_map`, and one that names either is refused by name; it downloads each leased
+source into `worker_work_dir`, which must have room for the source and its output.
+`holdfast validate` accepts such a file; `run` and `serve` refuse it. `worker_insecure_http`
+defaults to `false`: plain `http://` to a server that is not loopback refuses to start. Written
+`true` it starts, and says at warn level at every start that the node credential - and in http
+mode the media - cross the network in cleartext; with `https://` or a loopback server it does
+nothing. `worker_tls_ca` is an absolute path to a PEM bundle the worker trusts in addition to
+the system roots; an unreadable or empty bundle refuses to start. No key switches certificate
+verification off.
+
+None of the sixteen is a profile knob: a library root cannot carry one and none moves a profile
+digest. Every one has a `HOLDFAST_*` form except `worker_path_map`. The rules they serve are in
+[docs/design/nodes.md](design/nodes.md#leases): the lease, [the source stream](design/nodes.md#http-mode)
+and [the transport](design/nodes.md#transport), with the warnings to read before a worker speaks
+plain HTTP.
 
 ## Where the working file lives
 

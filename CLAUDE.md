@@ -68,6 +68,7 @@ reasoning lives in the document, not in this file.
 - **The health sweep reads every source and reports; it never moves, renames, deletes or repairs a file** - [`docs/design/health-sweep.md`](docs/design/health-sweep.md#health-sweep).
 - **A media server is told about a swap only after it has committed, once, by directory; and a file being played is held, which only ever delays** - [`docs/design/media-clients.md`](docs/design/media-clients.md#media-clients).
 - **A node's output is only ever a candidate: it lands in a working file the server named, on a live lease at the current epoch, with the declared length and digest, and the server's own gates and rename decide** - [`docs/design/nodes.md`](docs/design/nodes.md#leases).
+- **A worker speaks to its server over TLS or to loopback; plain HTTP to any other host is refused unless the operator wrote `worker_insecure_http: true`, which is logged at every start; and a node's source is streamed only on a live lease, with its sha-256 compared on the server before any gate** - [`docs/design/nodes.md`](docs/design/nodes.md#transport).
 - **An arr's webhook is authenticated by a credential that can only queue; both Sonarr Download shapes and Radarr's are read; each file goes through the targeted scan; an unrecognised shape queues nothing** - [`docs/design/media-clients.md`](docs/design/media-clients.md#webhook-intake).
 
 ## Layout
@@ -115,8 +116,8 @@ reasoning lives in the document, not in this file.
   the JSON API is the interface, and `/` is a plain-text page carrying the source offer (a web UI
   was decided by the owner (T14, T18) and is not built).
 - `internal/sourceoffer` - the AGPL section 13 Corresponding Source offer the root path carries.
-- `internal/node` - the worker-node lease protocol's server side: the lease state machine, the caps and the digest-checked upload.
-- `internal/nodeworker` - the `holdfast worker` loop: acquire, map and check the source, encode, upload, complete.
+- `internal/node` - the worker-node lease protocol's server side: the lease state machine, the caps, the hashed source stream and the digest-checked upload.
+- `internal/nodeworker` - the `holdfast worker` loop: acquire, map or download and check the source, encode, upload, complete.
 - `internal/metrics`, `internal/notify` - Prometheus collectors and best-effort
   shoutrrr notifications.
 - `internal/config` - koanf layered config: defaults, then YAML, then `HOLDFAST_*`.
@@ -159,11 +160,10 @@ tool proves its unhappy paths.
 - Small, testable functions; fail safe; match Go idiom and the existing layout.
 - No secrets, ever, and it is MECHANICAL now: `make secret-scan` refuses a tracked
   file carrying an issued credential or named like a credential store, and
-  `make install-hooks` (the one setup step) puts it on the pre-commit path. Both
-  `secret-scan` and its self-test ride `make check`. Synthetic
-  `config.example.yaml` only; real `config.yaml` is gitignored.
+  `make install-hooks` (the one setup step) puts it on the pre-commit path. Both `secret-scan` and
+  its self-test ride `make check`. Synthetic `config.example.yaml` only; real `config.yaml` is gitignored.
 - A credential is reached BY REFERENCE. `server_auth_token`, `server_read_token`, `notify_url`,
-  `tautulli_api_key`, `radarr_api_key`, `sonarr_api_key`, `plex_token`, `webhook_token` and `node_token` carry
+  `tautulli_api_key`, `radarr_api_key`, `sonarr_api_key`, `plex_token`, `webhook_token`, `node_token` and `server_tls_key` carry
   `file:<path>` or `cmd:<argv>`, never a value, and a literal in the file or in `HOLDFAST_*` refuses to
   start - a credential in holdfast's environment is inherited by every `ffmpeg` child.
   `config.SecretBearingKeys` is the closed list; a new credential-bearing key joins it or it is not one. A
