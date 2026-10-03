@@ -74,7 +74,7 @@
           </tr>
         </thead>
         <tbody>
-          {#each q.rows as row (row.path)}
+          {#each q.rows as row, i (i)}
             <tr>
               <td>{row.status}</td>
               <th scope="row" class="path">{row.path}</th>

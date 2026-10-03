@@ -351,7 +351,7 @@
             <tr><th scope="col">Path</th><th scope="col">Withheld since</th><th scope="col">Action</th></tr>
           </thead>
           <tbody>
-            {#each list.paths as entry (entry.path)}
+            {#each list.paths as entry, i (i)}
               <tr>
                 <th scope="row" class="path">{entry.path}</th>
                 <td>{formatTime(entry.createdAt, NOT_RECORDED)}</td>

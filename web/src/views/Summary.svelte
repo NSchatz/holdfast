@@ -61,7 +61,7 @@
           <tr><th scope="col">{keyHeading}</th><th scope="col" class="num">Rows</th></tr>
         </thead>
         <tbody>
-          {#each b.buckets as bucket (bucket.key)}
+          {#each b.buckets as bucket, i (i)}
             <tr><th scope="row">{bucket.key}</th><td class="num">{formatCount(bucket.count)}</td></tr>
           {:else}
             <tr><td colspan="2" class="muted">No rows.</td></tr>
@@ -117,7 +117,7 @@
         <tr><th scope="col">Status</th><th scope="col" class="num">Jobs</th></tr>
       </thead>
       <tbody>
-        {#each s.counts as row (row.status)}
+        {#each s.counts as row, i (i)}
           <tr><th scope="row">{row.status}</th><td class="num">{formatCount(row.count)}</td></tr>
         {:else}
           <tr><td colspan="2" class="muted">The ledger holds no job.</td></tr>
