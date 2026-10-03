@@ -787,6 +787,15 @@ func TestScanEndpoint_AddsNoRouteBeyondScan(t *testing.T) {
 		// The same two handlers under PUT, the other method an arr's connection sends.
 		"PUT /api/webhook/sonarr": true,
 		"PUT /api/webhook/radarr": true,
+		// The worker-node lease endpoints (docs/design/nodes.md). A node leases one job's
+		// encode and uploads its output into the working file the server named, where it is
+		// only a candidate for the engine's own gates: none of the five re-offers a row a
+		// terminal answer closed, restores an original or resolves a parked incident.
+		"POST /api/node/v1/leases":                true,
+		"POST /api/node/v1/leases/{id}/heartbeat": true,
+		"PUT /api/node/v1/leases/{id}/output":     true,
+		"POST /api/node/v1/leases/{id}/complete":  true,
+		"POST /api/node/v1/leases/{id}/fail":      true,
 	}
 	for _, r := range served {
 		// EVERY method under /api/ is the surface this pins, so a route added under PUT,

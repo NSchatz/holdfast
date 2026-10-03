@@ -1313,6 +1313,11 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		fmt.Fprintf(stderr, "holdfast: refusing to start: %v\n", err)
 		return 1
 	}
+	// The node credential likewise: a worker holds it, and it may only lease and upload.
+	if err := checkNodeTokenDistinct(secrets); err != nil {
+		fmt.Fprintf(stderr, "holdfast: refusing to start: %v\n", err)
+		return 1
+	}
 
 	// The daemon serves the WHOLE library - it scans on an interval and takes submissions
 	// for any configured root - so its classification is never narrowed.
@@ -1400,6 +1405,9 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	// The webhook intake's one credential, handed to its one consumer. Unset, both intake
 	// endpoints answer 403.
 	srv.SetWebhookToken(secrets.Get(config.WebhookTokenKey))
+	// The worker nodes' one credential, handed to its one consumer. Unset, the lease
+	// endpoints answer 403; set, they answer 503 until a lease hub is wired behind them.
+	srv.SetNodeToken(secrets.Get(config.NodeTokenKey))
 
 	// The library health sweep (docs/design/health-sweep.md), OFF unless
 	// health_sweep_interval_hours is set. It reads the engine's own enumeration and asks the
