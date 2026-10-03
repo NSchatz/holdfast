@@ -171,6 +171,37 @@ describe("token", () => {
     expect(field().value).toBe("");
   });
 
+  it("token: is not rendered inside an error either, where a failure or a refusal names it", async () => {
+    // An engine that quotes the header it could not send, and a server that echoes it.
+    const s = fakeFetch((call: Call) => {
+      if (call.path === "/api/queue") {
+        throw new TypeError(`invalid header value "${call.headers["Authorization"] ?? ""}"`);
+      }
+      return plain(`not accepted: ${call.headers["Authorization"] ?? "no credential"}`, 401);
+    });
+    await start(s);
+    await enter(TOKEN);
+    await visitEveryView();
+    for (const name of ["Queue", "History"]) {
+      await fireEvent.click(screen.getByRole("button", { name }));
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toContain("the reason is not shown: it repeated the token");
+      expect(document.documentElement.outerHTML).not.toContain(TOKEN);
+    }
+    expect(s.calls.some((call) => call.headers["Authorization"] === `Bearer ${TOKEN}`)).toBe(true);
+  });
+
+  it("token: one a header cannot carry is never sent, and the page says so without repeating it", async () => {
+    const s = server();
+    await start(s);
+    const before = s.calls.length;
+    await enter("two words-synthetic");
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("not sent: the token held is not one a request can carry");
+    expect(s.calls).toHaveLength(before);
+    expect(document.documentElement.outerHTML).not.toContain("two words-synthetic");
+  });
+
   it("token: Forget drops it - later requests carry no credential and the controls are unavailable again", async () => {
     const { calls } = await start();
     await enter(TOKEN);
