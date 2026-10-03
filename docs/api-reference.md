@@ -124,10 +124,13 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | `deinterlaced` | any job that reached the encoder | whether the replacement was produced by **deinterlacing** the source. `true` or `false` is a measurement this build took; `null` is NOT RECORDED - a row written before the column existed, or a job that never reached an encode. The two are different facts about a source that has since been deleted, so `null` is never reported as not-deinterlaced |
 | `deinterlace_filter` | a job that deinterlaced | the filter and its parameters, whole (`yadif=mode=send_frame:parity=auto:deint=all`) - the same filter the perceptual gate produced its reference with, so the score beside it is a measurement of THIS encode. `null` on a job that deinterlaced nothing, which `deinterlaced: false` already states |
 | `source_codec` | would-transcode | the video codec the SOURCE was in when a dry run decided it - `null` when it was never read |
+| `source_codec` | skipped | the video codec the SOURCE is in, as the probe snapshot the skip was decided off named it - under a real run and a dry run alike. `null` when no snapshot named one: a guard that fired in front of the probe (`restored-original` always; `hardlinked`, `operator-excluded` and `symlinked-source` under a root whose configuration needs no source height, where nothing had probed the file yet), a file with no readable video stream, or a row written before skips recorded it. No probe is ever spent to fill it, and a row already written is never backfilled |
+| `source_codec` | encoding, verifying | the codec the guards judged when they admitted this attempt to the encoder (see [An in-flight job](#an-in-flight-job---how-far-it-has-got)). A `done` and a `failed` row record none |
 | `source_bytes`, `output_bytes` | done | the sizes either side of the swap |
 | `source_bytes` | would-transcode | the size of the file that was decided. `output_bytes` is `null`: nothing encoded it, so there is no output to have a size |
+| `source_bytes` | encoding, verifying | the size of the source this attempt was decided on, from the same read its row is keyed by. `output_bytes` is `null` until the job is done |
 | `encode_ms` | done, and a failure after the encode ran | wall-clock encode time |
-| `source_width`, `source_height` | any row a probe reached | the SOURCE's pixel dimensions. A library root can band its thresholds by source height (see [docs/profiles.md](profiles.md#resolution-rules)), so this is what says which band the file was judged in. `null` when nothing measured it: a guard that fired in front of the probe, or a row written before these columns existed |
+| `source_width`, `source_height` | any row a probe reached | the SOURCE's pixel dimensions. A library root can band its thresholds by source height (see [docs/profiles.md](profiles.md#resolution-rules)), so this is what says which band the file was judged in. `null` when nothing measured it: a guard that fired in front of the probe, or a row written before these columns existed. A `hardlinked`, `operator-excluded` or `symlinked-source` skip carries them where its root's configuration had already probed the file (a `max_height` ceiling, or rules that band on source height) and `null` elsewhere. An **encoding** or **verifying** row carries them too, from the decision that admitted it |
 | `output_width`, `output_height` | any job whose encoder produced a file | the OUTPUT's pixel dimensions, measured on the file the encoder wrote and recorded whether the gates then accepted it or rejected it. A job under no `max_height` ceiling changes nothing about the picture's size, so they are the source's own dimensions on such a job - which is what makes a row where they are not a fact worth having. `null` when no output was produced |
 | `downscaled` | any job that reached the encoder | whether the replacement was produced by **scaling the picture down** to a configured `max_height`. `true` or `false` is a measurement this build took; `null` is NOT RECORDED - a row written before the column existed, or a job that never reached an encode. The two are different facts about a source that has since been deleted, so a `null` is never reported as a job that scaled nothing |
 | `downscale_scaler` | a job that scaled | the resampler that did it (`lanczos`). Two resamplers produce two different pictures from one source, so "scaled" with none named is not a provenance claim. The dimensions it produced are `output_width`/`output_height`. `null` on a job that scaled nothing, which `downscaled: false` already states |
@@ -135,7 +138,7 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | `guard_attributes`, `guard_time_resolution` | any job that reached the swap | which source attributes the source-mutation guard compared (`size,mtime`) and the resolution of the timestamp it compared (`1s`) - the granularity that check actually achieved |
 | `guard_residual_window` | as above | which of the two documented residual windows applies to the storage the guard ran against: `residual-window-local` or `residual-window-network`. A **class label**, never a duration - see [docs/filesystem.md](docs/filesystem.md#residual-window-local) |
 | `swap_cause` | a swap failure with a distinct cause | today only `cross-filesystem` - the temp and the target were not on the same mounted filesystem. Absent for every other failure |
-| `library_root` | any row this build decided | the **cleaned path of the library root** whose profile decided the file. `null` when it was not recorded: a row written before per-library profiles existed, or one no profile decided (a `restored-original` skip is an operator's act, not a gate's) |
+| `library_root` | any row this build decided, and an encoding or verifying row | the **cleaned path of the library root** whose profile decided the file. `null` when it was not recorded: a row written before per-library profiles existed, one no profile decided (a `restored-original` skip is an operator's act, not a gate's), or a `probing` row, whose attempt has not decided yet |
 | `profile_digest` | as above | a stable identifier for that root's **resolved** overridable knobs. `null` on the same rows `library_root` is null on |
 | `dropped_streams` | any job that reached the encoder | the source streams this job **selected away**, each as `{index, type, language}` - the index it sat at in the container, its ffprobe `codec_type`, and the language tag as the SOURCE spelled it (`null` when it carried none). `[]` means the job applied a selection and dropped **nothing**; `null` means **not recorded** - a row written before this existed, or one that never reached a selection. The two are different facts and the dropped bytes are not recoverable from the replacement, so this row is the only record there is. See [docs/profiles.md](profiles.md#stream-selection) |
 | `audio_tracks` | any job whose configuration transforms audio and that reached the encoder | what the job did to each audio track (see [docs/design/audio.md](design/audio.md)), each as `{source_index, output_index, action, reason, codec, layout, sample_rate, bitrate_kbps, loudness, measured_lufs, achieved_lufs}`. `action` is `copied`, `reencoded`, `kept`, `added`, `downmix` or `downmix-skipped` (no track added; `output_index` is then `null`); `reason` says why a track was copied or a downmix not added; `codec` to `bitrate_kbps` are `null` on a copied track; `loudness` is `linear` or `dynamic` as the encoder reported, `not-recorded` where no report came back, and `null` where the track was not normalised. `null` for the whole field means **not recorded**: every job whose configuration sets no audio key, and every row written before this existed |
@@ -601,6 +604,26 @@ A terminal row says what happened; an **active** row says what is happening. Eve
 snapshot carries `now`, the server's clock when the frame was built - together those are how a client
 computes **how long a file has been in the state it is in**, from the timestamps in each frame rather
 than by counting up locally.
+
+An **encoding** or **verifying** row carries the **decision facts** of the attempt in flight - how big
+the running job is, what it is and which drive it is on:
+
+| Field | What it is |
+|---|---|
+| `source_bytes` | the size of the source, from the read the job's row is keyed by |
+| `source_codec` | the codec the source-side guards judged |
+| `source_width`, `source_height` | the dimensions the guards' probe established, `null` where it established none |
+| `library_root`, `profile_digest` | the root whose profile admitted the file, and that profile's digest |
+
+They are written once, when the source-side guards admit the file to the encoder, from values that
+decision already held, and they are read from the ledger: no file is probed or opened to serve them, so
+they are served the same whether or not the file is still at its path. They are the facts of THIS attempt.
+A claim clears whatever an earlier attempt or a dry-run decision recorded, so a **probing** row carries
+none of them - its attempt has not decided yet - and neither does a `pending` row that has never been
+claimed. Should the ledger refuse the write, the job runs exactly as it would have and the row shows them
+as `null` rather than as anything made up. The terminal write then defines the row's whole proof as it
+always has. An active row's `source_bytes` is never counted into `bytes_reclaimed_lifetime` or the
+`size_ratio` aggregate: only `done` rows contribute a size.
 
 An **encoding** row additionally carries what the encoder itself reports, read from ffmpeg's documented
 `-progress` stream rather than estimated from elapsed time:

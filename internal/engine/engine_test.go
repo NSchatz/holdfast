@@ -3248,9 +3248,9 @@ func (w *writeCountingStore) ClearSkip(ctx context.Context, path, fingerprint, r
 }
 
 func (w *writeCountingStore) RecordSkip(ctx context.Context, path, fingerprint, reason string,
-	by store.Decision, profile string) (bool, error) {
+	by store.Decision, profile string, src store.SourceFacts) (bool, error) {
 	w.note(path, "RecordSkip:"+reason)
-	return w.Store.RecordSkip(ctx, path, fingerprint, reason, by, profile)
+	return w.Store.RecordSkip(ctx, path, fingerprint, reason, by, profile, src)
 }
 
 func (w *writeCountingStore) Finish(ctx context.Context, path, fingerprint string, s store.Status,

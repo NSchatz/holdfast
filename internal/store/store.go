@@ -293,8 +293,12 @@ type Outcome struct {
 
 	// SourceCodec is the video codec the SOURCE was in when this job was decided, as
 	// ffprobe named it. It is recorded on a dry-run decision, whose whole purpose is to say
-	// what a real run WOULD do to that file: an operator sizing the job needs to know what
-	// is being re-encoded.
+	// what a real run WOULD do to that file (an operator sizing the job needs to know what
+	// is being re-encoded); on every skipped row decided off a probe snapshot, so the ledger
+	// can say what a skipped source was without probing it again; and on a row that is
+	// encoding or verifying, from the decision that admitted it. "" is NOT RECORDED: the
+	// decision was taken before any snapshot, or the snapshot named no codec. A done or a
+	// failed row records none.
 	SourceCodec string
 
 	// TargetPath is the path a replacement WOULD have been written to. It is recorded by a
@@ -435,6 +439,31 @@ type Outcome struct {
 type Decision struct {
 	LibraryRoot   string
 	ProfileDigest string
+}
+
+// SourceFacts is what one probe snapshot read about a source: its video codec as ffprobe
+// named it, and its coded dimensions. A skip recorded before the claim carries it, so the
+// row says what the skipped file was.
+//
+// The zero value is NOTHING WAS READ, and each field keeps the rule every measurement on a
+// row keeps: "" and nil are NOT RECORDED and are stored NULL. A snapshot that read a codec
+// and no dimensions records exactly that.
+type SourceFacts struct {
+	Codec  string
+	Width  *int
+	Height *int
+}
+
+// DecisionFacts is what the decision that admitted one attempt to the encoder established,
+// and what its row carries while it is encoding and verifying: the source's size, codec and
+// dimensions, and the profile that decided it. Every field is one the decision already
+// held; none is measured for this record.
+//
+// "" and nil are NOT RECORDED and are stored NULL, never "" and never 0.
+type DecisionFacts struct {
+	Source      SourceFacts
+	SourceBytes *int64
+	Decision    Decision
 }
 
 // GuardRestoredOriginal is the one skip-guard token this package has to know by name.
@@ -913,6 +942,21 @@ type Store interface {
 	// holds (e.g. probing -> encoding -> verifying).
 	Advance(ctx context.Context, path, fingerprint string, s Status) error
 
+	// AdmitToEncoder moves a row the caller holds in probing to encoding and records, in the
+	// same statement, the DECISION FACTS of the attempt that admitted it: what the source is
+	// and which profile decided it. They are what an operator reads off the in-flight row,
+	// and they stay on it through verifying until the terminal write, which defines the
+	// row's whole proof as it always has.
+	//
+	// It writes the six decision columns and nothing else an outcome carries, and only onto a
+	// row that is still probing: a row any other writer has since moved is left exactly as
+	// that writer left it. One statement, so no reader sees an encoding row without its
+	// facts or a probing row with them. A fact the decision did not establish is recorded
+	// NULL, never "" and never 0.
+	//
+	// It is REPORTING. The caller survives its error and advances the row by Advance.
+	AdmitToEncoder(ctx context.Context, path, fingerprint string, d DecisionFacts) error
+
 	// Finish records a terminal outcome for path+fingerprint. Failed increments
 	// fail_count (retry accounting); Done/Skipped do not.
 	//
@@ -1028,7 +1072,12 @@ type Store interface {
 	// beside reason on purpose: two adjacent strings is precisely the call that silently
 	// swaps, and a row naming its guard as its profile would be worse than one naming
 	// neither.
-	RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision, profile string) (changed bool, err error)
+	//
+	// src is what the probe snapshot ALREADY TAKEN for this file read about the source, and
+	// its zero value where none was taken before the guard fired: the row then records NULL
+	// for each of them, never "" and never 0. They describe the source and not an encode, so
+	// they belong to this attempt exactly as the reason does.
+	RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision, profile string, src SourceFacts) (changed bool, err error)
 
 	// ClearSkip deletes the row ONLY when it is a Skipped row whose reason matches: one
 	// mutable guard's parked file, released. The reason+status match is what keeps it from
