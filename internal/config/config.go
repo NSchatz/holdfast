@@ -68,6 +68,7 @@ var knownKeys = map[string]bool{
 	radarrURLKey: true, radarrAPIKeyKey: true, radarrPathMapKey: true,
 	sonarrURLKey: true, sonarrAPIKeyKey: true, sonarrPathMapKey: true,
 	plexURLKey: true, plexTokenKey: true, plexPathMapKey: true,
+	webhookTokenKey: true,
 	excludePathsKey: true, includePathsKey: true,
 	audioLanguagesKey: true, subtitleLanguagesKey: true,
 	keepCommentaryKey: true, remuxOnlyKey: true, subtitleSidecarsKey: true, cropKey: true, dolbyVisionP7Key: true,
@@ -155,6 +156,9 @@ func defaultLayer() map[string]any {
 		radarrURLKey: "", radarrAPIKeyKey: "",
 		sonarrURLKey: "", sonarrAPIKeyKey: "",
 		plexURLKey: "", plexTokenKey: "",
+		// The webhook intake is OFF until its credential is written: with no webhook_token
+		// both intake endpoints answer 403 and queue nothing.
+		webhookTokenKey: "",
 		// Stream selection, every value reproducing what this tool did before the keys
 		// existed: carry every audio and subtitle stream, keep commentary, re-encode the
 		// video. A knob in profileKnobs is seeded from the top-level value of the same
@@ -783,6 +787,13 @@ type Config struct {
 	PlexURL       string  `yaml:"plex_url"`
 	PlexToken     string  `yaml:"plex_token"`
 	PlexPathMap   PathMap `yaml:"plex_path_map"`
+
+	// WebhookToken is a SECRET REFERENCE (secrets K1) to the one credential the Sonarr and
+	// Radarr webhook intake accepts (docs/design/media-clients.md#webhook-intake). Empty
+	// (default) leaves both intake endpoints answering 403. It authorises those two endpoints
+	// and nothing else, and no other credential is accepted on them. A literal here, or in
+	// HOLDFAST_WEBHOOK_TOKEN, is a startup REFUSAL.
+	WebhookToken string `yaml:"webhook_token"`
 }
 
 // SecretBearingKeys is the closed list of configuration keys whose value is a credential,
@@ -799,8 +810,12 @@ type Config struct {
 // The three media-server credentials (`radarr_api_key`, `sonarr_api_key`, `plex_token`) are
 // here on the same terms: each is sent in a request header and never in a URL, and a literal
 // one would be inherited by every ffmpeg child.
+//
+// `webhook_token` is the credential a Sonarr or Radarr Webhook connection presents to the
+// intake endpoints. It is a bearer credential like the two server tokens, and is here for the
+// reason they are.
 var SecretBearingKeys = []string{"server_auth_token", "server_read_token", "notify_url", "tautulli_api_key",
-	radarrAPIKeyKey, sonarrAPIKeyKey, plexTokenKey}
+	radarrAPIKeyKey, sonarrAPIKeyKey, plexTokenKey, webhookTokenKey}
 
 // SecretRefs parses every secret-bearing key into a reference, and is the ONE place
 // that reading happens: Validate calls it so every subcommand refuses a literal at start,
@@ -811,7 +826,7 @@ var SecretBearingKeys = []string{"server_auth_token", "server_read_token", "noti
 // naming the key and how to convert it, with no part of the value in the message.
 func (c *Config) SecretRefs() ([]secret.Ref, error) {
 	raw := []string{c.ServerAuthToken, c.ServerReadToken, c.NotifyURL, c.TautulliAPIKey,
-		c.RadarrAPIKey, c.SonarrAPIKey, c.PlexToken}
+		c.RadarrAPIKey, c.SonarrAPIKey, c.PlexToken, c.WebhookToken}
 	refs := make([]secret.Ref, 0, len(SecretBearingKeys))
 	for i, key := range SecretBearingKeys {
 		r, err := secret.ParseRef(key, raw[i])
@@ -1806,6 +1821,9 @@ func (c *Config) Validate() error {
 	// reported as one: a half-configured target, an address that is not an absolute http or
 	// https URL, or a path-map side that is not absolute refuses here, naming the key.
 	if err := c.validateMediaTargets(); err != nil {
+		return err
+	}
+	if err := c.validateWebhookToken(); err != nil {
 		return err
 	}
 

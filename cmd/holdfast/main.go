@@ -1307,6 +1307,12 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	if code != 0 {
 		return code
 	}
+	// The intake's credential must not be a server token by another route (the reference
+	// check is config.Validate's; this is the resolved half). Refused before anything opens.
+	if err := checkWebhookTokenDistinct(secrets); err != nil {
+		fmt.Fprintf(stderr, "holdfast: refusing to start: %v\n", err)
+		return 1
+	}
 
 	// The daemon serves the WHOLE library - it scans on an interval and takes submissions
 	// for any configured root - so its classification is never narrowed.
@@ -1391,6 +1397,9 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	srv := server.New(ctx, *cfg, secrets.Get("server_auth_token"), secrets.Get("server_read_token"),
 		st, ctrl, hub, metricsHandler, log)
 	srv.SetSubmissions(subs)
+	// The webhook intake's one credential, handed to its one consumer. Unset, both intake
+	// endpoints answer 403.
+	srv.SetWebhookToken(secrets.Get(config.WebhookTokenKey))
 
 	// The library health sweep (docs/design/health-sweep.md), OFF unless
 	// health_sweep_interval_hours is set. It reads the engine's own enumeration and asks the
@@ -1428,6 +1437,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 			"addr", addr,
 			"control_enabled", !secrets.Get("server_auth_token").Empty(),
 			"read_gated", !secrets.Get("server_read_token").Empty(),
+			"webhook_enabled", !secrets.Get(config.WebhookTokenKey).Empty(),
 			"scan_interval_sec", cfg.ScanIntervalSec,
 			"health_sweep_interval_hours", cfg.HealthSweepIntervalHours,
 			"queue_order", cfg.EffectiveQueueOrder(),

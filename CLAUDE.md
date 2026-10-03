@@ -67,6 +67,7 @@ reasoning lives in the document, not in this file.
 - **The queue decides only the order files are offered in: priority, then the declared order, never which files** - [`docs/design/queue-order.md`](docs/design/queue-order.md#queue-order).
 - **The health sweep reads every source and reports; it never moves, renames, deletes or repairs a file** - [`docs/design/health-sweep.md`](docs/design/health-sweep.md#health-sweep).
 - **A media server is told about a swap only after it has committed, once, by directory; and a file being played is held, which only ever delays** - [`docs/design/media-clients.md`](docs/design/media-clients.md#media-clients).
+- **An arr's webhook is authenticated by a credential that can only queue; both Sonarr Download shapes and Radarr's are read; each file goes through the targeted scan; an unrecognised shape queues nothing** - [`docs/design/media-clients.md`](docs/design/media-clients.md#webhook-intake).
 
 ## Layout
 
@@ -111,8 +112,8 @@ reasoning lives in the document, not in this file.
   process really has: they size the libvmaf and libx265 threads and set the resident
   memory at which an encode is aborted.
 - `internal/schedule` - host-fair run windows.
-- `internal/server` - the HTTP surface. holdfast ships no frontend yet: the JSON API
-  is the interface, and `/` is a plain-text page carrying the source offer (a web UI
+- `internal/server` - the HTTP surface, with the Sonarr and Radarr webhook intake. No frontend yet:
+  the JSON API is the interface, and `/` is a plain-text page carrying the source offer (a web UI
   was decided by the owner (T14, T18) and is not built).
 - `internal/sourceoffer` - the AGPL section 13 Corresponding Source offer the root
   path carries.
@@ -162,13 +163,12 @@ tool proves its unhappy paths.
   `secret-scan` and its self-test ride `make check`. Synthetic
   `config.example.yaml` only; real `config.yaml` is gitignored.
 - A credential is reached BY REFERENCE. `server_auth_token`, `server_read_token`, `notify_url`,
-  `tautulli_api_key`, `radarr_api_key`, `sonarr_api_key` and `plex_token` carry `file:<path>` or
-  `cmd:<argv>`, never a value, and a literal in the file or in `HOLDFAST_*` refuses to start - a
-  credential in holdfast's environment is inherited by every `ffmpeg` child. `config.SecretBearingKeys`
-  is the closed list; a new credential-bearing key joins it or it is not one. A resolved value is a
-  `secret.Value`, which renders as `<redacted>` through `fmt`, `slog`, JSON and text; `Expose()` is the
-  only route to the plaintext, so grep for it to find every site that reads one. `docs/secrets.md` is
-  the reference.
+  `tautulli_api_key`, `radarr_api_key`, `sonarr_api_key`, `plex_token` and `webhook_token` carry
+  `file:<path>` or `cmd:<argv>`, never a value, and a literal in the file or in `HOLDFAST_*` refuses to
+  start - a credential in holdfast's environment is inherited by every `ffmpeg` child.
+  `config.SecretBearingKeys` is the closed list; a new credential-bearing key joins it or it is not one. A
+  resolved value is a `secret.Value`, which renders as `<redacted>` through `fmt`, `slog`, JSON and text;
+  `Expose()` is the only route to the plaintext, so grep for it. `docs/secrets.md` is the reference.
 - Commit as the repository's configured git identity; no `Co-Authored-By` and no AI
   co-author trailer.
 - No owner identity in a tracked file: the owner's name and email appear only in `LICENSE`

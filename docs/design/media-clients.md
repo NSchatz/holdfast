@@ -152,6 +152,98 @@ operator may have put something into an address that does not belong there: a re
 target name and a failure class from a closed vocabulary. The clients follow no redirect, so a
 credential header cannot be carried to an address the operator did not configure.
 
+<a id="webhook-intake"></a>
+
+## Webhook intake
+
+**An arr's webhook is authenticated by a credential that can only queue; both Sonarr Download
+shapes and Radarr's are read; each file goes through the targeted scan; and a shape that is not
+recognised queues nothing.** This is the opposite direction to everything above: here an arr
+tells holdfast, and the code is `internal/server/webhook.go`.
+
+**One credential, one purpose.** The intake has a key of its own, `webhook_token`, and three
+properties follow from that choice:
+
+- It authorises `/api/webhook/sonarr` and `/api/webhook/radarr` and nothing else. No other gate
+  compares against it, so the secret an arr holds can queue a file that lies inside a configured
+  library root and cannot pause, scan or withhold a path. On a control endpoint it is answered
+  401, or 403 while no control token is configured; on a read endpoint 401 while
+  `server_read_token` is set. While that key is unset the reads are open to every caller, as they
+  are without this key: the webhook token is not what opens them.
+- No other credential opens the intake. Accepting `server_auth_token` there would make the control
+  token the convenient thing to paste into an arr, and the control token would then live in a
+  second service's database. It is refused, so there is no reason to hand it over. For the
+  same reason a `webhook_token` written as the same reference as either server token refuses to
+  start, and `serve` refuses one that resolves to the same value as either by another reference
+  (compared in constant time, naming the keys and no value).
+- It arrives in a header only. An arr's Webhook connection can send HTTP Basic credentials or
+  custom headers, so the token is accepted as the Basic password (any username) or as a bearer
+  token. A URL form was not built: a query string or a path segment reaches access logs and
+  proxies.
+
+Without the key the intake answers 403, as every mutating endpoint does without its credential.
+
+**The same pipeline.** The intake adds a caller to the targeted scan and nothing else. Each path
+is judged by the engine's one eligibility decision and offered to the one submission queue, by the
+same function `POST /api/scan` calls, so the root containment, the path hygiene, the per-request
+limits and the claim are that endpoint's. It is not `requeue`: a file a terminal row answered
+stays answered.
+
+**Paths are mapped back, never guessed.** An arr names a file as its own container sees it.
+`sonarr_path_map` and `radarr_path_map` already state the relation for the rescan clients, so the
+intake reads the same maps in reverse; a path no entry matches is judged as it stands, and a path
+that lands outside every root is refused by name.
+
+**A path is never cleaned by spelling.** Rewriting a prefix is lexical; resolving `..` is not,
+because the filesystem resolves it through whatever the segment before it really is. With a link
+inside a root that points out of it, `/tv/link/../Show/x.mkv` names a file beside the link's
+target, and a lexical clean would turn it into `/tv/Show/x.mkv`, a file inside the root:
+`POST /api/scan` refuses that string and the intake would have queued it. So an absolute path
+that is not already in its clean form is refused per file (`path-not-clean`) without being mapped,
+cleaned or judged, and a clean one reaches the engine's judge exactly as `POST /api/scan` hands
+it one. Property names, the nested `path` included, are matched exactly.
+
+**A shape that is not recognised queues nothing.** Property names are matched exactly as the arr
+serialises them. A `Download` is read for `episodeFile` or `episodeFiles` (Sonarr) or `movieFile`
+(Radarr), a `Rename` for its renamed-file list, and nothing else in a payload names a file to
+queue: in particular not `deletedFiles`, which an upgrade carries for the files it replaced. A
+payload carrying the other arr's keys is a connection pointed at the wrong endpoint, and queues
+nothing even where it also names a file under this endpoint's key.
+
+**Not a failed delivery.** An arr records a failure for any delivery that throws, and stops
+sending to a connection while it is in the resulting back-off. An event holdfast does not consume,
+a file in a library it is not pointed at and a pause the operator chose are not failures, so each
+is answered 200 with the reason in the body and one log record. A body that is not the arr's
+JSON, a queue that could not take a file and a missing credential are failures and are answered
+as such. A Test event from the wrong arr is answered 400, because a Test is a question and the
+honest answer to it is that the connection is wrong.
+
+**Rename.** The file is queued under its new path. Nothing is done about a job already queued
+under the previous path: the submission queue has no removal, and adding one for this would be a
+second way to take work out of the pipeline. Such a job ends on its own when its turn comes,
+because the path no longer names a file.
+
+**Sources** (read 2026-10-02), each under `src/NzbDrone.Core/Notifications/Webhook/` unless a
+path is given:
+
+- Sonarr at tag `v4.0.20.3014` (<https://github.com/Sonarr/Sonarr/tree/v4.0.20.3014>):
+  `WebhookPayload.cs` (`eventType`), `WebhookEventType.cs` (the event names, and the converter
+  that keeps their declared spelling), `WebhookImportPayload.cs` (`episodeFile`, `isUpgrade`,
+  `deletedFiles`), `WebhookImportCompletePayload.cs` (`episodeFiles`), `WebhookEpisodeFile.cs`
+  (`path`), `WebhookRenamePayload.cs` and `WebhookRenamedEpisodeFile.cs` (`renamedEpisodeFiles`,
+  `previousPath`), `WebhookBase.cs` (both Download builders and the Test payload),
+  `WebhookSettings.cs`, `WebhookMethod.cs` and `WebhookProxy.cs` (URL, POST or PUT, Username,
+  Password, Headers).
+- Radarr at tag `v6.4.4.10685` (<https://github.com/Radarr/Radarr/tree/v6.4.4.10685>): the same
+  files, with `WebhookImportPayload.cs` (`movieFile`, `isUpgrade`, `deletedFiles`),
+  `WebhookMovieFile.cs` (`path`), `WebhookRenamePayload.cs` and `WebhookRenamedMovieFile.cs`
+  (`renamedMovieFiles`, `previousPath`).
+- In both: `src/NzbDrone.Common/Serializer/Newtonsoft.Json/Json.cs` (camelCase property names,
+  null properties omitted), `src/NzbDrone.Common/Http/Dispatchers/ManagedHttpDispatcher.cs`
+  (Basic credentials are sent with the first request), and
+  `src/NzbDrone.Core/Notifications/NotificationService.cs` with `NotificationFactory.cs` (a
+  delivery that throws records a failure, and a connection in back-off is not sent to).
+
 ## What is not established
 
 No goal of this program contacts a real Plex, Sonarr or Radarr, so everything above is proved
@@ -159,3 +251,8 @@ against fakes built from the documented shapes. Marked `ASSUMED` in `internal/me
 left for the owner's live check: that a real Plex session carries `Media[].Part[].file`; that
 the refresh path's `sectionId` is the section's `key`; the camelCase spelling of `seriesId` and
 `movieId` in a command body; and how Plex's partial scan treats the `.holdfast-undo` folder.
+
+The webhook intake is proved against fixtures written by hand from the payload classes cited
+above, not against payloads captured from a running arr. `ASSUMED`, for the same live check: that
+an arr answers a non-2xx Test by refusing to save the connection (the source shows the failure is
+raised, and the user-interface behaviour was not read).

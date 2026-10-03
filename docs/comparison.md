@@ -10,7 +10,7 @@ project's own licence text or project page. Other tools move: re-check before yo
 *Migrate from Tdarr* guide. If you are choosing between us, choose on the difference, not on a claim of
 uniqueness we would not be able to defend - and the difference does not run one way.
 
-**Where Alchemist is ahead.** Seven capabilities it has and holdfast does not, four of them capabilities
+**Where Alchemist is ahead.** Six capabilities it has and holdfast does not, four of them capabilities
 holdfast only half has, said plainly rather than left out:
 
 - **Per-library profiles**, giving movies, TV and home videos different behaviour per library. holdfast
@@ -21,21 +21,22 @@ holdfast only half has, said plainly rather than left out:
   container marks as commentary (`audio_languages`, `subtitle_languages`, `keep_commentary` -
   [profiles.md](profiles.md#stream-selection)), and has no rule about which track is the default.
   Whatever it keeps is stream-copied untouched.
-- **Sonarr/Radarr webhook intake**, through a narrowed webhook token with optional container path
-  translations. holdfast has no webhook receiver at all; an *arr calls the generic scan endpoint behind
-  the control token ([api-reference.md](api-reference.md)).
 - **A Jellyfin integration** - a narrowed plugin token for enqueue, completion events, job details and
   library refresh. holdfast ships nothing of the kind.
 - **Named API tokens with access classes** - read-only, webhook, plugin, full access. holdfast half has
-  this: two bearer tokens at two access levels, `server_read_token` for the read endpoints and
-  `server_auth_token` for control ([api-reference.md](api-reference.md)), and nothing narrower, such as
-  a token that may only enqueue.
+  this: three credentials at three access levels, `server_read_token` for the read endpoints,
+  `server_auth_token` for control and `webhook_token`, which may only enqueue a file through the
+  Sonarr/Radarr webhook intake ([api-reference.md](api-reference.md)). They are three fixed keys, not
+  named tokens an operator mints, and there is no plugin class.
 - **An off-peak scheduler with a priority queue.** holdfast half has this: a daily `run_window`, a
   per-core load cap and a `queue_order` (path, largest, smallest, newest or oldest first), and no
   priority queue.
 - **Automatic hardware selection with CPU fallback** across NVIDIA, Intel, AMD and Apple. holdfast will
   not guess: `encoder:` is configured, and a hardware encoder with no usable device stops the run
   rather than quietly falling back to CPU.
+
+Both tools take a **Sonarr/Radarr webhook** behind a narrowed token with container path translations:
+holdfast's is the native intake in [docker.md](docker.md#telling-holdfast-about-one-file-sonarr--radarr).
 
 **Two more tools work this ground.** Both are described from their own project pages and nothing else -
 no ranking, no popularity, no weight class, because no source this project could obtain carries one.
