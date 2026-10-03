@@ -32,10 +32,23 @@ import (
 // output with no real ffprobe on the box.
 const fakeFFprobeEnv = "HOLDFAST_FAKE_FFPROBE"
 
+// fakeExitSleep is the GORACE option every fake ffprobe child is started with. Under -race,
+// a Go process sleeps atexit_sleep_ms (1000 by default) on its way out, and the fake is this
+// test binary re-executed once per probe - several hundred times in this package, one after
+// another - so the default cost the package six minutes of nothing but those sleeps, on
+// every host alike. Only the CHILDREN read it: GORACE is read once, when a process starts,
+// so this process has already read its own and keeps the default sleep. A child still runs
+// under the race detector, and a race in it still fails its exit status.
+const fakeExitSleep = "atexit_sleep_ms=0"
+
 func TestMain(m *testing.M) {
 	if os.Getenv(fakeFFprobeEnv) != "" {
 		fakeFFprobeMain()
 		return
+	}
+	if err := os.Setenv("GORACE", strings.TrimSpace(os.Getenv("GORACE")+" "+fakeExitSleep)); err != nil {
+		fmt.Fprintf(os.Stderr, "set GORACE for the fake ffprobe: %v\n", err)
+		os.Exit(1)
 	}
 	os.Exit(m.Run())
 }
