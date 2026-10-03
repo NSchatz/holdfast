@@ -676,6 +676,10 @@ type Hub struct {
 	// what is in the set, what is deliberately not, and why the bound exists.
 	figures ledgerCache
 
+	// rootFigures is the per-root ledger read GET /api/summary publishes, held between
+	// refreshes on the same interval (summary_roots.go). No frame carries it.
+	rootFigures rootLedgerCache
+
 	// now is the clock the frame's `now` basis and every figure's age are measured on.
 	// It is a field rather than a direct time.Now call so a test can advance the clock
 	// across the refresh interval without sleeping through it.

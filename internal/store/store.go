@@ -1086,6 +1086,18 @@ type Store interface {
 	// operator space is free while it is not. It falls to zero as the releases run.
 	HeldByUndoWindow(ctx context.Context) (int64, error)
 
+	// HeldBySource returns every LIVE retention's source path and held bytes, source path
+	// ascending: the rows HeldByUndoWindow sums, one by one, so a caller can split that
+	// figure by library root. It is a read: it releases, restores and re-dates nothing.
+	HeldBySource(ctx context.Context) ([]HeldSource, error)
+
+	// RootTotals returns the per-root sizing figures of the ledger, one entry per RECORDED
+	// library root (and one under "" for the rows that recorded none), root ascending: the
+	// `would-transcode` candidates with and without a recorded source size, and the `done`
+	// rows a projection can be measured on. It is whole-ledger work, so a caller that
+	// publishes it bounds how often it is asked. It is a read and writes no row.
+	RootTotals(ctx context.Context) ([]RootTotal, error)
+
 	// Retain records one retained original, replacing any earlier record for the same
 	// source path: an earlier one can only be a retention that was already restored, since
 	// a live one blocks the swap and a released one is deleted.

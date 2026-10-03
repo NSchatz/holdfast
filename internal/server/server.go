@@ -78,6 +78,10 @@ type Server struct {
 	// test that wired none: the root path then answers every request with the plain-text
 	// page and the asset route answers 404.
 	ui *ui.Site
+
+	// free is the bounded free-space read behind the summary's per-root free_bytes
+	// (summary_roots.go). The zero value reads internal/diskfree.
+	free freeSpace
 }
 
 // HealthSource is the health sweep's in-memory state, which the ledger does not hold.
@@ -406,6 +410,15 @@ type controlState struct {
 	Paused                 bool           `json:"paused"`
 	Scanning               bool           `json:"scanning"`
 	Aggregates             aggregatesDTO  `json:"aggregates"`
+
+	// The sizing figures (S0169, summary_roots.go). BytesHeldByUndoWindow is the figure
+	// the SSE snapshot and the holdfast_bytes_held_by_undo_window gauge report; Roots
+	// splits it, and the candidate, projection and free-space figures, per configured
+	// library root; RootsUnattributed holds what no configured root accounts for. Every
+	// figure is null where it could not be read, never 0.
+	BytesHeldByUndoWindow *int64                `json:"bytes_held_by_undo_window"`
+	Roots                 []rootTotalsDTO       `json:"roots"`
+	RootsUnattributed     unattributedTotalsDTO `json:"roots_unattributed"`
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
@@ -418,6 +431,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	for st, n := range sum {
 		counts[string(st)] = n
 	}
+	held, roots, unattributed := s.rootSizing(r.Context())
 	// The same whole-ledger figure set the stream publishes, from the same cache and
 	// under the same refresh interval: a client that polls sees what a client that
 	// subscribes sees, and polling this endpoint cannot make the figures cost more than
@@ -429,6 +443,9 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		Paused:                 s.ctrl.Paused(),
 		Scanning:               s.ctrl.Scanning(),
 		Aggregates:             aggregatesOf(s.hub.ledgerFigures(r.Context(), true)),
+		BytesHeldByUndoWindow:  held,
+		Roots:                  roots,
+		RootsUnattributed:      unattributed,
 	})
 }
 

@@ -11,7 +11,7 @@ per-field reference `README.md` points at rather than restates.
 |---|---|---|
 | `GET /` | - | a plain-text page naming the endpoints and carrying the AGPL section 13 source offer. holdfast ships no frontend yet (a web UI is to ship on this API - decided 2026-09-29 by the owner (T14, T18)). Never gated: it holds no library datum. A request whose `Accept` header names `text/html` is answered, on a build that embeds the web UI's shell, with that page instead, carrying the same offer ([design](design/web-ui.md#root)) |
 | `GET /assets/*` | - | the static files the web UI's page names (its script and stylesheet), by exact name; `404` for anything else and on a build that embeds no UI. Never gated: they hold no library datum |
-| `GET /api/summary` | read | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** (see below). It does not carry `bytes_held_by_undo_window`: that figure rides the SSE snapshot and the `/metrics` gauge only |
+| `GET /api/summary` | read | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** + `bytes_held_by_undo_window` (the figure the SSE snapshot and the `/metrics` gauge report) + the **per-root sizing figures** under `roots` and `roots_unattributed` (see *Sizing a run* below). |
 | `GET /api/queue` | read | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
 | `GET /api/history?limit=N` | read | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
 | `GET /api/events` | read | SSE: a fresh snapshot on every state change |
@@ -581,10 +581,11 @@ concludes "nothing qualifies".
 Two properties are load-bearing and neither is negotiable:
 
 - **It counts decisions, never transcodes.** Nothing has encoded these files, so the row carries no output
-  size, no percentage reclaimed and no VMAF, so there is no projected saving to report anywhere. The
+  size, no percentage reclaimed and no VMAF, and no row carries a projected saving. The
   figure beside the candidate rows is the **total source bytes** they account for and nothing else: the
   size of what is under consideration, with the rows it left out for want of a recorded size counted and
-  reported beside it.
+  reported beside it. `GET /api/summary` reports those totals per library root, with a projection measured
+  on that root's own completed encodes where it has any (see *Sizing a run*).
 - **It is terminal, but re-claimable.** Unlike `done` and `skipped`, a recorded decision does not exclude
   the file from a later run: set `dry_run: false`, run again, and exactly the files that list named are
   the files that get transcoded. Two dry runs over an unchanged file still report **one** candidate.
@@ -669,6 +670,60 @@ Each one carries the same envelope, and every part of it is load-bearing:
 
 Every aggregate ships beside the set it covers and the count of rows it had to leave out, so a client
 never has to guess what a figure was taken over.
+
+### Sizing a run - the per-root figures on `GET /api/summary`
+
+"How big is this job, and will it fit" is answered by one `GET /api/summary`, with no access to `jobs.db`.
+Beside the fields above the summary carries the held figure and a block per configured library root:
+
+```json
+"bytes_held_by_undo_window": 53687091200,
+"roots": [
+  {
+    "root": "/mnt/media/tv",
+    "candidate_files": 7421, "candidate_excluded": 32, "candidate_bytes": 18141941858304,
+    "projection_basis_files": 310, "projected_savings_bytes": 11429423370731,
+    "bytes_held_by_undo_window": 53687091200,
+    "free_bytes": 212600881152
+  }
+],
+"roots_unattributed": {
+  "candidate_files": 0, "candidate_excluded": 0, "candidate_bytes": 0, "bytes_held_by_undo_window": 0
+}
+```
+
+| Field | What it is |
+|---|---|
+| `bytes_held_by_undo_window` (top level) | the bytes the undo window is still holding: the sum of the retained originals not restored. The same figure the SSE snapshot and the `holdfast_bytes_held_by_undo_window` gauge report |
+| `roots` | one object per configured library root, in configuration order |
+| `root` | the root's cleaned path, the spelling a job row records as `library_root` |
+| `candidate_files` | `would-transcode` rows recorded under this root that carry a source size |
+| `candidate_bytes` | the sum of those source sizes: what a real run over this root is being asked to encode |
+| `candidate_excluded` | `would-transcode` rows under this root that recorded no source size. They are counted here and summed nowhere: an absent size is not a size of zero |
+| `projection_basis_files` | `done` rows under this root that recorded both sizes: what the projection is measured on |
+| `projected_savings_bytes` | `candidate_bytes` scaled by what this root's own completed encodes saved: floor(`candidate_bytes` x S / B), where over the basis rows S is the sum of source minus output and B the sum of source. It is weighted by bytes, not a mean of per-file ratios. `null` when the basis is 0 rows: a projection from nothing would be an invention. It covers the rows the ledger still holds, so rows removed by `history_retention_rows` are not in the basis |
+| `bytes_held_by_undo_window` (per root) | the held figure restricted to retentions whose source path lies under this root |
+| `free_bytes` | bytes available to holdfast on the filesystem holding the root: the figure the engine's own pre-encode space check reads. It is per filesystem, so two roots on one filesystem report the same figure and it is **never summed** |
+| `roots_unattributed` | `candidate_files`, `candidate_excluded`, `candidate_bytes` and `bytes_held_by_undo_window` for rows and retentions no configured root accounts for: a row that recorded no library root, and a root since removed from the configuration. It has no projection and no free space |
+
+- **Every figure is an integer or `null`, and `null` is never written as `0`.** `null` says the figure could
+  not be read; a true zero (no candidates, nothing retained) is `0`. The three reads behind the block fail
+  independently: an unreadable ledger nulls the candidate and projection figures, an unreadable retention
+  table nulls every `bytes_held_by_undo_window`, and a root whose filesystem cannot be inspected - or does
+  not answer within 2 seconds, as a hung network mount does not - has a `null` `free_bytes` of its own
+  while every other root keeps its figure. The response is still `200` and every other field still ships.
+  Why: [docs/design/ledger-totals.md](design/ledger-totals.md#null-is-not-zero).
+- **The held figures add up.** The per-root `bytes_held_by_undo_window` values plus the unattributed one
+  equal the top-level figure, which is the gauge's.
+- **Candidates exist only where a dry run recorded them.** A root no dry run has looked at reports `0`
+  candidates, which says nothing was recorded and not that nothing qualifies.
+- **The candidate and projection figures are whole-ledger work**, so like the aggregates they are read at
+  most once every 30 seconds however often the summary is polled. The held and free figures are read on
+  every request.
+- **It is a read.** It writes no row, and it does not open, move, release or re-date a retained original.
+- The SSE snapshot carries the top-level `bytes_held_by_undo_window` and not the per-root block: a frame is
+  published on every state change, and a filesystem read per root per frame is a cost no subscriber asked
+  for.
 
 ### The total behind a cap
 
