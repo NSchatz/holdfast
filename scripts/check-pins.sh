@@ -56,6 +56,10 @@ need_dir  ".github/workflows"              "confirm every action is pinned to a 
 need_file ".github/workflows/ci.yml"       "confirm the gate runs on the Go the shipped binary is built with"
 need_file ".github/workflows/release.yml"  "confirm the release runs on the Go the shipped binary is built with"
 need_file ".github/dependabot.yml"         "confirm the update bot watches every pin class it can read"
+need_file "web/package.json"               "read the web UI's pnpm pin and its dependency versions"
+need_file "web/.node-version"              "read the web UI's Node pin"
+need_file "web/pnpm-workspace.yaml"        "confirm pnpm runs no lifecycle script and installs no version younger than a day"
+need_file "web/pnpm-lock.yaml"             "confirm the web UI's dependencies are resolved by a committed lockfile"
 
 if [ "$fail" -ne 0 ]; then
   printf '::error::%s\n' "check-pins: a file this gate depends on could not be read (named above). Refusing to report green." >&2
@@ -587,33 +591,153 @@ elif [ "$from_bad" -eq 0 ]; then
 fi
 
 # --- 8. A node manifest must carry a lifecycle-script decision (P4) ----------------
-# There is no node manifest in this repository today - holdfast ships no frontend and no
-# JavaScript at all - so this check is a TRIPWIRE rather than a current assertion: the moment
-# somebody adds a package.json, `npm install` gains the right to execute arbitrary
-# `postinstall` code from every transitive dependency, on a runner holding this
-# repository's credentials.
+# Installing from a package.json gives every transitive dependency the right to run
+# arbitrary `preinstall`/`postinstall` code, on a runner holding this repository's
+# credentials. So every manifest in the tree must sit beside a COMMITTED decision about
+# that, in the file ITS package manager actually reads.
+#
+# Which file that is depends on the package manager, and getting it wrong is silent:
+#
+#   pnpm   pnpm-workspace.yaml. pnpm 11 and later read NO non-auth setting from .npmrc
+#          ("pnpm no longer reads non-auth settings from .npmrc",
+#          https://pnpm.io/blog/releases/11.0, read 2026-09-29), and that was measured
+#          here with a root `postinstall` probe: under pnpm 11.27.1, 12.6.0 and 12.8.1 an
+#          .npmrc carrying `ignore-scripts=true` did NOT stop the script, and
+#          `ignoreScripts: true` in pnpm-workspace.yaml did
+#          (.claude/goals/2026-09-holdfast-research/verify-nodes-clients-spa.md, claim 3).
+#          An .npmrc is therefore NOT a decision for a pnpm project, whatever it says:
+#          accepting one would be a green check on a line nothing reads.
+#          Required, at the top level of the file:
+#            ignoreScripts: true            no reason unlocks `false` - the UI's toolchain
+#                                           needs no lifecycle script, and section 12 is
+#                                           where a build that needs one would be argued
+#            minimumReleaseAge: <minutes>   explicit, and at least 1440 (one day)
+#          Refused:
+#            minimumReleaseAgeExclude       pnpm WRITES this list itself when it meets a pin
+#                                           younger than the default age, unless the age
+#                                           is set explicitly - so its presence means a
+#                                           young version was let through by the tool
+#                                           and nobody decided it (the same verify file,
+#                                           claim 4)
+#            allowBuilds: <name>: true      a dependency granted its build script
+#            dangerouslyAllowAllBuilds      the same grant, to all of them
+#
+#   npm    .npmrc, beside the manifest or at the repository root:
+#            ignore-scripts=true    - scripts off. Nothing further needed.
+#            ignore-scripts=false   - scripts on, and only legal beside a line carrying
+#                                     `lifecycle-scripts-reason: <why>` in the same file.
+#
+# A manifest is pnpm's when it names pnpm in `packageManager`, or sits beside a
+# pnpm-lock.yaml or a pnpm-workspace.yaml. Anything else is npm's.
 #
 # It scans the WORKING TREE, not the tracked files, on purpose. The moment to refuse a
 # manifest is the moment it is about to be committed - a tracked-files-only check would
 # stay green through the entire pull request that introduces it and only bite afterwards,
-# which is exactly one merge too late.
-#
-# The decision surface is a COMMITTED .npmrc, because a decision that is not in the
-# repository is not a decision anybody after you can see:
-#   ignore-scripts=true    - scripts off. Nothing further needed.
-#   ignore-scripts=false   - scripts on, and only legal beside a line carrying
-#                            `lifecycle-scripts-reason: <why>` in the same file.
+# which is exactly one merge too late. The DECISION, by contrast, must be tracked: a
+# decision that is not in the repository is not a decision anybody after you can see.
 node_manifests=()
 while IFS= read -r m; do
   [ -n "$m" ] && node_manifests+=("$m")
 done < <(find "$here" \( -name .git -o -name node_modules -o -name vendor \) -prune -o -type f -name package.json -print 2>/dev/null | sort)
 
+# yaml_top <file> <key>: the value of a TOP-LEVEL scalar key, comment and quotes
+# stripped; nothing if the key is absent, indented, or opens a block.
+yaml_top() {
+  sed -n "s/^$2:[[:space:]]*\\([^#]*[^#[:space:]]\\)[[:space:]]*\\(#.*\\)\\{0,1\\}\$/\\1/p" "$1" | head -1 | tr -d "\"'"
+}
+# yaml_has_top <file> <key>: the key appears at the top level in ANY form - a scalar, an
+# inline list or the opening of a block.
+yaml_has_top() { grep -qE "^[\"']?$2[\"']?[[:space:]]*:" "$1"; }
+
 if [ "${#node_manifests[@]}" -eq 0 ]; then
-  note "ok: no node package manifest in the working tree - nothing can run a lifecycle script"
+  bad "no node package manifest was found in the working tree, and web/package.json is one: the enumeration this section reads has stopped seeing it. An empty enumeration passes every manifest it never saw."
 else
   for man in "${node_manifests[@]}"; do
     mrel="${man#"$here"/}"
     mdir="$(dirname "$man")"
+    mdirrel="$(dirname "$mrel")"
+
+    is_pnpm=0
+    grep -qE '"packageManager"[[:space:]]*:[[:space:]]*"pnpm@' "$man" && is_pnpm=1
+    [ -e "$mdir/pnpm-lock.yaml" ] && is_pnpm=1
+    [ -e "$mdir/pnpm-workspace.yaml" ] && is_pnpm=1
+
+    if [ "$is_pnpm" -eq 1 ]; then
+      ws="$mdir/pnpm-workspace.yaml"
+      wsrel="${ws#"$here"/}"
+      npmrc_note=""
+      for cand in "$mdir/.npmrc" "$here/.npmrc"; do
+        if [ -f "$cand" ] && grep -qE '^[[:space:]]*ignore-scripts[[:space:]]*=' "$cand"; then
+          npmrc_note="
+       ${cand#"$here"/} sets ignore-scripts, and pnpm 11 and later DO NOT READ IT: under pnpm
+       that line stops nothing, so it is not this manifest's decision."
+          break
+        fi
+      done
+      pnpm_bad=0
+      if [ ! -f "$ws" ] || ! git -C "$here" ls-files --error-unmatch -- "$wsrel" >/dev/null 2>&1; then
+        pnpm_bad=1
+        bad "PNPM MANIFEST WITH NO LIFECYCLE-SCRIPT DECISION PNPM READS: $mrel
+       It is a pnpm project and there is no committed $wsrel beside it.$npmrc_note
+       pnpm takes this decision from pnpm-workspace.yaml and from nowhere else in the
+       repository. Create it, with at least:
+         ignoreScripts: true
+         minimumReleaseAge: 1440
+       Then commit it: a decision that is not in the repository is not a decision."
+      else
+        is_val="$(yaml_top "$ws" ignoreScripts)"
+        if [ "$is_val" != "true" ]; then
+          pnpm_bad=1
+          bad "PNPM MANIFEST WITH NO LIFECYCLE-SCRIPT DECISION PNPM READS: $mrel
+       $wsrel does not carry a top-level \`ignoreScripts: true\` (it reads: '${is_val:-absent}').$npmrc_note
+       Without that line pnpm runs this project's own lifecycle scripts at install, on a
+       runner holding this repository's credentials. Set, at the top level of $wsrel:
+         ignoreScripts: true"
+        fi
+        if yaml_has_top "$ws" minimumReleaseAgeExclude; then
+          pnpm_bad=1
+          bad "RELEASE-AGE EXCLUDE LIST - $wsrel carries \`minimumReleaseAgeExclude\`.
+       pnpm writes that list ITSELF when it installs a version younger than the release
+       age and the age was not set explicitly, so each name on it is a version that
+       reached the lockfile before it had been public for a day, let through by the tool.
+       Delete the whole key, keep \`minimumReleaseAge\` explicit, and pin each package it
+       named to a version that is at least a day old."
+        fi
+        mra="$(yaml_top "$ws" minimumReleaseAge)"
+        if ! printf '%s' "$mra" | grep -qE '^[0-9]+$' || [ "$mra" -lt 1440 ]; then
+          pnpm_bad=1
+          bad "NO EXPLICIT RELEASE AGE - $wsrel does not set a top-level \`minimumReleaseAge\` of at least 1440 minutes (it reads: '${mra:-absent}').
+       Left to its default the rule is not strict: pnpm installs a younger version anyway
+       and records it in a \`minimumReleaseAgeExclude\` list it writes for itself. Set:
+         minimumReleaseAge: 1440"
+        fi
+        if yaml_has_top "$ws" dangerouslyAllowAllBuilds && [ "$(yaml_top "$ws" dangerouslyAllowAllBuilds)" != "false" ]; then
+          pnpm_bad=1
+          bad "EVERY DEPENDENCY BUILD ALLOWED - $wsrel sets \`dangerouslyAllowAllBuilds\`, which grants every transitive dependency its install script."
+        fi
+        # allowBuilds is a block of `<name>: <bool>`; every entry must be a refusal.
+        allowed="$(awk '
+          /^allowBuilds:/ { inblock = 1; next }
+          inblock && /^[^[:space:]#]/ { inblock = 0 }
+          inblock && /^[[:space:]]+[^#[:space:]]/ {
+            line = $0; sub(/[[:space:]]*#.*/, "", line); gsub(/["\047]/, "", line)
+            n = split(line, kv, /:[[:space:]]*/)
+            name = kv[1]; gsub(/^[[:space:]]+/, "", name)
+            if (kv[n] != "false") print name
+          }' "$ws" | tr '\n' ' ')"
+        if [ -n "${allowed// /}" ]; then
+          pnpm_bad=1
+          bad "DEPENDENCY BUILD SCRIPT ALLOWED - $wsrel grants a build script under \`allowBuilds\` to: $allowed
+       Every entry there must be \`false\`: an entry exists to say a dependency that
+       declares an install script is deliberately NOT built, never to build one."
+        fi
+      fi
+      if [ "$pnpm_bad" -eq 0 ]; then
+        note "ok: $mrel is a pnpm project and $wsrel, the file pnpm reads, is committed with ignoreScripts: true, minimumReleaseAge: $mra, no minimumReleaseAgeExclude list and no build allowed"
+      fi
+      continue
+    fi
+
     decided=""
     for cand in "$mdir/.npmrc" "$here/.npmrc"; do
       [ -f "$cand" ] || continue
@@ -637,11 +761,13 @@ else
        \`preinstall\`/\`postinstall\` code, on a runner holding this repository's
        credentials. The repository must either DISABLE lifecycle scripts in a committed
        .npmrc, or RECORD A REASON for enabling them:
-         echo 'ignore-scripts=true' > $(dirname "$mrel" | sed 's|^\.$||; s|$|/|; s|^/$||').npmrc
+         echo 'ignore-scripts=true' > $(printf '%s' "$mdirrel" | sed 's|^\.$||; s|$|/|; s|^/$||').npmrc
        or, to enable them deliberately, in that same committed .npmrc:
          ignore-scripts=false
          # lifecycle-scripts-reason: <why this repository needs them>
-       Then commit it: a decision that is not in the repository is not a decision."
+       Then commit it: a decision that is not in the repository is not a decision.
+       (For a pnpm project the decision is \`ignoreScripts: true\` in pnpm-workspace.yaml:
+       pnpm 11 and later do not read .npmrc for it.)"
     fi
   done
 fi
@@ -656,6 +782,7 @@ fi
 #   github-actions  every `uses:` reference (section 5 keeps each SHA-pinned with a comment)
 #   docker          every base image (section 7 keeps each written on its FROM line)
 #   gomod           the module requirements in go.mod
+#   npm             the web UI's packages in web/package.json, at /web (section 12 keeps each exact)
 # The ffmpeg pin is not one of them - no ecosystem reads a GitHub release tag out of an ARG -
 # and it stays with .github/workflows/pin-health.yml. Nothing here asks the network anything.
 #
@@ -674,13 +801,16 @@ dep_blind=()
 for eco in github-actions docker gomod; do
   printf '%s\n' "$dep_entries" | grep -qxF "$eco|/" || dep_blind+=("$eco")
 done
+# The web UI's packages (web/package.json, section 12) are a fourth class, in their own
+# directory.
+printf '%s\n' "$dep_entries" | grep -qxF "npm|/web" || dep_blind+=("npm (directory: \"/web\")")
 if [ "${#dep_blind[@]}" -ne 0 ]; then
   bad "UPDATE BOT BLIND SPOT - .github/dependabot.yml has no entry watching the repository
-       root (package-ecosystem plus directory: \"/\") for: ${dep_blind[*]}
+       root (package-ecosystem plus directory: \"/\"; the web UI's packages at \"/web\") for: ${dep_blind[*]}
        A pin class nobody watches goes stale with nobody told. The entries it read were:
 $(printf '%s\n' "$dep_entries" | sed 's/^/         /')"
 else
-  note "ok: .github/dependabot.yml watches github-actions, docker and gomod at the repository root"
+  note "ok: .github/dependabot.yml watches github-actions, docker and gomod at the repository root, and npm at /web"
 fi
 
 # --- 10. The hardware runtime's Debian packages: pinned, permanent, and in NOTICE ----
@@ -950,6 +1080,149 @@ fi
 
 if [ "$dyn_bad" -eq 0 ]; then
   note "ok: dovi_tool ${df_tools[dovi_tool]} and hdr10plus_tool ${df_tools[hdr10plus_tool]} are pinned by exact version and per-arch sha256, fetched from their release, and NOTICE names exactly those, MIT, with source"
+fi
+
+# --- 12. The web UI's toolchain: Node, pnpm and every package, each pinned once ------
+# `make check` lints, typechecks, tests and builds the web UI (web/), and the image builds
+# it again in its own stage. Both must run the SAME toolchain, or the UI the gate proved is
+# not the UI the image ships. Each pin has one home, and what is checked here is that the
+# home holds an exact version and that the one unavoidable restatement agrees with it:
+#
+#   Node   web/.node-version, an exact MAJOR.MINOR.PATCH. scripts/ui.sh reads it, and the
+#          workflows hand that file to setup-node (`node-version-file`), so neither restates
+#          it. The Dockerfile's `ui` stage MUST restate it - a FROM line is a literal, and
+#          section 7 requires the reference written there - so that tag is compared here.
+#          A literal `node-version:` in a workflow is refused: it is a second home.
+#   pnpm   web/package.json `packageManager`, as pnpm@<exact>+sha512.<128 hex>: corepack
+#          downloads that version and refuses bytes that do not hash to it.
+#   every package   an exact version in web/package.json - no range, no tag - and a
+#          committed web/pnpm-lock.yaml that resolves the rest. Svelte and Vite are named,
+#          because the gate's claim is about them.
+ui_bad=0
+ui_node="$(tr -d '[:space:]' < "$here/web/.node-version")"
+if ! printf '%s' "$ui_node" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  ui_bad=$((ui_bad + 1))
+  bad "FLOATING NODE PIN - web/.node-version holds '$ui_node', which is not an exact MAJOR.MINOR.PATCH version.
+       A major alone, an alias like \`lts/*\` or a range is whatever Node is newest on the
+       day of the build."
+fi
+
+# The ui stage's base: every FROM line naming a node image.
+ui_from="$(grep -nE '^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]].*[[:space:]/]?node:[^[:space:]]+' "$here/Dockerfile" \
+  | grep -E '(^[0-9]+:[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]+(--[^[:space:]]+[[:space:]]+)*)(docker\.io/)?(library/)?node:' || true)"
+ui_from_count="$(printf '%s' "$ui_from" | grep -c . || true)"
+if [ "$ui_from_count" -ne 1 ]; then
+  ui_bad=$((ui_bad + 1))
+  bad "the Dockerfile has $ui_from_count stage(s) built FROM a node image, and the web UI is built in exactly one: this check could not find the stage whose Node version it compares. A parser that stopped understanding the Dockerfile is a refusal, not a green build."
+else
+  ui_from_tag="$(printf '%s' "$ui_from" | sed -n 's/.*node:\([^@[:space:]]*\).*/\1/p')"
+  ui_from_ver="${ui_from_tag%%-*}"
+  if [ "$ui_from_ver" != "$ui_node" ]; then
+    ui_bad=$((ui_bad + 1))
+    bad "Node version drift - the image builds the web UI on node:$ui_from_tag (Dockerfile line ${ui_from%%:*}) and web/.node-version pins $ui_node.
+       \`make check\` proves the UI on the version in web/.node-version; the image would
+       ship one built on another. Move both together (and the FROM line's digest with its
+       tag)."
+  fi
+fi
+
+for wf in "${wf_files[@]}"; do
+  wfrel="${wf#"$here"/}"
+  if grep -nE '^[[:space:]]*node-version:' "$wf" >/dev/null; then
+    ui_bad=$((ui_bad + 1))
+    bad "SECOND HOME FOR THE NODE PIN - $wfrel writes a literal \`node-version:\` (line $(grep -nE '^[[:space:]]*node-version:' "$wf" | head -1 | cut -d: -f1)).
+       The pin lives in web/.node-version; a workflow reads it with
+         node-version-file: web/.node-version
+       so the two cannot drift."
+  fi
+done
+for wfname in ci.yml release.yml; do
+  if ! grep -qE '^[[:space:]]*node-version-file:[[:space:]]*web/\.node-version[[:space:]]*(#.*)?$' "$here/.github/workflows/$wfname"; then
+    ui_bad=$((ui_bad + 1))
+    bad ".github/workflows/$wfname runs \`make check\`, which runs the web UI's gate, and does not set up Node from the pin (\`node-version-file: web/.node-version\`): its gate would run on whatever Node the runner image carries, or not at all."
+  fi
+done
+
+ui_pm="$(sed -n 's/^[[:space:]]*"packageManager":[[:space:]]*"\([^"]*\)",\{0,1\}[[:space:]]*$/\1/p' "$here/web/package.json" | head -1)"
+if ! printf '%s' "$ui_pm" | grep -qE '^pnpm@[0-9]+\.[0-9]+\.[0-9]+\+sha512\.[0-9a-f]{128}$'; then
+  ui_bad=$((ui_bad + 1))
+  bad "UNPINNED PACKAGE MANAGER - web/package.json \`packageManager\` is '${ui_pm:-absent}', not pnpm@<MAJOR.MINOR.PATCH>+sha512.<128 lowercase hex>.
+       The version says which pnpm; the hash is what makes corepack refuse any other bytes
+       under that version."
+fi
+
+# Every dependency, in either block, one `"name": "version"` per line as pnpm writes it.
+ui_deps="$(awk '
+  /^[[:space:]]*"(dependencies|devDependencies|optionalDependencies|peerDependencies)"[[:space:]]*:[[:space:]]*\{/ { inblock = 1; next }
+  inblock && /^[[:space:]]*\}/ { inblock = 0; next }
+  inblock {
+    line = $0; gsub(/[[:space:]",]/, "", line)
+    n = index(line, ":"); if (n == 0) next
+    # a scoped name carries no colon, so the first colon ends the name
+    print substr(line, 1, n - 1) "|" substr(line, n + 1)
+  }' "$here/web/package.json")"
+ui_dep_count="$(printf '%s' "$ui_deps" | grep -c . || true)"
+if [ "$ui_dep_count" -eq 0 ]; then
+  ui_bad=$((ui_bad + 1))
+  bad "web/package.json declares no dependency this check could read - it just asserted nothing about any version. A parser that stopped understanding the manifest is a refusal, not a green build."
+else
+  ui_float="$(printf '%s\n' "$ui_deps" | awk -F'|' '$2 !~ /^[0-9]+\.[0-9]+\.[0-9]+$/ { printf "%s (%s) ", $1, $2 }')"
+  if [ -n "$ui_float" ]; then
+    ui_bad=$((ui_bad + 1))
+    bad "NOT AN EXACT VERSION - web/package.json pins these by a range, a tag or a pre-release: $ui_float
+       Every package there is MAJOR.MINOR.PATCH and nothing else. A \`^\` or \`~\` range is a
+       different toolchain on the day the lockfile is next refreshed."
+  fi
+  for must in svelte vite; do
+    printf '%s\n' "$ui_deps" | grep -q "^$must|" || {
+      ui_bad=$((ui_bad + 1))
+      bad "web/package.json does not name \`$must\`: the gate's claim is that the UI is built with a pinned $must, and a package that is only transitive is pinned by nobody."
+    }
+  done
+fi
+
+# The Svelte runtime is the one package whose code ships inside the binary's embedded
+# bundle, so NOTICE carries its MIT notice and names its version. That is a restatement of
+# web/package.json, in the licence record that travels with the image and the release
+# tarballs, so it is compared: a bump made in the manifest alone would leave the record
+# naming a version the binary does not contain.
+ui_svelte="$(printf '%s\n' "$ui_deps" | sed -n 's/^svelte|//p' | head -1)"
+ui_notice_svelte="$(sed -n 's/^  package: svelte \([^[:space:]]*\)[[:space:]]*$/\1/p' "$here/NOTICE")"
+if [ -z "$ui_notice_svelte" ]; then
+  ui_bad=$((ui_bad + 1))
+  bad "svelte MISSING FROM NOTICE - the binary embeds the Svelte runtime in its web UI bundle and NOTICE has no \`  package: svelte <version>\` entry: MIT requires its copyright and permission notice to travel with every copy."
+elif [ "$ui_notice_svelte" != "$ui_svelte" ]; then
+  ui_bad=$((ui_bad + 1))
+  bad "svelte: VERSION DRIFT - web/package.json pins ${ui_svelte:-nothing} and NOTICE names $(printf '%s' "$ui_notice_svelte" | tr '\n' ' '). Move both together."
+fi
+if [ -n "$ui_notice_svelte" ]; then
+  ui_entry="$(awk '
+    /^  package: svelte / { inent = 1; print; next }
+    /^-{10,}/             { inent = 0 }
+    inent                 { print }
+  ' "$here/NOTICE")"
+  ui_missing=()
+  grep -qE '^[[:space:]]+licence:[[:space:]]+MIT[[:space:]]*$' <<<"$ui_entry" || ui_missing+=("a 'licence: MIT' line")
+  grep -qF 'https://github.com/sveltejs/svelte' <<<"$ui_entry" || ui_missing+=("its source, https://github.com/sveltejs/svelte")
+  grep -qE 'Copyright \(c\) [0-9]{4}' <<<"$ui_entry" || ui_missing+=("the upstream copyright line")
+  grep -qF 'Permission is hereby granted, free of charge' <<<"$ui_entry" || ui_missing+=("the MIT permission notice")
+  if [ "${#ui_missing[@]}" -ne 0 ]; then
+    ui_bad=$((ui_bad + 1))
+    bad "NOTICE's svelte entry is incomplete: it lacks $(printf '%s; ' "${ui_missing[@]}")the MIT licence requires the copyright and permission notice to travel with every copy of the bundle the binary embeds."
+  fi
+fi
+
+if ! git -C "$here" ls-files --error-unmatch -- web/pnpm-lock.yaml >/dev/null 2>&1; then
+  ui_bad=$((ui_bad + 1))
+  bad "web/pnpm-lock.yaml is not committed: without it \`pnpm install --frozen-lockfile\` has nothing to hold the transitive dependencies to, and each install resolves them afresh."
+fi
+if ! grep -qE "^lockfileVersion:" "$here/web/pnpm-lock.yaml"; then
+  ui_bad=$((ui_bad + 1))
+  bad "web/pnpm-lock.yaml carries no \`lockfileVersion:\` line: it is not a pnpm lockfile this check recognises."
+fi
+
+if [ "$ui_bad" -eq 0 ]; then
+  note "ok: the web UI is built on Node $ui_node (web/.node-version, and the Dockerfile's node:$ui_from_tag stage) with ${ui_pm%%+*} pinned by sha512, all $ui_dep_count packages in web/package.json are exact versions under a committed lockfile, and NOTICE names svelte $ui_svelte"
 fi
 
 [ "$fail" -eq 0 ] || exit 1

@@ -50,3 +50,20 @@ updates:
     groups:
       go-modules:
         patterns: ["*"]
+
+  # The web UI's packages (web/package.json, exact versions under a lockfile). A pull
+  # request here is a proposal like the others: it merges only through a human review of
+  # a green gate. The cooldown keeps it from proposing a version younger than the
+  # minimumReleaseAge web/pnpm-workspace.yaml enforces, which the install would refuse.
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+    commit-message:
+      prefix: "build"
+      include: "scope"
+    groups:
+      web-ui:
+        patterns: ["*"]

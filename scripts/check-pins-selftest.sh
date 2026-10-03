@@ -22,7 +22,15 @@
 # version, a short or uppercase digest, a fetch URL that is not the pinned release asset or
 # a second unchecked one, and a NOTICE that omits a tool, drifts from its version, names one
 # the image does not carry, loses its MIT licence, source or permission notice, or carries a
-# stray version; case 57 asserts a coherent bump of both files still PASSES. Two of the
+# stray version; case 57 asserts a coherent bump of both files still PASSES; cases 58-75
+# (goal 13) defeat the WEB UI guards - a pnpm project whose only lifecycle-script decision
+# is an .npmrc pnpm does not read, a decision that is false, absent or uncommitted, a
+# minimumReleaseAgeExclude list, a release age that is implicit or too short, a dependency
+# granted its build script, a Node pin that floats or drifted from the image's stage, a
+# literal Node version in a workflow, a package manager without its hash, a package pinned
+# by a range, a missing lockfile, a bot that stopped watching the UI's packages, and a
+# NOTICE that drifted from the Svelte the binary embeds or lost its permission notice; case
+# 74 asserts a coherent Node bump still PASSES. Two of the
 # S0057 cases assert a PASS
 # rather than a bite (the local-action exemption, and a manifest whose decision is
 # recorded), because a guard that refuses everything is indistinguishable from a guard
@@ -62,7 +70,7 @@ OLD_ENV="TRANSCODE""_SERVER_AUTH_TOKEN"
 OLD_CRF="TRANSCODE""_CRF"
 OLD_METRIC="transcode""_files_total"
 
-declared=58
+declared=76
 pass=0; failed=0
 repo="$work/repo"
 
@@ -76,7 +84,9 @@ git -C "$repo" config user.name t
 # case is measured against, and taking it from HEAD means an uncommitted change anywhere —
 # a fix OR a break — is graded as if it did not exist. In CI the two are identical and this is
 # a no-op; locally they are not, and locally is where the mistake gets made.
-tar -C "$here" --exclude=.git -cf - . | tar -C "$repo" -xf - \
+# The web UI's installed dependencies and build output are left out: they are ignored
+# files, no case reads them, and they are the bulk of the tree by size.
+tar -C "$here" --exclude=.git --exclude=./web/node_modules --exclude=./web/dist -cf - . | tar -C "$repo" -xf - \
   || { echo "::error::selftest: could not overlay the working tree — it did NOT run" >&2; exit 1; }
 git -C "$repo" add -A
 git -C "$repo" commit -qm "selftest: grade the working tree, not HEAD" --allow-empty
@@ -591,7 +601,8 @@ reset
 # --- 55. The MIT permission notice dropped from one entry: the binary would ship without
 #         the text its licence says must travel with it.
 awk '/^  tool: hdr10plus_tool /{t=1} t && /Permission is hereby granted, free of charge/{t=0; next} {print}' "$repo/NOTICE" >"$repo/NOTICE.new" && mv "$repo/NOTICE.new" "$repo/NOTICE"
-[ "$(grep -c 'Permission is hereby granted, free of charge' "$repo/NOTICE")" -eq 1 ] \
+# Two remain: dovi_tool's, and the Svelte runtime's in the web UI's own section.
+[ "$(grep -c 'Permission is hereby granted, free of charge' "$repo/NOTICE")" -eq 2 ] \
   || { echo "::error::selftest: could not drop hdr10plus_tool's permission notice, so this case did NOT run" >&2; exit 1; }
 expect 1 "a tool entry without the MIT permission notice is caught" "hdr10plus_tool entry is incomplete: it lacks the MIT permission notice"
 reset
@@ -609,6 +620,150 @@ sed -i 's|dovi_tool 2\.3\.4|dovi_tool 2.3.5|; s|release tag 2\.3\.4,|release tag
 grep -qx '  tool: dovi_tool 2.3.5' "$repo/NOTICE" && grep -qx 'ARG DOVI_TOOL_VERSION=2.3.5' "$repo/Dockerfile" \
   || { echo "::error::selftest: could not bump dovi_tool in both files, so this case did NOT run" >&2; exit 1; }
 expect 0 "a dovi_tool bump made in the Dockerfile AND NOTICE together passes" "dovi_tool 2\.3\.5 and hdr10plus_tool"
+reset
+
+# =============================================================================
+# The web UI's guards (goal 13): sections 8, 9 and 12 over web/.
+#
+# Every case edits the CLONE's own web/ files, which the clean-tree baseline (case 0) has
+# already shown to pass, so each red below is the one edit it names.
+# =============================================================================
+ws="$repo/web/pnpm-workspace.yaml"
+[ -f "$ws" ] && [ -f "$repo/web/package.json" ] && [ -f "$repo/web/.node-version" ] \
+  || { echo "::error::selftest: the clone has no web/ project, so the web UI cases did NOT run" >&2; exit 1; }
+
+# --- 58. THE case this section was rewritten for: a pnpm project whose only decision is an
+#         .npmrc. It is the setup the previous rule accepted, and under pnpm 11 and later
+#         that line stops nothing. The workspace file keeps every other line, so the red is
+#         the missing `ignoreScripts` and nothing else.
+sed -i '/^ignoreScripts:/d' "$ws"
+printf 'ignore-scripts=true\n' > "$repo/web/.npmrc"
+git -C "$repo" add -f web/.npmrc web/pnpm-workspace.yaml
+grep -q '^ignoreScripts:' "$ws" && { echo "::error::selftest: could not remove ignoreScripts, so this case did NOT run" >&2; exit 1; }
+expect 1 "a pnpm project that sets ignore-scripts ONLY in .npmrc is caught (pnpm does not read it)" "PNPM MANIFEST WITH NO LIFECYCLE-SCRIPT DECISION PNPM READS: web/package.json"
+# The message must say WHY the .npmrc does not count, or the fix an operator reaches for
+# is the one that does nothing.
+if grep -q 'web/.npmrc sets ignore-scripts, and pnpm 11 and later DO NOT READ IT' <<<"$guard_out"; then
+  :
+else
+  printf '::error::selftest: the .npmrc-only refusal does not say that pnpm does not read .npmrc\n' >&2
+  failed=$((failed + 1)); pass=$((pass - 1))
+fi
+reset
+
+# --- 59. The same mistake in a SECOND project, arriving new: a manifest that names pnpm,
+#         with a committed .npmrc beside it and no workspace file at all. This is the shape
+#         the old rule passed with "committed lifecycle-script decision"; the project is
+#         pnpm's by its own manifest, so the .npmrc decides nothing.
+mkdir -p "$repo/tools/probe"
+printf '{\n  "packageManager": "pnpm@12.8.1"\n}\n' > "$repo/tools/probe/package.json"
+printf 'ignore-scripts=true\n' > "$repo/tools/probe/.npmrc"
+git -C "$repo" add -f tools/probe/package.json tools/probe/.npmrc
+expect 1 "a new pnpm project with a committed .npmrc and no pnpm-workspace.yaml is caught" "PNPM MANIFEST WITH NO LIFECYCLE-SCRIPT DECISION PNPM READS: tools/probe/package.json"
+grep -q 'there is no committed tools/probe/pnpm-workspace.yaml' <<<"$guard_out" \
+  || { printf '::error::selftest: the refusal does not name the workspace file that is missing\n' >&2; failed=$((failed + 1)); pass=$((pass - 1)); }
+reset
+
+# --- 60. The decision made, and made the wrong way. No reason unlocks it.
+sed -i 's/^ignoreScripts:.*/ignoreScripts: false # lifecycle-scripts-reason: a native build/' "$ws"
+expect 1 "ignoreScripts: false is caught, and no reason unlocks it" "does not carry a top-level .ignoreScripts: true. \(it reads: 'false'\)"
+reset
+
+# --- 61. The decision indented under another key: pnpm reads the TOP-LEVEL key only.
+sed -i 's/^ignoreScripts: true/settings:\n  ignoreScripts: true/' "$ws"
+expect 1 "an ignoreScripts nested under another key is caught" "it reads: 'absent'"
+reset
+
+# --- 62. The decision present in the working tree and never committed.
+git -C "$repo" rm -q --cached web/pnpm-workspace.yaml
+expect 1 "an uncommitted pnpm-workspace.yaml is not a decision" "there is no committed web/pnpm-workspace.yaml"
+reset
+
+# --- 63. The list pnpm writes for itself when it lets a young version through.
+printf '\nminimumReleaseAgeExclude:\n  - typescript-eslint@8.71.0\n' >> "$ws"
+expect 1 "a minimumReleaseAgeExclude list is refused" "RELEASE-AGE EXCLUDE LIST"
+reset
+
+# --- 64. The same key as an inline list, and empty: its presence is the finding.
+printf '\nminimumReleaseAgeExclude: []\n' >> "$ws"
+expect 1 "an empty inline minimumReleaseAgeExclude is refused too" "RELEASE-AGE EXCLUDE LIST"
+reset
+
+# --- 65. The release age left to its default, which is what lets pnpm write that list.
+sed -i '/^minimumReleaseAge:/d' "$ws"
+expect 1 "an implicit minimumReleaseAge is caught" "NO EXPLICIT RELEASE AGE"
+reset
+
+# --- 66. Set, and shorter than a day.
+sed -i 's/^minimumReleaseAge:.*/minimumReleaseAge: 60/' "$ws"
+expect 1 "a minimumReleaseAge under a day is caught" "NO EXPLICIT RELEASE AGE.*it reads: '60'"
+reset
+
+# --- 67. A dependency granted its build script.
+sed -i 's/^  fsevents: false/  fsevents: true/' "$ws"
+grep -q '^  fsevents: true' "$ws" || { echo "::error::selftest: could not flip allowBuilds, so this case did NOT run" >&2; exit 1; }
+expect 1 "a dependency granted its build script under allowBuilds is caught" "DEPENDENCY BUILD SCRIPT ALLOWED.*fsevents"
+reset
+
+# --- 68. The Node pin moved in one home only: the gate would prove the UI on one Node and
+#         the image would ship one built on another.
+printf '24.20.0\n' > "$repo/web/.node-version"
+expect 1 "a Node pin that drifted from the image's ui stage is caught" "Node version drift"
+reset
+
+# --- 69. A Node pin that is not a version.
+printf '24\n' > "$repo/web/.node-version"
+expect 1 "a Node pin that is a major alone is caught" "FLOATING NODE PIN"
+reset
+
+# --- 70. A workflow restating the Node version instead of reading the file.
+sed -i 's|^\( *\)node-version-file: web/\.node-version|\1node-version: "24.21.0"|' "$repo/.github/workflows/ci.yml"
+grep -q 'node-version: "24.21.0"' "$repo/.github/workflows/ci.yml" || { echo "::error::selftest: could not rewrite ci.yml, so this case did NOT run" >&2; exit 1; }
+expect 1 "a literal node-version in a workflow is caught" "SECOND HOME FOR THE NODE PIN"
+reset
+
+# --- 71. The package manager named without the hash that makes corepack refuse other bytes.
+sed -i 's|"packageManager": "pnpm@\([0-9.]*\)+sha512\.[0-9a-f]*"|"packageManager": "pnpm@\1"|' "$repo/web/package.json"
+expect 1 "a packageManager with no sha512 is caught" "UNPINNED PACKAGE MANAGER"
+reset
+
+# --- 72. One package pinned by a range. The lockfile still resolves it today.
+sed -i 's|"vite": "\([0-9.]*\)"|"vite": "^\1"|' "$repo/web/package.json"
+grep -q '"vite": "^' "$repo/web/package.json" || { echo "::error::selftest: could not loosen vite, so this case did NOT run" >&2; exit 1; }
+expect 1 "a package pinned by a caret range is caught" "NOT AN EXACT VERSION.*vite"
+reset
+
+# --- 73. The licence record left behind by a Svelte bump made in the manifest alone, and
+#         the bot told to stop watching the UI's packages. Two edits, two messages, one
+#         case each would be the same shape; the Svelte one is graded here and the bot's
+#         in the same run by its own message.
+sed -i 's|"svelte": "[0-9.]*"|"svelte": "5.57.2"|' "$repo/web/package.json"
+sed -i 's|directory: "/web"|directory: "/elsewhere"|' "$repo/.github/dependabot.yml"
+expect 1 "a Svelte version that drifted between web/package.json and NOTICE is caught" "svelte: VERSION DRIFT"
+if grep -q 'UPDATE BOT BLIND SPOT.*' <<<"$guard_out" && grep -q 'npm (directory: "/web")' <<<"$guard_out"; then
+  :
+else
+  printf '::error::selftest: a bot that stopped watching /web was not reported\n' >&2
+  failed=$((failed + 1)); pass=$((pass - 1))
+fi
+reset
+
+# --- 74. A coherent Node bump - the pin file and the image's stage together - passes: the
+#         guard is a comparison, not a freeze. The digest is left as it is; only the
+#         registry can say whether it matches, and the stage's own `node --version` check
+#         is what asks.
+printf '24.21.1\n' > "$repo/web/.node-version"
+sed -i 's|node:24\.21\.0-trixie-slim@|node:24.21.1-trixie-slim@|' "$repo/Dockerfile"
+grep -q 'node:24.21.1-trixie-slim@sha256:' "$repo/Dockerfile" || { echo "::error::selftest: could not bump the ui stage, so this case did NOT run" >&2; exit 1; }
+expect 0 "a Node bump made in web/.node-version AND the Dockerfile together passes" "built on Node 24\.21\.1"
+reset
+
+# --- 75. The Svelte entry with its permission notice gone: the binary would embed MIT code
+#         without the text its licence says must travel with it.
+awk '/^  package: svelte /{t=1} t && /Permission is hereby granted, free of charge/{t=0; next} {print}' "$repo/NOTICE" >"$repo/NOTICE.new" && mv "$repo/NOTICE.new" "$repo/NOTICE"
+[ "$(grep -c 'Permission is hereby granted, free of charge' "$repo/NOTICE")" -eq 2 ] \
+  || { echo "::error::selftest: could not drop Svelte's permission notice, so this case did NOT run" >&2; exit 1; }
+expect 1 "a Svelte entry without the MIT permission notice is caught" "svelte entry is incomplete: it lacks the MIT permission notice"
 reset
 
 echo
