@@ -335,8 +335,16 @@ func TestRun_DisabledGateDoesNotRefuseAnUnresolvableModel(t *testing.T) {
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// waitHTTP waits for url's first 200. The wait is a hang guard and not a speed claim: it
+// returns on the first 200, so a ready server costs nothing extra. Before a server answers
+// it opens its store, migrates it and runs its startup checks, and on a host other gates
+// are loading that has taken longer than the few seconds callers pass, with nothing wrong
+// in the code - so no caller waits less than waitHTTPFloor.
+const waitHTTPFloor = 60 * time.Second
+
 func waitHTTP(t *testing.T, url string, timeout time.Duration) {
 	t.Helper()
+	timeout = max(timeout, waitHTTPFloor)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(url)
