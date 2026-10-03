@@ -750,3 +750,41 @@ func TestNodesRead_IsDescribedByTheSurfaceDocumentAndNamedOnTheRootPage(t *testi
 		t.Errorf("the plain-text root page does not name %s: %s", NodesReadPath, rec.Body.String())
 	}
 }
+
+// A node states its failure reason in up to 64 characters of the alphabet a lease id and a
+// hex digest are written in, so it could state ANOTHER lease's id, or a digest. A reason
+// long enough to be either is served as the hub's own word; a shorter one is the node's.
+func TestNodesRead_AReasonLongEnoughToBeAnIDOrADigestIsNotServedAsWritten(t *testing.T) {
+	const (
+		otherID   = "0ther1d0000000000000000000000009" // 32: another lease's id
+		digestish = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+		longest   = "a_reason_of_thirty_one_chars_xx" // 31: one short of an id
+	)
+	if len(otherID) != 32 || len(digestish) != 64 || len(longest) != 31 {
+		t.Fatalf("fixture lengths %d, %d, %d; want 32, 64, 31", len(otherID), len(digestish), len(longest))
+	}
+	h := newNodesHarness(t, true, nil)
+	seedLease(t, h.st, "1ea5e1d0000000000000000000000011", "/lib/films/one.mkv", "node-a", nodesReadGrant+2, store.LeaseFailed, otherID, 0)
+	seedLease(t, h.st, "1ea5e1d0000000000000000000000012", "/lib/films/two.mkv", "node-a", nodesReadGrant+1, store.LeaseFailed, digestish, 0)
+	seedLease(t, h.st, "1ea5e1d0000000000000000000000013", "/lib/films/three.mkv", "node-a", nodesReadGrant, store.LeaseFailed, longest, 0)
+	_, keys, body := readNodes(t, h.ts.URL, "Bearer "+hookReadTok)
+
+	for name, v := range map[string]string{"another lease's id": otherID, "a digest": digestish} {
+		if strings.Contains(body, v) {
+			t.Errorf("the response carries %s stated as a reason (%q): %s", name, v, body)
+		}
+	}
+	var leases []struct {
+		Path   string  `json:"path"`
+		Reason *string `json:"reason"`
+	}
+	if err := json.Unmarshal(keys["leases"], &leases); err != nil || len(leases) != 3 {
+		t.Fatalf("leases: %d entries, err %v", len(leases), err)
+	}
+	want := []string{string(node.ReasonNodeFailed), string(node.ReasonNodeFailed), longest}
+	for i, l := range leases {
+		if l.Reason == nil || *l.Reason != want[i] {
+			t.Errorf("lease %s: reason %v, want %q", l.Path, l.Reason, want[i])
+		}
+	}
+}

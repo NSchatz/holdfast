@@ -100,7 +100,9 @@ func (h *Hub) rootLedger(ctx context.Context) ([]store.RootTotal, bool) {
 		return c.totals, c.ok
 	}
 	c.refreshedAt, c.refreshed = now, true
-	totals, err := h.store.RootTotals(ctx)
+	// The read outlives the request that started it: its answer is cached for every caller
+	// of the interval, so one client hanging up mid-read must not blank the figures for all.
+	totals, err := h.store.RootTotals(context.WithoutCancel(ctx))
 	if err != nil {
 		h.log.Warn("the job store could not be read for the per-root candidate and projection "+
 			"figures, so they are reported unavailable (null) until a later refresh reads them; "+

@@ -152,20 +152,25 @@ func leaseDTOs(leases []store.Lease) []nodeLeaseDTO {
 // leaseReason is the reason word a lease row carries, or nil where it carries none.
 //
 // A failed lease's reason is the word its NODE stated, held to 1 to 64 characters from a-z,
-// 0-9 and `_` when it was taken. A lease id is 32 characters from that same alphabet, so a
-// node could state its own lease's id as its reason; such a row is served the hub's own
-// word for a node-stated failure instead, and this response carries no lease id whatever a
-// node wrote.
+// 0-9 and `_` when it was taken. A lease id is 32 characters from that same alphabet and a
+// digest is 64, so a node could state an id or a digest - its own lease's or another's -
+// as its reason. A reason long enough to be either is served as the hub's own word for a
+// node-stated failure instead, and this response carries no lease id and no digest whatever
+// a node wrote. Every word the hub itself records is shorter.
 func leaseReason(l store.Lease) *string {
 	reason := l.Reason
 	if reason == "" {
 		return nil
 	}
-	if reason == l.ID {
+	if reason == l.ID || len(reason) >= leaseReasonOpaqueLen {
 		reason = string(node.ReasonNodeFailed)
 	}
 	return &reason
 }
+
+// leaseReasonOpaqueLen is the length from which a node-stated reason is not served as
+// written: the length of a lease id, the shortest opaque value this read must never carry.
+const leaseReasonOpaqueLen = 32
 
 // nodeDTOs is one entry per node the hub knows of or a listed lease names, by name
 // ascending. A node only a lease names is one this process has seen nothing of: no mode, no

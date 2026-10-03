@@ -853,3 +853,86 @@ func TestS0172_AC13_ServeCarriesDryRunToTheSummaryAndTheGauge(t *testing.T) {
 		t.Errorf("after the dry daemon the ledger holds %v, want it untouched at %v", got, stored)
 	}
 }
+
+// A job row's `priority` is the configuration's, and it reaches the row only if `serve`
+// hands the hub the configuration's resolver. Graded through the real serve assembly: a
+// daemon whose root names a priority serves that whole number on the root's rows, and a
+// package-level constructor being right does not make this pass.
+func TestServe_CarriesTheConfiguredPriorityToTheJobRows(t *testing.T) {
+	if _, err := exec.LookPath(envOr("HOLDFAST_FFMPEG", "ffmpeg")); err != nil {
+		t.Fatalf("ffmpeg is not on PATH, and serve does not start without it: %v", err)
+	}
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "media")
+	state := filepath.Join(dir, "state")
+	for _, d := range []string{lib, state} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	donePath := filepath.Join(lib, "done.mkv")
+	func() {
+		st, err := store.Open(filepath.Join(state, "jobs.db"))
+		if err != nil {
+			t.Fatalf("store.Open: %v", err)
+		}
+		defer func() { _ = st.Close() }()
+		ctx := context.Background()
+		if ok, err := st.Claim(ctx, donePath, "1:1", "w0", 3, store.DecisionInputs{}); err != nil || !ok {
+			t.Fatalf("Claim: ok=%v err=%v", ok, err)
+		}
+		if err := st.Finish(ctx, donePath, "1:1", store.Done, nil, 3); err != nil {
+			t.Fatalf("Finish: %v", err)
+		}
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := "library_roots:\n  - path: " + lib + "\n    priority: 7\nstate_dir: " + state + "\nserver_addr: " + addr + "\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	var stderr bytes.Buffer
+	go func() { done <- runServer(ctx, cfg, discardLog(), &stderr) }()
+	base := "http://" + addr
+	waitHTTP(t, base+"/api/summary", 30*time.Second)
+
+	var got struct {
+		History []struct {
+			Path     string `json:"path"`
+			Priority *int   `json:"priority"`
+		} `json:"history"`
+	}
+	raw := httpGet(t, base+"/api/history")
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("decode /api/history: %v", err)
+	}
+	if len(got.History) != 1 || got.History[0].Path != donePath {
+		t.Fatalf("/api/history = %s, want the one seeded row", raw)
+	}
+	if p := got.History[0].Priority; p == nil || *p != 7 {
+		t.Errorf("the row's priority = %v, want the root's configured 7: %s", p, raw)
+	}
+
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("runServer exit code = %d, want 0: %s", code, stderr.String())
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("runServer did not shut down after context cancel")
+	}
+}

@@ -187,21 +187,25 @@ const cursorVersion = 1
 // position. Tamper detection is not attempted: a readable token that was altered is a
 // read-only request for another position, behind the same gate.
 type historyCursor struct {
-	Version     int    `json:"v"`
-	UpdatedAt   int64  `json:"u"`
-	Path        string `json:"p"`
-	Fingerprint string `json:"f"`
+	Version   int   `json:"v"`
+	UpdatedAt int64 `json:"u"`
+	// Path and Fingerprint are BYTES, which encoding/json carries as base64: a path is
+	// whatever bytes the filesystem holds, and a JSON string would rewrite every byte that
+	// is not UTF-8 to U+FFFD, leaving a position that is no row's - one that drops rows
+	// or, sorting before its own row, serves that row for ever.
+	Path        []byte `json:"p"`
+	Fingerprint []byte `json:"f"`
 	Filter      string `json:"s"`
 }
 
 // mintCursor is the token that continues a traversal after pos under set.
 func mintCursor(pos store.PagePosition, set []store.Status) string {
 	raw, err := json.Marshal(historyCursor{
-		Version: cursorVersion, UpdatedAt: pos.UpdatedAt, Path: pos.Path,
-		Fingerprint: pos.Fingerprint, Filter: filterKey(set),
+		Version: cursorVersion, UpdatedAt: pos.UpdatedAt, Path: []byte(pos.Path),
+		Fingerprint: []byte(pos.Fingerprint), Filter: filterKey(set),
 	})
 	if err != nil {
-		// Unreachable: the struct holds an int, an int64 and three strings.
+		// Unreachable: the struct holds an int, an int64, two byte slices and a string.
 		panic(fmt.Sprintf("server: history cursor: %v", err))
 	}
 	return base64.RawURLEncoding.EncodeToString(raw)
@@ -225,7 +229,7 @@ func decodeCursor(token string) (historyCursor, bool) {
 	if dec.More() {
 		return historyCursor{}, false
 	}
-	if c.Version != cursorVersion || c.Path == "" || c.UpdatedAt < 0 {
+	if c.Version != cursorVersion || len(c.Path) == 0 || c.UpdatedAt < 0 {
 		return historyCursor{}, false
 	}
 	return c, true
@@ -315,7 +319,7 @@ func parseHistoryQuery(q url.Values) (historyQuery, []parameterRefusal) {
 				"to its last, so send the set the cursor was issued under or start again without a cursor",
 		})
 	case cur != nil:
-		out.after = &store.PagePosition{UpdatedAt: cur.UpdatedAt, Path: cur.Path, Fingerprint: cur.Fingerprint}
+		out.after = &store.PagePosition{UpdatedAt: cur.UpdatedAt, Path: string(cur.Path), Fingerprint: string(cur.Fingerprint)}
 	}
 	return out, problems
 }

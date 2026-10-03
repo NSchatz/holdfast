@@ -1096,3 +1096,19 @@ func TestS0169_AC16_TheReadGateStillRefusesAndNamesNoRoot(t *testing.T) {
 		t.Errorf("the credentialled request = %d and does not carry the per-root figures:\n%s", resp.StatusCode, body)
 	}
 }
+
+// AC-8's neighbour: the per-root ledger read is cached for every caller of the interval,
+// so the request that happens to start it must not be able to fail it by hanging up. A
+// read under an already-cancelled request still reads, and what it read is what is kept.
+func TestS0169_AC8_ARequestThatHangsUpDoesNotBlankThePerRootFiguresForTheInterval(t *testing.T) {
+	h := newHarness(t, "")
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, ok := h.hub.rootLedger(gone); !ok {
+		t.Fatal("the per-root ledger read failed under a cancelled request: its failure is cached, " +
+			"so every caller of the interval would be served null figures for one client's hang-up")
+	}
+	if _, ok := h.hub.rootLedger(context.Background()); !ok {
+		t.Fatal("the cached per-root figures read as unavailable after a cancelled request started the read")
+	}
+}

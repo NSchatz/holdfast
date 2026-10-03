@@ -807,7 +807,9 @@ func TestS0170_AC7_AStatusOutsideTheTerminalVocabularyIsRefused(t *testing.T) {
 
 // --- AC-8 ------------------------------------------------------------------------------
 
-// cursorOf encodes a token the way the server does, from JSON a test wrote.
+// cursorOf encodes a token the way the server does, from JSON a test wrote. In that JSON
+// the path and the fingerprint are base64 (L2xpYi9hYzgvMDUubWt2 is /lib/ac8/05.mkv, YTph is a:a): the
+// token carries them as bytes, since a path need not be UTF-8.
 func cursorOf(raw string) string { return base64.RawURLEncoding.EncodeToString([]byte(raw)) }
 
 func TestS0170_AC8_ACursorThisServerCannotDecodeIsRefused(t *testing.T) {
@@ -823,7 +825,7 @@ func TestS0170_AC8_ACursorThisServerCannotDecodeIsRefused(t *testing.T) {
 	good := *first.NextCursor
 	// The fixture's own idea of a well-formed token is accepted, so each refusal below is
 	// of the ONE thing that case changes.
-	wellFormed := cursorOf(`{"v":1,"u":1699999990,"p":"/lib/ac8/05.mkv","f":"a:a","s":""}`)
+	wellFormed := cursorOf(`{"v":1,"u":1699999990,"p":"L2xpYi9hYzgvMDUubWt2","f":"YTph","s":""}`)
 	if code, _, body := fetch(t, ts.URL+"/api/history?cursor="+wellFormed); code != http.StatusOK {
 		t.Fatalf("a well-formed token answered %d: %s", code, body)
 	}
@@ -837,14 +839,14 @@ func TestS0170_AC8_ACursorThisServerCannotDecodeIsRefused(t *testing.T) {
 		"standard alphabet":      "+/+/",
 		"not JSON":               cursorOf("these are words"),
 		"a JSON array":           cursorOf(`[1,2,3]`),
-		"an unknown field":       cursorOf(`{"v":1,"u":1699999990,"p":"/lib/ac8/05.mkv","f":"a:a","s":"","x":1}`),
-		"another version":        cursorOf(`{"v":2,"u":1699999990,"p":"/lib/ac8/05.mkv","f":"a:a","s":""}`),
-		"no version":             cursorOf(`{"u":1699999990,"p":"/lib/ac8/05.mkv","f":"a:a","s":""}`),
-		"no path":                cursorOf(`{"v":1,"u":1699999990,"p":"","f":"a:a","s":""}`),
-		"a negative stamp":       cursorOf(`{"v":1,"u":-1,"p":"/lib/ac8/05.mkv","f":"a:a","s":""}`),
-		"a stamp that is words":  cursorOf(`{"v":1,"u":"then","p":"/lib/ac8/05.mkv","f":"a:a","s":""}`),
-		"two objects":            cursorOf(`{"v":1,"u":1699999990,"p":"/lib/ac8/05.mkv","f":"a:a","s":""}{"v":1}`),
-		"an object then garbage": cursorOf(`{"v":1,"u":1699999990,"p":"/lib/ac8/05.mkv","f":"a:a","s":""} x`),
+		"an unknown field":       cursorOf(`{"v":1,"u":1699999990,"p":"L2xpYi9hYzgvMDUubWt2","f":"YTph","s":"","x":1}`),
+		"another version":        cursorOf(`{"v":2,"u":1699999990,"p":"L2xpYi9hYzgvMDUubWt2","f":"YTph","s":""}`),
+		"no version":             cursorOf(`{"u":1699999990,"p":"L2xpYi9hYzgvMDUubWt2","f":"YTph","s":""}`),
+		"no path":                cursorOf(`{"v":1,"u":1699999990,"p":"","f":"YTph","s":""}`),
+		"a negative stamp":       cursorOf(`{"v":1,"u":-1,"p":"L2xpYi9hYzgvMDUubWt2","f":"YTph","s":""}`),
+		"a stamp that is words":  cursorOf(`{"v":1,"u":"then","p":"L2xpYi9hYzgvMDUubWt2","f":"YTph","s":""}`),
+		"two objects":            cursorOf(`{"v":1,"u":1699999990,"p":"L2xpYi9hYzgvMDUubWt2","f":"YTph","s":""}{"v":1}`),
+		"an object then garbage": cursorOf(`{"v":1,"u":1699999990,"p":"L2xpYi9hYzgvMDUubWt2","f":"YTph","s":""} x`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			params, rules := refused(t, ts.URL+"/api/history?limit=5&cursor="+url.QueryEscape(token))
@@ -858,7 +860,7 @@ func TestS0170_AC8_ACursorThisServerCannotDecodeIsRefused(t *testing.T) {
 	}
 
 	t.Run("a stamp of zero is a position", func(t *testing.T) {
-		zero := cursorOf(`{"v":1,"u":0,"p":"/lib/ac8/05.mkv","f":"a:a","s":""}`)
+		zero := cursorOf(`{"v":1,"u":0,"p":"L2xpYi9hYzgvMDUubWt2","f":"YTph","s":""}`)
 		p := page(t, ts.URL, url.Values{"cursor": {zero}})
 		if len(p.History) != 0 || p.NextCursor != nil {
 			t.Fatalf("nothing is older than the epoch: got %d rows", len(p.History))
@@ -1159,6 +1161,35 @@ func TestS0170_AC13_TheSurfaceDocumentDescribesTheRefusalAndTheCursor(t *testing
 		}
 		if len(violations) > 0 {
 			t.Errorf("%s: the live body disagrees with the document: %v", tc.query, violations)
+		}
+	}
+}
+
+// AC-3, for a path that is not UTF-8. A file name is whatever bytes the filesystem holds,
+// and the ledger keeps them. A cursor that carried the path as a JSON string would rewrite
+// each such byte to U+FFFD: a position that sorts after its row skips the rows between,
+// and one that sorts before its row serves that row on every page and never ends.
+func TestS0170_AC3_APathThatIsNotUTF8IsAPositionLikeAnyOther(t *testing.T) {
+	l := newPagingLedger(t)
+	const at = 1_700_000_000
+	for i, path := range []string{
+		"/lib/a.mkv",
+		"/lib/caf\xe9.mkv", "/lib/caf\xea.mkv", // below U+FFFD's first byte: a rewritten position skips forward
+		"/lib/caf\xf5.mkv", "/lib/caf\xf6.mkv", // above it: a rewritten position falls back behind its own row
+		"/lib/z.mkv",
+	} {
+		l.add(path, "fp"+strconv.Itoa(i), store.Done, at)
+	}
+	ts := l.serve()
+	want := l.reference("done")
+	if len(want) != 6 {
+		t.Fatalf("the fixture holds %d rows, want 6", len(want))
+	}
+	for _, limit := range []string{"1", "2", "5"} {
+		got, sizes := traverse(t, ts.URL, url.Values{"limit": {limit}})
+		if !sameIDs(got, want) {
+			t.Errorf("limit=%s served rows %v over pages %v, want every row once in the ledger's order %v",
+				limit, got, sizes, want)
 		}
 	}
 }
