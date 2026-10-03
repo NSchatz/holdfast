@@ -96,14 +96,21 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g10-b
 | # | Item | State |
 |---|---|---|
 | 5.1 | Each new credential key in `config.SecretBearingKeys`, a literal refused | DONE (PRs #153, #155): `plex_token`, `sonarr_api_key`, `radarr_api_key`, `webhook_token`; `TestSecretKeys_PlexSonarrRadarrAreSecretBearingAndRefuseALiteral`, `TestSecretKeys_WebhookTokenIsSecretBearingAndRefusesALiteral` |
-| 5.2 | Live-check commands that write a redacted report, filed on the owner's queue for Plex, Sonarr and Radarr | TODO |
+| 5.2 | Live-check commands that write a redacted report, filed on the owner's queue for Plex, Sonarr and Radarr | DONE (PR #154, `21ee6fc`; queue #202 Plex, #203 Sonarr, #204 Radarr): `scripts/client-report.sh` + `scripts/clientreport` write `testdata/client-reports/<service>-<date>.json` through the shipped clients; `TestClientReport_*CarriesNoIdentity`, `TestClientReport_RefusesToWriteAReportCarryingTheCredentialOrHost`; mutation-diff 100%; gate exit 0 on the re-run (`internal/engine` 2295.9 s, `cmd/holdfast` 758.4 s); CI green; 1 fix round: the first gate went red from host load only (the engine's 60m clock and two readiness waits; red log commented on the PR) and was re-run unchanged |
 
 ## Phase 6 - Report
 
 | # | Item | State |
 |---|---|---|
-| 6.1 | Gate integrity counted from the goal-start SHA | TODO |
+| 6.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `21ee6fc`): `func Test` 1724 -> 1834, no package fell (`cmd/holdfast` 244 -> 259, `internal/config` 150 -> 163, `internal/engine` 569 -> 574, `internal/mediaclient` 0 -> 44, `internal/server` 107 -> 125, `scripts/clientreport` 0 -> 15, every other package unchanged); `git diff --numstat 6e1058f origin/main -- docs/design/swap.md docs/design/quality-gate.md` empty (66 and 80 lines); `*_test.go` +7439 -1, the one deleted line below; zero `co-authored-by` in `git log 6e1058f..origin/main --format=%B` |
 | 6.2 | Adversarial review of the report | TODO |
+
+### The one deleted `*_test.go` line and why
+
+- `internal/server/scan_test.go`: `if !strings.HasPrefix(r, "GET /api/") && !strings.HasPrefix(r, "POST /api/") {`
+  became a check on the route under any method (PR #155, review finding M2), so the guard that
+  keeps `restore` and `requeue` off HTTP also sees a `PUT` or any other method; the two `PUT`
+  webhook routes joined its list. The guard is stronger, nothing it asserted is gone.
 
 ## Decisions taken
 
@@ -153,6 +160,12 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g10-b
   `origin/main` keeping the branch side, and the merge was checked: `git diff origin/main HEAD`
   equals the branch's own diff over the stacked commit (same `sha1sum`).
 
+- D11 (2026-10-03): another session opened PR #156 (`speed/gate`, a faster local gate) in this
+  repo during this goal. It is not this goal's; this goal touched none of its branch or files
+  (§0.13).
+- D12 (2026-10-03): no minor release is cut (T37 optional): every new key is off by default and
+  the live checks are still on the owner's queue; a later goal can release them.
+
 ## Proposals awaiting the owner
 
 - Fail-open against fail-closed for the Plex play hold (D3).
@@ -164,9 +177,6 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g10-b
 
 ## Resume here
 
-PRs open: #151 (`TEST_TIMEOUT`, gate running, merges first), #152 (S0178 statement half, CI
-green, awaits its gate), #153 (clients, awaits CI and its gate). Agents still building on the
-clients branch: `holdfast-g10/webhook` and `holdfast-g10/live-check`. Merge order: #151, #152,
-#153, webhook, live-check; each gate runs on the branch merged up to `origin/main` with
-`/cache/tmp/holdfast-g10/gate.sh <worktree> <log>`. Then file the three live-check items on the
-owner's queue, count gate integrity, run the adversarial review, write the COMPLETE line.
+All PRs merged: #151, #152, #153, #155, #154; the live checks are queue #202-#204. No branch,
+worktree or open PR of this goal remains (#156 is another session's). Left: the adversarial
+review of the GOAL REPORT (6.2), then the COMPLETE line, `goals check`, and the report.
