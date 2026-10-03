@@ -391,6 +391,11 @@ func declaredResponses() (map[string][]Response, error) {
 			text(http.StatusInternalServerError),
 		}, readGate...),
 
+		"GET " + NodesReadPath: append([]Response{
+			jsonOK(http.StatusOK, nodesResponse{}),
+			text(http.StatusInternalServerError),
+		}, readGate...),
+
 		"GET /api/events": append([]Response{
 			{Status: http.StatusOK, MediaType: mediaSSE, Body: Shape{Kind: kindStream}},
 			// The ResponseWriter cannot flush, so no stream can be served.

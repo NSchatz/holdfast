@@ -184,6 +184,10 @@ func (s *Server) routes() *chi.Mux {
 			// The library health sweep's report (docs/design/health-sweep.md). A read,
 			// and only a read: there is no route that acts on what a sweep found.
 			r.Get("/health", s.handleHealth)
+			// The worker nodes and their leases (nodes_read.go). A read like the others
+			// here, and deliberately NOT under the lease prefix below: the node token
+			// opens that group and must not open this.
+			r.Get(NodesReadPath[len("/api"):], s.handleNodes)
 		})
 
 		// Mutating endpoints — token required (and disabled entirely when no token
@@ -372,7 +376,7 @@ func acceptsHTML(accept []string) bool {
 // branch is reachable only in process, where there is no listener to refuse and no exit
 // code to return.
 func RootHandler() http.HandlerFunc {
-	const banner = "holdfast API is running. See /api/summary, /api/queue, /api/history, /api/events.\n"
+	const banner = "holdfast API is running. See /api/summary, /api/queue, /api/history, /api/nodes, /api/events.\n"
 	offer, err := sourceoffer.Resolve()
 	if err != nil {
 		msg := "holdfast refuses to serve the root path: " + err.Error() + "\n"

@@ -16,6 +16,7 @@ per-field reference `README.md` points at rather than restates.
 | `GET /api/history?limit=N&status=S&cursor=C` | read | terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, newest first, one capped page at a time, optionally filtered by status, with `history_total` and `next_cursor` - see *`GET /api/history` - filtering and paging* |
 | `GET /api/events` | read | SSE: a fresh snapshot on every state change |
 | `GET /api/health` | read | the library health sweep: its state, the sweep under way and the last one that finished, each with its counts and the files it found corrupt or unreadable - see *`GET /api/health`* below. Report only: no route acts on a finding |
+| `GET /api/nodes` | read | the worker nodes this server knows of and the leases it has granted them, newest first, capped, with `leases_total` - see *`GET /api/nodes`* below. A read only: it serves no lease id and acts on no lease. The node token does not open it |
 | `GET /api/schema` | - | a machine-readable document of this surface, GENERATED from the router and the response types this build actually serves. Never gated: it carries endpoint paths, methods, status codes, media types, field names and field types, and no value of any kind - see below |
 | `GET /metrics` | - | Prometheus metrics (when `metrics_enable`, default on). Never gated: it names no file |
 | `POST /api/rescan` | control | start a library scan (409 if paused / scanning / outside the run window) |
@@ -363,6 +364,63 @@ recovered its leases after a start. An upload, a completion or a source request 
 server is not waiting on is **503** `not_ready` too. `node_max_transfers` counts source streams
 and uploads together. Every **410** carries `Cache-Control: no-store`. No endpoint
 here restores, requeues, resolves or re-opens anything.
+
+### `GET /api/nodes` - the worker nodes and their leases
+
+<a id="nodes-read"></a>
+
+Which nodes this server knows of, what each is doing, and how each lease it granted stood. A **read**
+endpoint, gated exactly as `GET /api/queue` is: open unless `server_read_token` is set, and then the
+read token or the control token. It is not one of the lease endpoints and `node_token` does not open
+it: with a read token set the node token is answered `401`.
+
+```json
+{
+  "enabled": true,
+  "now": 1700000000,
+  "nodes": [
+    { "node": "n1", "mode": "mapped", "encoders": ["libx265"], "waiting": false,
+      "cooling_until": null, "leases_active": 1 }
+  ],
+  "leases": [
+    { "node": "n1", "path": "/library/films/a.mkv", "state": "granted", "epoch": 3,
+      "granted_at": 1700000000, "updated_at": 1700000010, "expires_at": 1700000070,
+      "ended_at": null, "reason": null, "source_bytes": 123456, "output_bytes": null }
+  ],
+  "leases_total": { "available": true, "unavailable": "", "covers": "every lease in the ledger",
+                    "cap": 200, "age_seconds": 0, "count": 12 }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `enabled` | whether this server takes worker nodes: `true` once the lease protocol is wired (a `serve` with `node_token` set). `false` answers `nodes: []`, `leases: []` and a `leases_total` of 0 without reading the ledger |
+| `now` | the server's clock, unix seconds, the basis for every time below |
+| `nodes` | one entry per node name the server knows of or a listed lease names, by name ascending. Always an array |
+| `nodes[].mode` | the mode of the node's most recent poll, `"mapped"` or `"http"`. `null` when this server process has seen no poll from it, as after a restart, when a node is known only by its lease |
+| `nodes[].encoders` | the encoders that poll reported. `null` on the same terms as `mode` |
+| `nodes[].waiting` | a poll of the node's is open right now |
+| `nodes[].cooling_until` | the instant until which the node is offered nothing because its leases kept ending without an output; `null` when it is not cooling off |
+| `nodes[].leases_active` | the node's leases in a live state (`granted` or `uploaded`) as this server process holds them |
+| `leases` | at most **200** leases, live and ended alike, newest `granted_at` first, then `path` ascending, then `epoch` descending. Always an array |
+| `leases[].state` | `granted`, `uploaded`, `completed`, `failed` or `expired` |
+| `leases[].epoch` | the lease's fencing number: one more than the last lease of the same path carried |
+| `leases[].expires_at` | when the lease runs out without a heartbeat |
+| `leases[].ended_at` | when the lease became terminal; `null` while it is live |
+| `leases[].reason` | why a `failed` or `expired` lease ended: the server's word (`expired`, `digest_mismatch`, `source_digest_mismatch`, `canceled`, `server_restart`, `not_adopted`, `poll_gone`) or, on a `failed` lease, the word its node stated. `null` on every other lease |
+| `leases[].source_bytes` | the source's size when the lease was granted |
+| `leases[].output_bytes` | the admitted upload's size; `null` until an upload is admitted, never `0` |
+| `leases_total` | the count of every lease in the ledger, in the shape `queue_total` has: `count` is `null` and `available` is `false` when it could not be read, and the leases still ship |
+
+**Never served:** a lease id, the path of a working file, any digest and any token. A lease id is what
+a heartbeat, an upload and a completion are authorised by, so a reader of this endpoint is given
+nothing it could act on a lease with. A node that states its own lease id as its failure reason has
+that reason served as `node_failed`.
+
+The endpoint grants, ends, adopts and re-opens nothing, and writes no row. If the listed leases
+cannot be read it answers `500`, as the other reads do. Terminal leases older than seven days are
+pruned, except the newest of each path ([design](design/nodes.md#leases)), so the listing is recent
+history and not a full one.
 
 ### The webhook intake - `POST /api/webhook/sonarr` and `POST /api/webhook/radarr`
 
