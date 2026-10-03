@@ -69,13 +69,13 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g13-b
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | `web/`: Svelte 5, Vite, TypeScript 6.x, vitest, svelte-check, eslint; exact versions, a lockfile, pnpm through `packageManager`, Node LTS in `web/.node-version`; `ignoreScripts: true`, `minimumReleaseAge: 1440` and `fsevents` in `allowBuilds`, all in `pnpm-workspace.yaml`; versions re-checked on the registry today | DOING |
-| 3.2 | `check-pins.sh` section 8: `ignoreScripts: true` in `pnpm-workspace.yaml` for a pnpm project, a `minimumReleaseAgeExclude` list refused; the selftest fails an `.npmrc`-only setup (line D) | DOING |
-| 3.3 | `make check` runs UI lint, typecheck, unit tests and build on the pinned toolchain; `go build` and `go vet` pass without a built UI (line C, foundation) | DOING |
-| 3.4 | `internal/ui`: `go:embed` with a committed placeholder; the UI served at `/` with the source offer in the page; the offer still served and tested where no UI is built (line E) | DOING |
-| 3.5 | The image: a UI build stage on a Node image pinned by tag and digest; the final image stays distroless; CI `package` green (line E) | DOING |
-| 3.6 | CI: the `build` job runs the gate with the pinned Node and pnpm | DOING |
-| 3.7 | Adversarial review of the branch before its gate | DOING |
+| 3.1 | `web/`: Svelte 5, Vite, TypeScript 6.x, vitest, svelte-check, eslint; exact versions, a lockfile, pnpm through `packageManager`, Node LTS in `web/.node-version`; `ignoreScripts: true`, `minimumReleaseAge: 1440` and `fsevents` in `allowBuilds`, all in `pnpm-workspace.yaml`; versions re-checked on the registry today | DONE (PR #161, `0c3b25d`): `web/` with `svelte` 5.57.1, `vite` 8.3.2, `typescript` 6.0.3, `vitest` 5.0.3, `svelte-check` 4.7.6, `eslint` 10.11.0 (D5); Node 24.21.0 in `web/.node-version`; pnpm 12.8.1 with its sha512 in `packageManager`; `web/pnpm-lock.yaml`; `ignoreScripts: true`, `minimumReleaseAge: 1440` and `allowBuilds: fsevents: false` in `web/pnpm-workspace.yaml` |
+| 3.2 | `check-pins.sh` section 8: `ignoreScripts: true` in `pnpm-workspace.yaml` for a pnpm project, a `minimumReleaseAgeExclude` list refused; the selftest fails an `.npmrc`-only setup (line D) | DONE (PR #161, `0c3b25d`): section 8 requires a committed `pnpm-workspace.yaml` with `ignoreScripts: true` for a pnpm project and refuses a `minimumReleaseAgeExclude` list; selftest 88/88, case 58 "a pnpm project that sets ignore-scripts ONLY in .npmrc is caught (pnpm does not read it)" and case 59 the same for a new project; section 12 holds Node, pnpm, the packages, the install line and the lockfile |
+| 3.3 | `make check` runs UI lint, typecheck, unit tests and build on the pinned toolchain; `go build` and `go vet` pass without a built UI (line C, foundation) | DONE (PR #161, `0c3b25d`): `check:` runs `ui-lint ui-typecheck ui-test ui-build` between `vet` and `build`; gate exit 0 in 2210 s on `b485e60` (`ea2be7e` merged up to `origin/main`), `internal/engine` 1944.9 s (54.0% of `TEST_TIMEOUT`), `cmd/holdfast` 776.9 s; "ui: Node 24.21.0 and pnpm 12.8.1, as pinned", eslint clean, svelte-check 0 errors 0 warnings, vitest 21 of 21, vite build; `TestUnbuiltTree_BuildsAndVetsBecauseOfThePlaceholder`; CI green (`build`, `package`, `mutation`); mutation-diff 100.00% against the 70% floor (killed 22, lived 0); 0 fix rounds |
+| 3.4 | `internal/ui`: `go:embed` with a committed placeholder; the UI served at `/` with the source offer in the page; the offer still served and tested where no UI is built (line E) | DONE (PR #161, `0c3b25d`): `internal/ui` (`//go:embed all:dist`, placeholder `internal/ui/dist/.gitkeep`); `GET /` answers a request for HTML with the page and the offer written into it, every other request with the plain-text page unchanged (D6); `GET /assets/*`; `TestUI_RootServesThePageWithTheSourceOfferToARequestForHTML`, `TestUI_ARequestThatDoesNotAskForHTMLGetsThePlainTextPageUnchanged`, `TestUI_AssetsAreServedByNameAndNothingElseIs`, `TestWireUI_ServesAWholeBuildAndNoPartOfABrokenOne`, the existing `internal/server/sourceoffer_test.go` unchanged and green; `make api-schema-diff` 21 additions, 0 breaks |
+| 3.5 | The image: a UI build stage on a Node image pinned by tag and digest; the final image stays distroless; CI `package` green (line E) | DONE (PR #161, `0c3b25d`): the `ui` stage is `FROM node:24.21.0-trixie-slim@sha256:8ec5d755...`; the runtime stage is still `gcr.io/distroless/cc-debian13:nonroot@sha256:54df941e...`; CI `package` green on `ea2be7e` (run 37130784349), its smoke test: "serve answers a request for HTML at / with the web UI's page, carrying the Corresponding Source offer" |
+| 3.6 | CI: the `build` job runs the gate with the pinned Node and pnpm | DONE (PR #161, `0c3b25d`): `actions/setup-node` (the commit of `v7`) with `node-version-file: web/.node-version` in `ci.yml` and `release.yml`; CI `build` ran "ui: Node 24.21.0 and pnpm 12.8.1, as pinned" through corepack and passed in 23m22s |
+| 3.7 | Adversarial review of the branch before its gate | DONE (PR #161, `0c3b25d`, commit `ea2be7e` on the branch): a fresh agent found no HIGH, 5 MED, 11 LOW; fixed with a selftest case or a test each (D11) |
 
 ## Phase 4 - Report
 
@@ -142,20 +142,44 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g13-b
   two. A changed precondition of a case, not a weakened assertion: the case still asserts the
   same refusal by the same message.
 
+- D11 (2026-10-03): the branch review of `holdfast-g13/ui` (a fresh agent, before the gate).
+  Fixed: the smoke test searched `docker logs` through a pipe that could fail on a match under
+  pipefail; the pin check stayed green on `minimumReleaseAgeStrict: false`, on an install line
+  carrying `--ignore-scripts=false` or a `pnpm_config_*` variable (each measured to run a root
+  `postinstall` past the workspace file under pnpm 12.8.1), on a pnpmfile, on an inline
+  `allowBuilds` map, on a `ui` stage that was not the node image, on a lockfile entry with no
+  registry sha512 and on an `overrides` block (selftest cases 76 to 87); `ui.Load` accepted a
+  page naming an asset the build did not hold; `scripts/ui.sh` left a temporary directory; the
+  comments claimed the `packageManager` hash pins pnpm's binary, and for pnpm 12 it pins a
+  launcher that fetches the native binary and checks it against npm's registry signatures (the
+  text now says so). Left as they are, with the reason: `make fmt` walks `web/node_modules`
+  (one gofmt-clean Go file there today; an unformatted one would be a loud red naming its
+  path); the surface document describes `GET /` 200 as `text/plain` only (its format keys a
+  response by status; the second representation is in `docs/design/web-ui.md#root` and the API
+  reference); the arm64 smoke never reaches the UI step (D9); the statements that holdfast
+  ships no frontend in `README.md` and `docs/docker.md` (D2, goal 14's).
+- D12 (2026-10-03): a duplicate of the gate job was queued by mistake behind the mutation run
+  and merged `origin/main` (two ledger-only commits) into the local branch before running, so
+  the gate that counts ran on `b485e60`, the PR head `ea2be7e` merged up to `origin/main`. The
+  merge commit was never pushed (main had moved by ledger commits only, §0.3) and went with the
+  worktree. The other copy was stopped while it waited for the lock and ran nothing.
+- D13 (2026-10-03): Dependabot opened #162 (the Node image), #163 (the distroless base) and
+  #164 (the `web/` packages) after #161 merged. They are the bot's proposals under S0151
+  ("opens PRs that are never merged" by an agent), not PRs of this goal, and are left open.
+
 ## Requests
 
-None filed, none addressed to holdfast (T6, §0.13). The owner's queue: no new item so far.
+None filed, none addressed to holdfast (T6, §0.13). The owner's queue: no new item so far; nothing in this goal needs the owner's hands (no hardware, no live service).
 
 ## Resume here
 
-- `holdfast-g13/ui`: PR #161 is open at head `ea2be7e` (the branch review is applied: no HIGH,
-  5 MED, 11 LOW; selftest 88/88). Its CI is running; its `make mutation-diff` and then its full
-  gate run under the heavy locks (logs `mutation-ui-1.log`, `gate-ui-1.log`). Next: paste the
-  gate tail, wall-clock and engine seconds into the PR body, wait for CI green (`build`,
-  `package`, `mutation`), merge with `gh pr merge --squash --delete-branch`. A red is a fix
-  round (at most 3).
-- `holdfast-g13/notices` in `/cache/wt/holdfast/g13-notices` (pushed, head `90a1d01`): S0175.
-  After #161 merges: `git merge origin/main`, check its statement against the merged serving
-  code, gate, PR, CI, merge.
-- Then: gate integrity counts, the owner's queue check, the COMPLETE line, `goals check`, the
-  adversarial review of the report.
+- `holdfast-g13/ui`: merged, PR #161, `0c3b25d`. Its worktree and branch are gone.
+- `holdfast-g13/notices`: PR #165 is open at head `9cebf19` (S0175, merged up to `origin/main`
+  after #161, its statement about the root checked against the merged code). Running: its
+  `make mutation-diff` and then its full gate under the heavy locks in
+  `/cache/wt/holdfast/g13-notices` (logs `mutation-notices-1.log`, `gate-notices-1.log`), its
+  CI, and a fresh adversarial review of the branch. Next: apply the review (a change after the
+  gate started means the gate runs again), paste the gate tail into the PR body, wait for CI
+  green, merge.
+- Then: gate integrity counts (5.1), the owner's queue check, the COMPLETE line, `goals check`,
+  the adversarial review of the report.
