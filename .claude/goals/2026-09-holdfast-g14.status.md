@@ -113,6 +113,22 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g14-b
   nowhere else: not `localStorage`, not `sessionStorage`, not a cookie, not a URL. A reload asks
   for it again. That is the narrowest reading of "held for the browser session only", and a test
   holds the page to it.
+- D6 (2026-10-03): the branch review of `holdfast-g14/api-facts` (a fresh agent, before the
+  gate) found no data-safety fault and four findings, each fixed with a test: the history cursor
+  carried the path as a JSON string, which rewrites a byte that is not UTF-8 and so dropped rows
+  or never ended (the path and fingerprint are now bytes;
+  `TestS0170_AC3_APathThatIsNotUTF8IsAPositionLikeAnyOther`); `serve`'s wiring of the priority
+  resolver had no test (`TestServe_CarriesTheConfiguredPriorityToTheJobRows`); a node-stated
+  lease reason of 32 characters or more could be another lease's id or a digest and is now
+  served as `node_failed`; a request that hung up mid-read could blank the per-root figures for
+  the cache interval (the read now outlives its request).
+- D7 (2026-10-03): the builders found that `.gremlins.yaml` excludes `internal/engine`,
+  `internal/store`, `internal/server`, `internal/metrics` and `cmd/holdfast`, so of this track's
+  code only `internal/node` and `internal/config` are in the mutation domain. No exclusion is
+  added or removed (§4, T34). For the owner's eye, not built on: a `would-transcode` row whose
+  file later gains a second hard link is skipped before the claim and its row is not rewritten,
+  so under a live engine it keeps being counted in `pending` (S0172's builder; the row and the
+  file are untouched).
 - D5 (2026-10-03): the baseline's `internal/engine` took 2984.4 s, 82.9% of `TEST_TIMEOUT`, against
   1983.0 s in goal 13's last gate on the same tree. The difference is load: the four builders ran
   package tests beside it. §4 says to raise `TEST_TIMEOUT` once the engine passes 80%, in its own
@@ -125,7 +141,12 @@ None filed, none addressed to holdfast (T6, §0.13). The owner's queue: no new i
 
 ## Resume here
 
-Phase 1: the baseline gate is running in `/cache/wt/holdfast/g14-baseline` (log
-`/cache/tmp/holdfast-g14/gate-baseline.log`). Next: start the three API builders and the UI
-builder in worktrees under `/cache/wt/holdfast/`, then merge the API parts into
-`holdfast-g14/api-facts`, review, gate, PR, CI, merge; then the same for `holdfast-g14/ui-views`.
+Phase 2: the three API builders finished; their work is merged into `holdfast-g14/api-facts`
+(worktree `/cache/wt/holdfast/g14-api`, local only), with the branch review's four findings fixed
+and `TEST_TIMEOUT` raised to 90m in its own commit. Running now, in that worktree, under the
+heavy locks: `make mutation-diff REF=origin/main` (log `/cache/tmp/holdfast-g14/api-mutation.log`),
+then `make check` (log `api-gate.log`, the gated SHA in `api-gate.sha`). Next: push the branch,
+open its PR with the gate tail, wait for CI, squash-merge. Phase 3: the UI builder finished on
+`holdfast-g14/ui-views` (worktree `/cache/wt/holdfast/g14-ui`, local only); a branch review is
+running; after the API PR merges, merge `origin/main` into it, align it with the served shapes
+(the node `mode` words are `mapped` and `http`), gate, PR, CI, merge.
