@@ -967,7 +967,7 @@ dry_run: false
 #                              #   Authorization header cannot carry two values. A read
 #                              #   token is NEVER accepted for a mutation.
 #                              #   IT DOES NOT GATE THE ROOT PAGE. / is a plain-text page
-#                              #   naming the endpoints (the web UI's shell, to a browser)
+#                              #   naming the endpoints (the web UI, to a browser)
 #                              #   and carrying the Corresponding Source offer: it is still
 #                              #   served with no credential when this is set, and it holds
 #                              #   no library datum for a credential to protect. /metrics is

@@ -149,10 +149,10 @@ server did not give as unavailable or not recorded, never as a zero.**
 | View | Reads | Shows |
 |---|---|---|
 | Summary and savings | `GET /api/summary` | jobs per status, paused and scanning, bytes reclaimed (lifetime and this run), bytes held by the undo window, the per-root table (candidate files and bytes, excluded, projection basis, projected savings, held, free space, and the row for files under no configured root), and the whole-ledger aggregates with the set each covers |
-| Queue | `GET /api/queue` | each pending and active row: status, path, `priority`, source size, codec, dimensions, library root, the encoder's own progress where the row carries it, how long it has been in its state; and `queue_total` as "showing N of M" |
+| Queue | `GET /api/queue` | each pending and active row: status, path, `priority`, source size, codec, dimensions, library root, the encoder's own progress where the row carries it, how long it has been in its state; and `queue_total` as "showing N of M", with its age where it has one |
 | History | `GET /api/history` with `limit`, `status` and `cursor` | each terminal row's recorded outcome: status, reason, sizes, saving, source facts, scores, when; `history_total`; a filter over the six terminal statuses, a page size, a next page that follows `next_cursor` until it is null, and a way back to the first page |
 | Health | `GET /api/health` | the sweep's state and schedule, the sweep under way, the last finished one, their counts and the files found corrupt or unreadable |
-| Nodes | `GET /api/nodes` | each worker node (mode, encoders, whether it is polling, cooling off, active leases) and each lease (node, path, state, reason, epoch, times, sizes), with `leases_total` |
+| Nodes | `GET /api/nodes` | each worker node (its mode, `mapped` or `http`, its encoders, whether it is polling, cooling off, active leases) and each lease (node, path, its state - `granted`, `uploaded`, `completed`, `failed` or `expired` - reason, epoch, times, sizes), with `leases_total` |
 
 Each rule here has a reason:
 
@@ -161,6 +161,12 @@ Each rule here has a reason:
   statistic about the most recent rows that reads as one about the library
   ([ledger totals](ledger-totals.md#null-is-not-zero)); the server's totals are over the whole
   ledger, so the page shows those and says "showing N of M".
+- **A figure's age is stated beside it.** The server answers every total (`queue_total`,
+  `history_total`, `leases_total`) and every whole-ledger aggregate with `age_seconds`: it may
+  serve them from a cache up to 30 seconds old, while the rows beside them are read fresh. Where
+  that age is above zero the page writes it in words ("total as of 12 s before this read"); an
+  age that is zero, null or absent is claimed as nothing. Where more rows are shown than the
+  total counts, the page does not write "N of M": it says the total is the older of the two.
 - **Null is written in words.** A field that is absent, null or of another type is read as null
   (`web/src/lib/shape.ts`) and shown as "unavailable" or "not recorded". A count beside
   `available: false` is not read at all. A row with no progress shows none rather than 0%.
@@ -168,12 +174,16 @@ Each rule here has a reason:
   shape, the view shows an alert and no table: a table drawn from some other document would be
   a confident wrong answer.
 - **A refusal is shown in the server's words**, with its status. A 400 from the history shows
-  the envelope's `error` and each parameter's `error`; the page never branches on that prose. A
+  the envelope's `error` and each parameter's `error`, and none of its rule tokens
+  (`invalid-query`, `status-not-terminal`, `cursor-undecodable`, `cursor-filter-mismatch`); the
+  page never branches on that prose. A sentence over 300 characters is cut there and ends in
+  "...", never dropped: the status text that would stand in for it is empty under HTTP/2. A
   404 says the server predates the view. A 401 on a read says a token is needed.
 - **The history is filtered and paged by the server.** The page sends the ticked statuses and
   the cursor it was given and shows what comes back; it never filters or reorders rows itself,
-  so `history_total` and the rows are about the same set. A server that answers without
-  `next_cursor` predates paging, and the view says its filter is not applied.
+  so `history_total` and the rows are about the same set. `next_cursor` is always in the
+  answer, a string or null, and null is the last page; a server that answers without it
+  predates paging, and the view says its filter is not applied.
 - **Polling, not the event stream.** A view reads on an interval while the page is visible, and
   on a manual refresh; leaving it aborts the read in flight. `GET /api/events` is not used
   because the browser's `EventSource` cannot send an `Authorization` header, and the only other
@@ -216,8 +226,10 @@ nothing it was not told. `restore` and `requeue` are not on the page in any form
   fails on either word, and `internal/server/no_undo_routes_test.go` walks the real router and
   fails on a route pattern that contains one.
 - **The answer shown is the server's.** After a pause the page writes the `paused` and
-  `scanning` the response carried, not the state it asked for. A library scan is reported as
-  started only where the body says `started: true`; a 409 shows the server's `reason`. A named
+  `scanning` the response carried, not the state it asked for; an answer that carries no boolean
+  `paused` is an alert saying the server did not state it, whatever its status. A library scan
+  is reported as started only where the body says `started: true`; a 409 shows the server's
+  `reason`. A named
   scan shows the accepted and refused counts and, per path, the rule and detail the server
   gave. An exclusion is reported as changed only where `changed` is true. A request that got
   no answer says nothing is known to have changed.
@@ -226,7 +238,11 @@ nothing it was not told. `restore` and `requeue` are not on the page in any form
   token (a read token is answered 401 on a control). The page reads `GET /api/exclusions` when
   the controls are opened, with whatever token it holds, and that one answer tells the two
   apart before anything is pressed. Without an accepted token the controls are disabled and the
-  page says why.
+  page says why: they are enabled only once that read, made with the token held, has answered
+  2xx. While it is in flight, refused with any other status, or unanswered, every control stays
+  disabled, the page states which of those it is, and one button asks again. A token that is
+  changed or forgotten drops the previous answer and the list it carried before the next read
+  returns.
 - **Priority is shown and is not a control.** Nothing on the API sets it; it is what the
   configuration says for the file.
 
@@ -235,8 +251,8 @@ nothing it was not told. `restore` and `requeue` are not on the page in any form
 <a id="token"></a>
 
 **The token lives in a variable of the running page and nowhere else. It is sent only as
-`Authorization: Bearer` to paths under `/api/` on the origin the page came from. A reload
-forgets it.**
+`Authorization: Bearer` to paths under `/api/` on the origin the page came from, and no
+redirect is followed. A reload forgets it.**
 
 One field takes one token. The control token drives the controls and is accepted on the reads;
 a read token opens the reads where `server_read_token` is set. The page does not ask which it
@@ -250,10 +266,21 @@ was given: the server's answers say.
   the browser's history, a copied link and a proxy's access log. The API module builds every
   query itself and refuses a path that is not under `/api/`, so the token cannot be sent to
   another origin or a non-API path; the request is not made.
+- **Not along a redirect.** Every request is made with `redirect: "error"`,
+  `mode: "same-origin"` and `credentials: "omit"`. A browser that followed a same-origin 3xx
+  would send the `Authorization` header again to wherever it pointed, which need not be under
+  `/api/`; with `redirect: "error"` the request fails instead and the page reports it as no
+  answer, in a sentence that names a redirect as one cause. `same-origin` makes a request to any
+  other origin fail before it is sent, and `omit` keeps cookies and HTTP authentication out of
+  every request, so the header is the only credential. The token is in that one header and no
+  other.
 - **Not in a log, not on the page.** The field is `type="password"` with `autocomplete="off"`,
   is emptied when its value is taken, and is not inside a form, since a form is what a browser
   offers to remember a password from and the page's policy gives a form no target. The token is
-  rendered nowhere.
+  rendered nowhere, including inside an error: a token that is not printable ASCII without a
+  space is refused before `fetch` is called, in a fixed sentence, because an engine may quote a
+  header value it cannot send; and a failure or refusal whose words repeat the token is replaced
+  by a fixed sentence before any view sees it.
 - **Forget.** One button drops the token and empties the field; the next request carries no
   credential and the controls say they are unavailable.
 
