@@ -43,7 +43,9 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g14-b
 
 | What | Value | Source |
 |---|---|---|
-| `make check` under `goals-heavy` then `flock -o` `holdfast-heavy` | running at this commit; the value is written when it ends | `gate-baseline.log` |
+| `make check` under `goals-heavy` then `flock -o` `holdfast-heavy`, at `dfaca59` | exit 0 in 3339 s, while this goal's four builders ran their own tests on the same CPUs (load average 50 to 58) | `gate-baseline.log` |
+| `internal/engine` under `go test -race` (from that run) | ok, 89.1% coverage, 2984.4 s (82.9% of `TEST_TIMEOUT` 60m; D5) | `gate-baseline.log` |
+| `cmd/holdfast`, `internal/server` (from that run) | ok, 1170.7 s; 622.0 s | `gate-baseline.log` |
 | The last gate on this tree (goal 13, `76786b5`; `main` has moved by ledger commits only since) | exit 0 in 2211 s; `internal/engine` 1983.0 s (55.1% of `TEST_TIMEOUT` 60m); `cmd/holdfast` 803.9 s | goal 13's ledger, row 4.0 |
 | `func Test` count, all packages | 2033 | `rg -c '^func Test' -g '*_test.go'`, `functest-start.txt` |
 | `docs/design/swap.md`, `docs/design/quality-gate.md` lines | 66, 80 | `wc -l` |
@@ -58,7 +60,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g14-b
 |---|---|---|
 | 1.1 | Precondition checked (header above) | DONE (`dfaca59`): goal 13's COMPLETE line is on `origin/main` |
 | 1.2 | Ledger created as the goal's first commit, straight to `main` | DONE (the commit that adds this file): fast docs checks passed first |
-| 1.3 | Baseline gate with timings | DOING |
+| 1.3 | Baseline gate with timings | DONE (`dfaca59`): `make check` exit 0 in 3339 s; the table above |
 
 ## Phase 2 - Triage rows and the API facts the views need (line B; track `holdfast-g14/api-facts`)
 
@@ -111,6 +113,11 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g14-b
   nowhere else: not `localStorage`, not `sessionStorage`, not a cookie, not a URL. A reload asks
   for it again. That is the narrowest reading of "held for the browser session only", and a test
   holds the page to it.
+- D5 (2026-10-03): the baseline's `internal/engine` took 2984.4 s, 82.9% of `TEST_TIMEOUT`, against
+  1983.0 s in goal 13's last gate on the same tree. The difference is load: the four builders ran
+  package tests beside it. §4 says to raise `TEST_TIMEOUT` once the engine passes 80%, in its own
+  commit with the measurement, so the API track raises it, and this goal's gates run while no
+  builder is running tests.
 
 ## Requests
 
