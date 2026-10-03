@@ -28,9 +28,9 @@ import (
 // (`server_auth_token`) on the mutating endpoints, the read token
 // (`server_read_token`) on the reads under /api when it is configured, the webhook
 // token (`webhook_token`) on the Sonarr and Radarr intake and nowhere else, and the node
-// token (`node_token`) on the worker-node lease endpoints and nowhere else. The plain-text
-// root page and /metrics are gated by neither, for the reasons given at their routes.
-// holdfast ships no frontend, so /api IS the interface. It holds no
+// token (`node_token`) on the worker-node lease endpoints and nowhere else. The root
+// path, the web UI's static assets and /metrics are gated by none of them, for the reasons
+// given at their routes. /api IS the machine-readable interface. It holds no
 // media handles - every mutating action routes through the Controller (scan/pause), which
 // cannot touch a file.
 type Server struct {

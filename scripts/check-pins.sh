@@ -711,6 +711,35 @@ else
        and records it in a \`minimumReleaseAgeExclude\` list it writes for itself. Set:
          minimumReleaseAge: 1440"
         fi
+        if yaml_has_top "$ws" minimumReleaseAgeStrict && [ "$(yaml_top "$ws" minimumReleaseAgeStrict)" != "true" ]; then
+          pnpm_bad=1
+          bad "RELEASE AGE NOT ENFORCED - $wsrel sets \`minimumReleaseAgeStrict\` to something other than true.
+       With it false pnpm installs a version younger than \`minimumReleaseAge\` anyway and
+       writes the \`minimumReleaseAgeExclude\` list for itself (measured with pnpm 12.8.1,
+       2026-10-03). Remove the key: an explicit \`minimumReleaseAge\` is strict by default."
+        fi
+        # 6: a pnpmfile is code pnpm runs at every install, whatever ignoreScripts says
+        # (measured with pnpm 12.8.1, 2026-10-03).
+        for pf in .pnpmfile.cjs .pnpmfile.mjs; do
+          if [ -e "$mdir/$pf" ]; then
+            pnpm_bad=1
+            bad "CODE THAT RUNS AT INSTALL - $mdirrel/$pf exists. pnpm executes a pnpmfile at every install, and \`ignoreScripts: true\` does not stop it. The web UI needs no install hook; delete it."
+          fi
+        done
+        if yaml_has_top "$ws" pnpmfile || yaml_has_top "$ws" globalPnpmfile; then
+          pnpm_bad=1
+          bad "CODE THAT RUNS AT INSTALL - $wsrel names a pnpmfile, which pnpm executes at every install whatever \`ignoreScripts\` says."
+        fi
+        if yaml_has_top "$ws" onlyBuiltDependencies; then
+          pnpm_bad=1
+          bad "DEPENDENCY BUILD SCRIPT ALLOWED - $wsrel carries \`onlyBuiltDependencies\`, a list of dependencies granted their build script."
+        fi
+        # An inline map after the key is a shape the block reader below does not read, so
+        # it is refused rather than passed unread.
+        if grep -qE '^allowBuilds:[[:space:]]*[^[:space:]#]' "$ws"; then
+          pnpm_bad=1
+          bad "DEPENDENCY BUILD SCRIPT ALLOWED - $wsrel writes \`allowBuilds\` on one line. Write it as a block, one \`<name>: false\` per line, so each entry can be read."
+        fi
         if yaml_has_top "$ws" dangerouslyAllowAllBuilds && [ "$(yaml_top "$ws" dangerouslyAllowAllBuilds)" != "false" ]; then
           pnpm_bad=1
           bad "EVERY DEPENDENCY BUILD ALLOWED - $wsrel sets \`dangerouslyAllowAllBuilds\`, which grants every transitive dependency its install script."
@@ -1094,7 +1123,11 @@ fi
 #          section 7 requires the reference written there - so that tag is compared here.
 #          A literal `node-version:` in a workflow is refused: it is a second home.
 #   pnpm   web/package.json `packageManager`, as pnpm@<exact>+sha512.<128 hex>: corepack
-#          downloads that version and refuses bytes that do not hash to it.
+#          downloads that version's package and refuses bytes that do not hash to it. For
+#          pnpm 12 that package is a launcher: it fetches the native pnpm of the same
+#          version and checks it against npm's registry signatures, not against this hash
+#          (read in the package's bin/pnpm.mjs, 2026-10-03). The version is what is pinned
+#          end to end; the hash pins the launcher.
 #   every package   an exact version in web/package.json - no range, no tag - and a
 #          committed web/pnpm-lock.yaml that resolves the rest. Svelte and Vite are named,
 #          because the gate's claim is about them.
@@ -1107,23 +1140,68 @@ if ! printf '%s' "$ui_node" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
        day of the build."
 fi
 
-# The ui stage's base: every FROM line naming a node image.
-ui_from="$(grep -nE '^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]].*[[:space:]/]?node:[^[:space:]]+' "$here/Dockerfile" \
-  | grep -E '(^[0-9]+:[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]+(--[^[:space:]]+[[:space:]]+)*)(docker\.io/)?(library/)?node:' || true)"
+# The ui stage's base: the FROM line of the stage NAMED `ui`, which must be the official
+# node image, and the build stage must take the UI from that stage and no other.
+ui_from="$(grep -nE '^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]].*[[:space:]][Aa][Ss][[:space:]]+ui[[:space:]]*$' "$here/Dockerfile" || true)"
 ui_from_count="$(printf '%s' "$ui_from" | grep -c . || true)"
+ui_from_tag=""
 if [ "$ui_from_count" -ne 1 ]; then
   ui_bad=$((ui_bad + 1))
-  bad "the Dockerfile has $ui_from_count stage(s) built FROM a node image, and the web UI is built in exactly one: this check could not find the stage whose Node version it compares. A parser that stopped understanding the Dockerfile is a refusal, not a green build."
+  bad "the Dockerfile has $ui_from_count stage(s) named \`ui\`, and the web UI is built in exactly one: this check could not find the stage whose Node version it compares. A parser that stopped understanding the Dockerfile is a refusal, not a green build."
 else
-  ui_from_tag="$(printf '%s' "$ui_from" | sed -n 's/.*node:\([^@[:space:]]*\).*/\1/p')"
-  ui_from_ver="${ui_from_tag%%-*}"
-  if [ "$ui_from_ver" != "$ui_node" ]; then
-    ui_bad=$((ui_bad + 1))
-    bad "Node version drift - the image builds the web UI on node:$ui_from_tag (Dockerfile line ${ui_from%%:*}) and web/.node-version pins $ui_node.
+  ui_from_img="$(printf '%s' "$ui_from" | sed 's/^[0-9]*:[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]\{1,\}//' \
+    | awk '{ for (i = 1; i <= NF; i++) if ($i !~ /^--/) { print $i; exit } }')"
+  case "$ui_from_img" in
+    node:*|library/node:*|docker.io/library/node:*)
+      ui_from_tag="${ui_from_img#*node:}"; ui_from_tag="${ui_from_tag%%@*}"
+      ui_from_ver="${ui_from_tag%%-*}"
+      if [ "$ui_from_ver" != "$ui_node" ]; then
+        ui_bad=$((ui_bad + 1))
+        bad "Node version drift - the image builds the web UI on node:$ui_from_tag (Dockerfile line ${ui_from%%:*}) and web/.node-version pins $ui_node.
        \`make check\` proves the UI on the version in web/.node-version; the image would
        ship one built on another. Move both together (and the FROM line's digest with its
        tag)."
+      fi
+      ;;
+    *)
+      ui_bad=$((ui_bad + 1))
+      bad "NOT THE NODE IMAGE - the Dockerfile's \`ui\` stage is built FROM '$ui_from_img' (line ${ui_from%%:*}), not the official \`node:<version>\` image: the Node the gate proved the UI on is not what would build it."
+      ;;
+  esac
+  ui_copies="$(grep -cE '^[[:space:]]*COPY[[:space:]]+--from=ui[[:space:]]+/src/web/dist/?[[:space:]]+\./internal/ui/dist/?[[:space:]]*$' "$here/Dockerfile" || true)"
+  ui_other="$(grep -E '^[[:space:]]*COPY[[:space:]].*internal/ui/dist' "$here/Dockerfile" | grep -cvE -- '--from=ui[[:space:]]+/src/web/dist/?[[:space:]]' || true)"
+  if [ "$ui_copies" -ne 1 ] || [ "$ui_other" -ne 0 ]; then
+    ui_bad=$((ui_bad + 1))
+    bad "the Dockerfile does not embed the web UI from its \`ui\` stage alone: expected exactly one \`COPY --from=ui /src/web/dist/ ./internal/ui/dist/\` and no other COPY into internal/ui/dist (found $ui_copies and $ui_other)."
   fi
+fi
+
+# The install line. pnpm-workspace.yaml (section 8) is where the decisions live, and a
+# command-line flag or a pnpm_config_* variable overrides that file: `--ignore-scripts=false`,
+# `--no-ignore-scripts`, `--config.ignoreScripts=false` and `pnpm_config_ignore_scripts=false`
+# each ran a root postinstall script past a workspace file saying `ignoreScripts: true`
+# (measured with pnpm 12.8.1, 2026-10-03). So each place that installs is held to the one
+# install command, with no other flag, and no pnpm_config_* variable is set anywhere a
+# build reads.
+for inst in Dockerfile scripts/ui.sh; do
+  inst_lines="$(grep -nE 'pnpm[[:space:]]+(install|i|add|update|up|import|rebuild|dlx|exec[[:space:]]+pnpm)([[:space:]]|$)' "$here/$inst" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  inst_ok="$(printf '%s\n' "$inst_lines" | grep -cE '^[0-9]+:[[:space:]]*(RUN[[:space:]]+)?pnpm install --frozen-lockfile[[:space:]]*$' || true)"
+  inst_all="$(printf '%s' "$inst_lines" | grep -c . || true)"
+  if [ "$inst_ok" -ne 1 ] || [ "$inst_all" -ne 1 ]; then
+    ui_bad=$((ui_bad + 1))
+    bad "UNHELD INSTALL - $inst must install the web UI's packages with exactly one \`pnpm install --frozen-lockfile\`, alone on its line, and no other installing command. Found:
+$(printf '%s\n' "$inst_lines" | sed 's/^/         /')
+       A flag on that line overrides web/pnpm-workspace.yaml (--ignore-scripts=false runs
+       lifecycle scripts), and without --frozen-lockfile the install rewrites the lockfile
+       instead of failing on it."
+  fi
+done
+ui_cfg_env="$(grep -nEi 'pnpm_config_' "$here/Dockerfile" "$here/scripts/ui.sh" "$here/Makefile" "${wf_files[@]}" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
+if [ -n "$ui_cfg_env" ]; then
+  ui_bad=$((ui_bad + 1))
+  bad "PNPM SETTING OUTSIDE ITS FILE - a pnpm_config_* variable is set where a build reads it, and it overrides web/pnpm-workspace.yaml:
+$(printf '%s\n' "$ui_cfg_env" | sed "s|^$here/||; s/^/         /")
+       Every pnpm decision lives in web/pnpm-workspace.yaml, where section 8 reads it."
 fi
 
 for wf in "${wf_files[@]}"; do
@@ -1147,8 +1225,8 @@ ui_pm="$(sed -n 's/^[[:space:]]*"packageManager":[[:space:]]*"\([^"]*\)",\{0,1\}
 if ! printf '%s' "$ui_pm" | grep -qE '^pnpm@[0-9]+\.[0-9]+\.[0-9]+\+sha512\.[0-9a-f]{128}$'; then
   ui_bad=$((ui_bad + 1))
   bad "UNPINNED PACKAGE MANAGER - web/package.json \`packageManager\` is '${ui_pm:-absent}', not pnpm@<MAJOR.MINOR.PATCH>+sha512.<128 lowercase hex>.
-       The version says which pnpm; the hash is what makes corepack refuse any other bytes
-       under that version."
+       The version says which pnpm; the hash is what makes corepack refuse any other
+       package under that version."
 fi
 
 # Every dependency, in either block, one `"name": "version"` per line as pnpm writes it.
@@ -1215,6 +1293,20 @@ fi
 if ! git -C "$here" ls-files --error-unmatch -- web/pnpm-lock.yaml >/dev/null 2>&1; then
   ui_bad=$((ui_bad + 1))
   bad "web/pnpm-lock.yaml is not committed: without it \`pnpm install --frozen-lockfile\` has nothing to hold the transitive dependencies to, and each install resolves them afresh."
+fi
+# Every package the lockfile resolves comes from the registry with its sha512: a
+# `tarball:` or git resolution, or one with no integrity, is bytes nothing pins.
+ui_res_all="$(grep -cE '^[[:space:]]+resolution:' "$here/web/pnpm-lock.yaml" || true)"
+ui_res_ok="$(grep -cE '^[[:space:]]+resolution: \{integrity: sha512-[A-Za-z0-9+/=]+\}[[:space:]]*$' "$here/web/pnpm-lock.yaml" || true)"
+if [ "$ui_res_all" -eq 0 ] || [ "$ui_res_all" -ne "$ui_res_ok" ]; then
+  ui_bad=$((ui_bad + 1))
+  bad "UNPINNED LOCKFILE ENTRY - web/pnpm-lock.yaml has $ui_res_all resolution(s) and $ui_res_ok of them are a registry package with a sha512 and nothing else:
+$(grep -nE '^[[:space:]]+resolution:' "$here/web/pnpm-lock.yaml" | grep -vE 'resolution: \{integrity: sha512-[A-Za-z0-9+/=]+\}[[:space:]]*$' | head -5 | sed 's/^/         /')
+       A tarball URL, a git reference or a missing integrity is a dependency no hash holds."
+fi
+if grep -qE '^[[:space:]]*"(overrides|pnpm|resolutions)"[[:space:]]*:' "$here/web/package.json"; then
+  ui_bad=$((ui_bad + 1))
+  bad "web/package.json carries an \`overrides\`, \`resolutions\` or \`pnpm\` block: a version written there is read by none of the exact-version checks above. Pin the package as a dependency instead."
 fi
 if ! grep -qE "^lockfileVersion:" "$here/web/pnpm-lock.yaml"; then
   ui_bad=$((ui_bad + 1))

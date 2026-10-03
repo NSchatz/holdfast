@@ -78,7 +78,7 @@ func TestWireUI_ServesAWholeBuildAndNoPartOfABrokenOne(t *testing.T) {
 				ui.IndexName:        {Data: []byte(wiredPage + ui.OfferSlot + "</body></html>")},
 				"assets/other-2.js": {Data: []byte("1")},
 			},
-			wantLevel: "level=WARN", wantLog: "not one build",
+			wantLevel: "level=WARN", wantLog: "which the build does not hold",
 		},
 	}
 	for _, tc := range cases {

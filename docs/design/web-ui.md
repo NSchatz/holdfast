@@ -31,7 +31,7 @@ Each version has one home, and the gate reads it from there:
 | What | Home | Read by |
 |---|---|---|
 | Node | `web/.node-version`, an exact version | `scripts/ui.sh`; the workflows' `node-version-file`; the Dockerfile's `ui` stage restates it on its `FROM` line, and section 12 compares the two |
-| pnpm | `packageManager` in `web/package.json`, with its sha512 | corepack, which refuses bytes that do not hash to it |
+| pnpm | `packageManager` in `web/package.json`, with its sha512 | corepack, which refuses a package that does not hash to it. pnpm 12's package is a launcher: it fetches the native pnpm of that version and checks it against npm's registry signatures, so the hash pins the launcher and the version pins the rest |
 | Svelte, Vite and every other package | exact versions in `web/package.json` | `pnpm install --frozen-lockfile` against the committed `web/pnpm-lock.yaml` |
 
 The versions were read from the npm registry and the Node release index on 2026-10-03
@@ -64,8 +64,14 @@ did).
   one package in the lockfile that declares an install script. It is named so that not building
   it is a written decision.
 
+A command-line flag or a `pnpm_config_*` variable overrides that file (`--ignore-scripts=false`
+ran a root `postinstall` past it, pnpm 12.8.1, 2026-10-03), and a pnpmfile runs at install
+whatever it says. So section 12 holds the Dockerfile and `scripts/ui.sh` to one
+`pnpm install --frozen-lockfile` with no other flag and refuses a `pnpm_config_*` variable in
+anything a build reads, and section 8 refuses a pnpmfile.
+
 `scripts/check-pins.sh` section 8 holds a pnpm project to the first two and refuses the exclude
-list and any granted build; its selftest proves that a project whose only decision is an
+list, a release age that is not strict and any granted build; its selftest proves that a project whose only decision is an
 `.npmrc` fails.
 
 ## The gate
@@ -93,7 +99,7 @@ A binary therefore embeds one of two things, and `serve` says which at startup:
 
 A tree that has a page and cannot be served as declared is refused whole and logged at WARN:
 a page that does not carry the offer's slot exactly once, an asset of a kind the list does not
-name, assets that are not the ones the page references. No part of it is served; the root stays
+name, a page that names an asset the build does not hold. No part of it is served; the root stays
 the plain-text page, which carries the offer.
 
 ## The root path

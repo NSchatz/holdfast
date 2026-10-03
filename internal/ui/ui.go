@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -105,11 +106,15 @@ var mediaTypes = map[string]string{
 	".txt":   "text/plain; charset=utf-8",
 }
 
+// assetRef matches a reference to an asset in the page: the path Vite writes into a
+// `src` or `href` attribute, up to the closing quote.
+var assetRef = regexp.MustCompile(`["'(]/` + AssetsDir + `/([^"')\s]+)`)
+
 // Load reads a built UI out of fsys and writes offer into its page.
 //
 // It returns ErrNotBuilt for a tree with no page, and a descriptive error for a tree
 // that has one and cannot be served as declared: a page that does not carry OfferSlot
-// exactly once, a page that references no asset, an asset of a kind mediaTypes does not
+// exactly once, a page that references no asset or one the tree does not hold, an asset of a kind mediaTypes does not
 // name, or anything under AssetsDir that is not a regular file. The caller serves no part
 // of a UI Load refused.
 func Load(fsys fs.FS, offer sourceoffer.Offer) (*Site, error) {
@@ -156,16 +161,19 @@ func Load(fsys fs.FS, offer sourceoffer.Offer) (*Site, error) {
 	if len(assets) == 0 {
 		return nil, fmt.Errorf("the web UI has a page and no file under %s/: the build was not copied whole", AssetsDir)
 	}
-	referenced := false
-	for name := range assets {
-		if bytes.Contains(raw, []byte("/"+AssetsDir+"/"+name)) {
-			referenced = true
-			break
-		}
-	}
-	if !referenced {
+	// The page and the assets must be ONE build: every file the page names under the
+	// assets directory is there, and it names at least one. A page that names a script
+	// this tree does not hold is a blank screen in a browser.
+	refs := assetRef.FindAllSubmatch(raw, -1)
+	if len(refs) == 0 {
 		return nil, fmt.Errorf("the web UI's %s references no file under %s/: the page and the assets are not one build",
 			IndexName, AssetsDir)
+	}
+	for _, ref := range refs {
+		if _, ok := assets[string(ref[1])]; !ok {
+			return nil, fmt.Errorf("the web UI's %s names /%s/%s, which the build does not hold: the page and the assets are not one build",
+				IndexName, AssetsDir, ref[1])
+		}
 	}
 	return &Site{page: page, assets: assets}, nil
 }

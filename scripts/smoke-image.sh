@@ -301,7 +301,7 @@ cid="$(docker run -d "${PLATFORM_ARGS[@]}" -u "$uid:$gid" -p 127.0.0.1::8080 \
   "$IMAGE" serve --config /config/config.yaml)" \
   || fail "could not start 'holdfast serve' in the image"
 trap 'docker rm -f "$cid" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
-port="$(docker port "$cid" 8080/tcp | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -1)"
+port="$(docker port "$cid" 8080/tcp 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -1 || true)"
 [ -n "$port" ] || fail "'holdfast serve' published no port:
 $(docker logs "$cid" 2>&1 | tail -20)"
 base="http://127.0.0.1:${port}"
@@ -332,7 +332,7 @@ grep -qi "^content-security-policy: default-src 'none'" "$work/page.headers" \
 $(cat "$work/page.headers")"
 ok "serve answers a request for HTML at / with the web UI's page, carrying the Corresponding Source offer"
 
-script="$(grep -oE '/assets/[A-Za-z0-9._-]+\.js' <<<"$page" | head -1)"
+script="$(grep -oE '/assets/[A-Za-z0-9._-]+\.js' <<<"$page" | head -1 || true)"
 [ -n "$script" ] || fail "the page names no script under /assets/:
 $page"
 script_meta="$(curl -fsS --max-time 10 -o "$work/script.js" -w '%{http_code} %{content_type}' "$base$script")" \
@@ -351,9 +351,12 @@ grep -q 'AGPL-3.0-only' <<<"$plain" && grep -q '^Corresponding Source: https\{0,
 $plain"
 ok "serve still answers / with the plain-text page and its source offer to a request that does not ask for HTML"
 
-docker logs "$cid" 2>&1 | grep -q 'web UI embedded' \
+# Captured, then searched: `grep -q` leaves at its first match, and under pipefail a
+# `docker logs` still writing into the closed pipe would fail this step on a line it found.
+serve_log="$(docker logs "$cid" 2>&1 || true)"
+grep -q 'web UI embedded' <<<"$serve_log" \
   || fail "'holdfast serve' did not log that it embeds a web UI:
-$(docker logs "$cid" 2>&1 | tail -20)"
+$(tail -20 <<<"$serve_log")"
 docker rm -f "$cid" >/dev/null 2>&1 || true
 
 echo "== smoke PASSED: the image encoded a real file, verified it, and swapped it safely, and serves its web UI with the source offer"

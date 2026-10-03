@@ -22,15 +22,19 @@
 # version, a short or uppercase digest, a fetch URL that is not the pinned release asset or
 # a second unchecked one, and a NOTICE that omits a tool, drifts from its version, names one
 # the image does not carry, loses its MIT licence, source or permission notice, or carries a
-# stray version; case 57 asserts a coherent bump of both files still PASSES; cases 58-75
+# stray version; case 57 asserts a coherent bump of both files still PASSES; cases 58-87
 # (goal 13) defeat the WEB UI guards - a pnpm project whose only lifecycle-script decision
 # is an .npmrc pnpm does not read, a decision that is false, absent or uncommitted, a
 # minimumReleaseAgeExclude list, a release age that is implicit or too short, a dependency
 # granted its build script, a Node pin that floats or drifted from the image's stage, a
 # literal Node version in a workflow, a package manager without its hash, a package pinned
 # by a range, a missing lockfile, a bot that stopped watching the UI's packages, and a
-# NOTICE that drifted from the Svelte the binary embeds or lost its permission notice; case
-# 74 asserts a coherent Node bump still PASSES. Two of the
+# NOTICE that drifted from the Svelte the binary embeds, lost its permission notice or lost
+# the entry, a release age switched to not strict, a pnpmfile, a build grant in a shape
+# the block reader does not read, an install line carrying a flag, a pnpm_config_*
+# variable, a ui stage that is not the node image, a lockfile entry with no registry
+# sha512, an overrides block and a manifest that stops naming vite; case 74 asserts a
+# coherent Node bump still PASSES. Two of the
 # S0057 cases assert a PASS
 # rather than a bite (the local-action exemption, and a manifest whose decision is
 # recorded), because a guard that refuses everything is indistinguishable from a guard
@@ -70,7 +74,7 @@ OLD_ENV="TRANSCODE""_SERVER_AUTH_TOKEN"
 OLD_CRF="TRANSCODE""_CRF"
 OLD_METRIC="transcode""_files_total"
 
-declared=76
+declared=88
 pass=0; failed=0
 repo="$work/repo"
 
@@ -764,6 +768,81 @@ awk '/^  package: svelte /{t=1} t && /Permission is hereby granted, free of char
 [ "$(grep -c 'Permission is hereby granted, free of charge' "$repo/NOTICE")" -eq 2 ] \
   || { echo "::error::selftest: could not drop Svelte's permission notice, so this case did NOT run" >&2; exit 1; }
 expect 1 "a Svelte entry without the MIT permission notice is caught" "svelte entry is incomplete: it lacks the MIT permission notice"
+reset
+
+# --- 76. The release age switched to not strict: pnpm then installs a young version anyway
+#         and writes the exclude list for itself.
+printf '\nminimumReleaseAgeStrict: false\n' >> "$ws"
+expect 1 "minimumReleaseAgeStrict: false is caught" "RELEASE AGE NOT ENFORCED"
+reset
+
+# --- 77. A pnpmfile: code pnpm runs at every install, whatever ignoreScripts says.
+printf 'module.exports = {}\n' > "$repo/web/.pnpmfile.cjs"
+expect 1 "a .pnpmfile.cjs beside the manifest is caught" "CODE THAT RUNS AT INSTALL - web/.pnpmfile.cjs"
+reset
+
+# --- 78. A build granted in the one-line shape the block reader does not read.
+sed -i '/^allowBuilds:/,$d' "$ws"
+printf 'allowBuilds: {fsevents: true}\n' >> "$ws"
+expect 1 "an inline allowBuilds map is refused rather than passed unread" "writes .allowBuilds. on one line"
+reset
+
+# --- 79. Every dependency granted its build script at once.
+printf '\ndangerouslyAllowAllBuilds: true\n' >> "$ws"
+expect 1 "dangerouslyAllowAllBuilds is caught" "EVERY DEPENDENCY BUILD ALLOWED"
+reset
+
+# --- 80. The image's install line given a flag that overrides the workspace file. The file
+#         still says ignoreScripts: true, and section 8 is still green on it.
+sed -i 's|^RUN pnpm install --frozen-lockfile$|RUN pnpm install --frozen-lockfile --ignore-scripts=false|' "$repo/Dockerfile"
+grep -q 'ignore-scripts=false' "$repo/Dockerfile" || { echo "::error::selftest: could not edit the install line, so this case did NOT run" >&2; exit 1; }
+expect 1 "an install line carrying a flag that re-enables lifecycle scripts is caught" "UNHELD INSTALL - Dockerfile"
+reset
+
+# --- 81. The gate's own install without --frozen-lockfile.
+sed -i 's|^    pnpm install --frozen-lockfile$|    pnpm install|' "$repo/scripts/ui.sh"
+expect 1 "the gate's install without --frozen-lockfile is caught" "UNHELD INSTALL - scripts/ui.sh"
+reset
+
+# --- 82. The same override through the environment.
+sed -i 's|^ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 CI=true$|ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 CI=true pnpm_config_ignore_scripts=false|' "$repo/Dockerfile"
+grep -q 'pnpm_config_ignore_scripts' "$repo/Dockerfile" || { echo "::error::selftest: could not edit the ENV line, so this case did NOT run" >&2; exit 1; }
+expect 1 "a pnpm_config_* variable in the Dockerfile is caught" "PNPM SETTING OUTSIDE ITS FILE"
+reset
+
+# --- 83. The stage named ui built from something that is not the node image, with the real
+#         node stage left in the file under another name. A check that counted node images
+#         would still find one and compare the wrong stage.
+sed -i 's|^\(FROM --platform=$BUILDPLATFORM node:[^ ]*\) AS ui$|\1 AS uidecoy\nFROM --platform=$BUILDPLATFORM ghcr.io/example/node:18.0.0@sha256:0000000000000000000000000000000000000000000000000000000000000000 AS ui|' "$repo/Dockerfile"
+grep -q 'AS uidecoy' "$repo/Dockerfile" || { echo "::error::selftest: could not rename the ui stage, so this case did NOT run" >&2; exit 1; }
+expect 1 "a ui stage that is not the official node image is caught" "NOT THE NODE IMAGE"
+reset
+
+# --- 84. The lockfile gone: named, not skipped.
+rm -f "$repo/web/pnpm-lock.yaml"
+expect 1 "a missing web/pnpm-lock.yaml is named, not silently skipped" "MISSING: web/pnpm-lock.yaml"
+reset
+
+# --- 85. One lockfile entry resolved from a URL, with no integrity.
+first_res="$(awk '/^[[:space:]]+resolution: \{integrity: / { print NR; exit }' "$repo/web/pnpm-lock.yaml")"
+[ -n "$first_res" ] || { echo "::error::selftest: found no lockfile resolution to edit, so this case did NOT run" >&2; exit 1; }
+sed -i "${first_res}s|resolution: .*|resolution: {tarball: https://example.invalid/x.tgz}|" "$repo/web/pnpm-lock.yaml"
+expect 1 "a lockfile entry resolved from a tarball URL with no sha512 is caught" "UNPINNED LOCKFILE ENTRY"
+reset
+
+# --- 86. A version written where no exact-version check reads it.
+sed -i 's|^  "dependencies": {|  "overrides": {\n    "vite": "^8.0.0"\n  },\n  "dependencies": {|' "$repo/web/package.json"
+grep -q '"overrides"' "$repo/web/package.json" || { echo "::error::selftest: could not add an overrides block, so this case did NOT run" >&2; exit 1; }
+expect 1 "an overrides block in web/package.json is caught" "carries an .overrides., .resolutions. or .pnpm. block"
+reset
+
+# --- 87. Svelte's entry gone from NOTICE altogether, and vite no longer named by the
+#         manifest: each is graded by its own message in the one run.
+sed -i 's|^  package: svelte .*|  (the web UI entry was here)|' "$repo/NOTICE"
+sed -i '/^    "vite": /d' "$repo/web/package.json"
+expect 1 "a NOTICE with no Svelte entry is caught" "svelte MISSING FROM NOTICE"
+grep -q 'web/package.json does not name .vite.' <<<"$guard_out" \
+  || { printf '::error::selftest: a manifest that stopped naming vite was not reported\n' >&2; failed=$((failed + 1)); pass=$((pass - 1)); }
 reset
 
 echo

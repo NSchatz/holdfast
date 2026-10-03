@@ -193,9 +193,17 @@ func TestLoad_RefusesAPageItCannotServeAsDeclared(t *testing.T) {
 			fstest.MapFS{IndexName: {Data: []byte(page(OfferSlot))}, "assets": {Mode: fs.ModeDir}},
 			"the build was not copied whole",
 		},
+		"a page naming a stylesheet the build does not hold": {
+			with(func(m fstest.MapFS) { delete(m, "assets/index-BBBB.css") }),
+			"names /assets/index-BBBB.css, which the build does not hold",
+		},
 		"assets of another build": {
 			fstest.MapFS{IndexName: {Data: []byte(page(OfferSlot))}, "assets/index-ZZZZ.js": {Data: []byte("x")}},
-			"the page and the assets are not one build",
+			"names /assets/index-AAAA.js, which the build does not hold",
+		},
+		"a page that names no asset at all": {
+			fstest.MapFS{IndexName: {Data: []byte("<html><body>" + OfferSlot + "</body></html>")}, "assets/a.js": {Data: []byte("x")}},
+			"references no file under assets/",
 		},
 	}
 	for name, tc := range cases {

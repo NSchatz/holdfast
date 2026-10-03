@@ -330,7 +330,9 @@ RUN set -eu; \
     echo "node in the image matches web/.node-version (${got})"
 
 # pnpm comes from corepack, which reads the `packageManager` field of package.json and
-# refuses a download that does not hash to the sha512 written there. Lifecycle scripts do
+# refuses a package that does not hash to the sha512 written there. pnpm 12's package is a
+# launcher that fetches the native pnpm of the same version and checks it against npm's
+# registry signatures. Lifecycle scripts do
 # not run: web/pnpm-workspace.yaml says so, and it is copied before the install reads it.
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 CI=true
 RUN corepack enable pnpm

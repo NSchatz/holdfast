@@ -19,7 +19,9 @@
 #
 # A step runs only on exactly those two versions. Where the `node` and `pnpm` on PATH
 # are not them, the script asks for them by version - corepack for pnpm (it reads the
-# packageManager field and checks the download against its hash), then mise for both -
+# packageManager field and checks the package it downloads against that hash; pnpm 12's
+# package is a launcher that fetches the native pnpm of the same version and checks it
+# against npm's registry signatures), then mise for both -
 # and where none of that yields the pinned pair it REFUSES, naming what it found. A UI
 # gate that ran on whatever Node was lying around would be a gate about that Node.
 set -euo pipefail
@@ -71,8 +73,18 @@ try() { # try <label> <command prefix...>
 }
 
 export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+# Where corepack's pnpm shim goes when that route is tried: a directory of this run's own,
+# removed when the script exits.
+shims=""
+trap '[ -z "$shims" ] || rm -rf "$shims"' EXIT
+corepack_path() {
+  shims="$(mktemp -d)"
+  corepack enable --install-directory "$shims" pnpm >/dev/null 2>&1 || true
+  printf '%s:%s' "$shims" "$PATH"
+}
 if try "node and pnpm on PATH" env; then :
-elif command -v corepack >/dev/null 2>&1 && try "node on PATH with corepack's pnpm" env PATH="$(d="$(mktemp -d)"; corepack enable --install-directory "$d" pnpm >/dev/null 2>&1 || true; printf '%s' "$d"):$PATH"; then :
+elif command -v corepack >/dev/null 2>&1 && cp_path="$(corepack_path)" && shims="${cp_path%%:*}" \
+     && try "node on PATH with corepack's pnpm" env PATH="$cp_path"; then :
 elif command -v mise >/dev/null 2>&1 && try "mise exec node@${node_pin} pnpm@${pnpm_pin}" mise exec "node@${node_pin}" "pnpm@${pnpm_pin}" --; then :
 else
   die "the pinned UI toolchain is not available: Node ${node_pin} (web/.node-version) with pnpm ${pnpm_pin} (web/package.json packageManager).
