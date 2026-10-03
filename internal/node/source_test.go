@@ -91,6 +91,25 @@ func (f *fixture) jobOf(name string, content []byte) Job {
 
 func (f *fixture) streamed(id string) string { return f.hub.streamedDigest(id) }
 
+// streamedOnceRecorded is streamed for a test that EXPECTS a digest. The handler records it
+// after http.ServeContent has returned, which is after the last byte of a body of declared
+// length was written - so a client can hold the whole body a moment before the record
+// exists, and a read taken straight after the response is a race the handler may lose (it
+// did, on a loaded CI runner). This waits for the record, for at most five seconds, and
+// returns what is there; a digest that is never recorded still fails the caller's
+// comparison, five seconds later and by the same message. A test that expects NO digest
+// reads streamed directly: waiting could only hide a late one.
+func (f *fixture) streamedOnceRecorded(id string) string {
+	f.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if got := f.streamed(id); got != "" || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func (f *fixture) transfers() int {
 	f.hub.mu.Lock()
 	defer f.hub.mu.Unlock()
@@ -131,7 +150,7 @@ func TestNodeFixture_AnHTTPModeLeaseIsGrantedInHTTPModeAndItsSourceIsStreamedAnd
 		t.Errorf("the source is served with Last-Modified %q; no conditional request is answered from a date", got)
 	}
 	want := digestOf(content)
-	if got := f.streamed(a.LeaseID); got != want {
+	if got := f.streamedOnceRecorded(a.LeaseID); got != want {
 		t.Fatalf("the server recorded %q for what it streamed, want the source's sha-256 %s", got, want)
 	}
 	if n := f.transfers(); n != 0 {
@@ -175,6 +194,11 @@ func TestNodeFixture_ASourceChangedInTransitFailsTheLeaseBeforeAnyGate(t *testin
 	a, call := f.grantHTTP("node-a", job)
 	if r := f.source(a.LeaseID, "1", nil); r.status != http.StatusOK {
 		t.Fatalf("source: %d %s", r.status, r.body)
+	}
+	// The comparison below is against the recorded digest, so the record has to be there
+	// before the completion is sent: with none, the completion is not held to anything.
+	if got := f.streamedOnceRecorded(a.LeaseID); got != digestOf(content) {
+		t.Fatalf("the whole source was sent and %q recorded for it", got)
 	}
 	if up := f.put(a.LeaseID, a.Epoch, output, digestOf(output)); up.status != http.StatusOK {
 		t.Fatalf("upload: %d %s", up.status, up.body)
@@ -951,7 +975,7 @@ func TestNodeFixture_AConditionalSourceRequestIsAnsweredWithTheWholeSource(t *te
 			t.Errorf("%s answered %d with %d bytes, want 200 and the whole source", name, r.status, len(r.body))
 			continue
 		}
-		if got := f.streamed(a.LeaseID); got != digestOf(content) {
+		if got := f.streamedOnceRecorded(a.LeaseID); got != digestOf(content) {
 			t.Errorf("%s: the whole source was sent and %q recorded for it", name, got)
 		}
 	}
