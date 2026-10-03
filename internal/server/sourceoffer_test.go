@@ -186,6 +186,9 @@ func (failingStore) Summary(context.Context) (map[store.Status]int, error) { ret
 func (failingStore) List(context.Context, []store.Status, int) ([]store.Job, error) {
 	return nil, errStoreDown
 }
+func (failingStore) ListPage(context.Context, []store.Status, *store.PagePosition, int) ([]store.Job, bool, error) {
+	return nil, false, errStoreDown
+}
 func (failingStore) ReclaimedTotal(context.Context) (int64, error) { return 0, errStoreDown }
 func (failingStore) Aggregates(context.Context) store.Aggregates {
 	return store.Aggregates{

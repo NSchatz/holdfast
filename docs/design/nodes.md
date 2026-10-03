@@ -576,6 +576,14 @@ still face every gate, but cost the server a decode and a VMAF run each - and ca
 exclude, search, scan or queue. No lease endpoint restores, requeues, resolves or re-opens
 anything.
 
+The nodes and their leases can be READ at `GET /api/nodes`, which is not a lease endpoint: it sits
+in the read group, behind `server_read_token` where one is set, and the node token does not open
+it. It serves each node's name, the mode and encoders of its last poll, whether it is waiting or
+cooling off, and each lease's node, path, state, epoch, times, reason and sizes. It never serves a
+lease id, a working file's path, a digest or a token - a lease id is what a heartbeat, an upload and
+a completion are authorised by - and it grants, ends, adopts and re-opens nothing
+([reference](../api-reference.md#nodes-read)).
+
 In http mode a node token also reads the source of every lease it is granted, which over a pass
 is the library's leasable media. Digests are no defence against someone on the path, and what
 keeps the credential and the media off the wire in the clear is TLS: both are stated, with the

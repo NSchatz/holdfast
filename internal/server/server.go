@@ -78,6 +78,10 @@ type Server struct {
 	// test that wired none: the root path then answers every request with the plain-text
 	// page and the asset route answers 404.
 	ui *ui.Site
+
+	// free is the bounded free-space read behind the summary's per-root free_bytes
+	// (summary_roots.go). The zero value reads internal/diskfree.
+	free freeSpace
 }
 
 // HealthSource is the health sweep's in-memory state, which the ledger does not hold.
@@ -184,6 +188,10 @@ func (s *Server) routes() *chi.Mux {
 			// The library health sweep's report (docs/design/health-sweep.md). A read,
 			// and only a read: there is no route that acts on what a sweep found.
 			r.Get("/health", s.handleHealth)
+			// The worker nodes and their leases (nodes_read.go). A read like the others
+			// here, and deliberately NOT under the lease prefix below: the node token
+			// opens that group and must not open this.
+			r.Get(NodesReadPath[len("/api"):], s.handleNodes)
 		})
 
 		// Mutating endpoints — token required (and disabled entirely when no token
@@ -372,7 +380,7 @@ func acceptsHTML(accept []string) bool {
 // branch is reachable only in process, where there is no listener to refuse and no exit
 // code to return.
 func RootHandler() http.HandlerFunc {
-	const banner = "holdfast API is running. See /api/summary, /api/queue, /api/history, /api/events.\n"
+	const banner = "holdfast API is running. See /api/summary, /api/queue, /api/history, /api/nodes, /api/events.\n"
 	offer, err := sourceoffer.Resolve()
 	if err != nil {
 		msg := "holdfast refuses to serve the root path: " + err.Error() + "\n"
@@ -406,6 +414,15 @@ type controlState struct {
 	Paused                 bool           `json:"paused"`
 	Scanning               bool           `json:"scanning"`
 	Aggregates             aggregatesDTO  `json:"aggregates"`
+
+	// The sizing figures (S0169, summary_roots.go). BytesHeldByUndoWindow is the figure
+	// the SSE snapshot and the holdfast_bytes_held_by_undo_window gauge report; Roots
+	// splits it, and the candidate, projection and free-space figures, per configured
+	// library root; RootsUnattributed holds what no configured root accounts for. Every
+	// figure is null where it could not be read, never 0.
+	BytesHeldByUndoWindow *int64                `json:"bytes_held_by_undo_window"`
+	Roots                 []rootTotalsDTO       `json:"roots"`
+	RootsUnattributed     unattributedTotalsDTO `json:"roots_unattributed"`
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
@@ -414,21 +431,21 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "summary", err)
 		return
 	}
-	counts := make(map[string]int, len(sum))
-	for st, n := range sum {
-		counts[string(st)] = n
-	}
+	held, roots, unattributed := s.rootSizing(r.Context())
 	// The same whole-ledger figure set the stream publishes, from the same cache and
 	// under the same refresh interval: a client that polls sees what a client that
 	// subscribes sees, and polling this endpoint cannot make the figures cost more than
 	// one refresh per interval however often it is called.
 	writeJSON(w, http.StatusOK, controlState{
-		Summary:                counts,
+		Summary:                s.hub.reportedCounts(sum),
 		BytesReclaimedSession:  s.hub.BytesReclaimed(),
 		BytesReclaimedLifetime: s.hub.ReclaimedLifetime(),
 		Paused:                 s.ctrl.Paused(),
 		Scanning:               s.ctrl.Scanning(),
 		Aggregates:             aggregatesOf(s.hub.ledgerFigures(r.Context(), true)),
+		BytesHeldByUndoWindow:  held,
+		Roots:                  roots,
+		RootsUnattributed:      unattributed,
 	})
 }
 
@@ -450,9 +467,15 @@ type queueResponse struct {
 }
 
 // historyResponse is the body of GET /api/history.
+//
+// NextCursor continues the traversal (history_paging.go): a token while a further row
+// follows this page, and an explicit null on the last one. It is never omitted, so "no more
+// rows" is something the response SAYS rather than something a client infers from a key
+// that is not there.
 type historyResponse struct {
 	History      []jobDTO    `json:"history"`
 	HistoryTotal rowTotalDTO `json:"history_total"`
+	NextCursor   *string     `json:"next_cursor"`
 }
 
 // rescanResponse is the body of POST /api/rescan, under 202 and under 409 alike.
@@ -487,30 +510,6 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		Now:        time.Now().Unix(),
 		Queue:      s.hub.queueDTOs(jobs),
 		QueueTotal: rowTotalOf(s.hub.ledgerFigures(r.Context(), true).QueueTotal, queueLimit),
-	})
-}
-
-func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
-	limit := historyLimit
-	if q := r.URL.Query().Get("limit"); q != "" {
-		// Clamp a requested limit into (0, historyLimit]; anything larger keeps the
-		// cap, anything else keeps the default. `<=` lets a caller ask for exactly
-		// the cap.
-		if n, err := strconv.Atoi(q); err == nil && n > 0 && n <= limit {
-			limit = n
-		}
-	}
-	jobs, err := s.reads().List(r.Context(), terminal, limit)
-	if err != nil {
-		s.fail(w, "history", err)
-		return
-	}
-	// history_total counts the matching rows in the LEDGER, so it is the same figure
-	// whether the caller took the cap or asked for fewer: `cap` moves with the request,
-	// `count` does not. A total that tracked the request would just be len(history).
-	writeJSON(w, http.StatusOK, historyResponse{
-		History:      toDTOs(jobs),
-		HistoryTotal: rowTotalOf(s.hub.ledgerFigures(r.Context(), true).HistoryTotal, limit),
 	})
 }
 

@@ -77,6 +77,16 @@ the key is each candidate's position in it - and the queue is held until the lis
 because the highest-priority file may be the last one listed. `path` streams only where no priority
 is written anywhere.
 
+The read API shows a file's priority and takes none. Every job row on `GET /api/queue`,
+`GET /api/history`, the SSE snapshot and `GET /api/search` carries `priority`: what the
+configuration answers for that path now, worked out as the row is served from the path and the
+source height the row records. It is `null` where the path is under no configured root, and where a
+banded rule's priority needs a height the row does not record; it is never a guessed 0. Serving it
+reads no file, writes no row and enters no digest, and the queue does not read it back: the order is
+the engine's own, taken from the same `Config.PriorityOf`. No request can set a priority. A priority
+is declared in the configuration, where it is reviewed and versioned, and a control that moved one
+file ahead of the declared order from the API was declined by the owner.
+
 ## Savings per hour
 
 <a id="savings-per-hour"></a>

@@ -2135,7 +2135,10 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 	if withheld {
 		e.Log.Info("skip (an operator withheld this path from the pipeline)", "file", f)
-		changed, err := e.Store.RecordSkip(ctx, f, key, SkipOperatorExcluded, by, ts.Profile)
+		// The row carries what the rule resolution's snapshot read about the source where
+		// this root's configuration took one, and nothing where it took none: no probe is
+		// spent on a file a person withheld.
+		changed, err := e.Store.RecordSkip(ctx, f, key, SkipOperatorExcluded, by, ts.Profile, sourceFactsOf(pre))
 		if err != nil {
 			// Fail safe: recording the skip is the reporting half, never the decision, so
 			// a store hiccup still withholds the file.
@@ -2180,7 +2183,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if prof.HardlinkSkip() {
 		if links := probe.NLinkOf(fi); links > 1 && links > 1+e.retainedLinks(ctx, f, key) {
 			e.Log.Info("skip (hardlinked — swap would break a seed and reclaim nothing)", "file", f, "links", links)
-			changed, err := e.Store.RecordSkip(ctx, f, key, SkipHardlinked, by, ts.Profile)
+			// As at the withholding above: the snapshot already taken, or nothing.
+			changed, err := e.Store.RecordSkip(ctx, f, key, SkipHardlinked, by, ts.Profile, sourceFactsOf(pre))
 			if err != nil {
 				// Fail safe: recording the skip is a reporting nicety, never the decision,
 				// so a store hiccup still skips the file.
@@ -2267,7 +2271,15 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			logVerdict = e.Log.Error
 		}
 		logVerdict(v.log, append([]any{"file", f}, v.logArgs...)...)
-		out := e.because(v.guard, by, prof, ts, props, v.inputs...)
+		// The snapshot the row's source facts are read off. The chain hands back none where a
+		// guard stopped the file before it asked for one (the symlink guard), and this root's
+		// rule resolution may already have taken one for the same file: the row records what
+		// was read, and nothing where nothing was.
+		decided := props
+		if decided == nil {
+			decided = pre
+		}
+		out := e.because(v.guard, by, prof, ts, decided, v.inputs...)
 		if v.failed {
 			// The one source-side verdict that FAILS rather than skips: the probe reported
 			// no video stream, so the gate that refused this job is the probe.
@@ -2575,6 +2587,17 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	e.Log.Info("transcode", "file", f, "codec", codec, "-> ", targetCodec, "worker", worker,
 		"library_root", root.Clean, "crf", ts.CRF, "encoder", ts.Encoder,
 		"encode_profile", ts.Profile, "working_file", work)
+	// THE DECISION FACTS, on the row from the moment it is encoding: how big the running job
+	// is, what it is and which root it is under, which is what an operator needs when a
+	// drive is filling or an encode has to be stopped. Every one of them is a value this
+	// function already holds - the size off the stat the row is keyed from, the codec the
+	// guards judged, the snapshot's dimensions, the decision's root and digest - so nothing
+	// is probed or read again for it.
+	e.admitToEncoder(ctx, f, key, store.DecisionFacts{
+		Source:      sourceFactsOf(props),
+		SourceBytes: ptr(fi.Size()),
+		Decision:    by,
+	})
 	e.advance(ctx, f, key, store.Encoding)
 	// The file has REACHED AN ENCODE, which is what `--limit-encodes` counts (S0174): from
 	// here its terminal row names the encoder, whatever that outcome turns out to be.
@@ -3653,6 +3676,22 @@ func (e *Engine) advance(ctx context.Context, path, key string, s store.Status) 
 	e.emit(Event{Path: path, Status: s})
 }
 
+// admitToEncoder records the decision facts on the row this job holds, as it leaves probing.
+//
+// It is REPORTING and never the decision: the facts are what the queue shows about a running
+// job, and no guard, gate or swap reads them back. A store error is therefore survived
+// exactly as advance survives one - the encode, the gates and the terminal write run as
+// they would have, advance moves the row on, and the queue shows those facts as not
+// recorded, which is the truth about a row nothing was written to.
+func (e *Engine) admitToEncoder(ctx context.Context, path, key string, d store.DecisionFacts) {
+	if err := e.Store.AdmitToEncoder(ctx, path, key, d); err != nil {
+		e.Log.Warn("the store could not record this job's decision facts on its in-flight row, so the "+
+			"queue shows them as not recorded; the job continues", "dependency", "store",
+			"attempted", "record decision facts", "next", "the encode, the gates and the terminal write run as usual",
+			"file", path, "err", err)
+	}
+}
+
 // recordUndeterminedHeight writes the source-height guard's terminal row: this root's
 // configuration needs to know how tall the source is and the probe could not establish it,
 // so no rule and no ceiling decides this file.
@@ -3810,6 +3849,11 @@ func (e *Engine) fail(ctx context.Context, path, key, gate string, o *store.Outc
 // how tall its source was would leave an operator inferring the band from the verdict. A nil
 // snapshot, or one whose dimensions the probe could not establish, records nothing at all
 // rather than a zero.
+//
+// It supplies the source's CODEC too, off the same snapshot and at no further probe: the
+// ledger is the record of what was decided about each source, and a skipped row that did
+// not say what the source was could only be asked about by probing the library again. A
+// snapshot that named no codec records none, never an empty value.
 func (e *Engine) because(reason string, by store.Decision, prof config.Profile, ts config.Transcode,
 	props *probe.VideoProps, read ...string) *store.Outcome {
 	o := &store.Outcome{
@@ -3818,7 +3862,29 @@ func (e *Engine) because(reason string, by store.Decision, prof config.Profile, 
 		Profile:        ts.Profile,
 		DecisionInputs: e.inputsRead(prof, ts, read...),
 	}
-	return withSourceDimensions(o, props)
+	src := sourceFactsOf(props)
+	o.SourceCodec, o.SourceWidth, o.SourceHeight = src.Codec, src.Width, src.Height
+	return o
+}
+
+// sourceFactsOf is what one probe snapshot ALREADY TAKEN says about its source: the codec
+// and the coded dimensions. It reads the snapshot's eager scalar fields and nothing lazy,
+// so it never spawns a process, and a nil snapshot - a verdict reached before any was taken
+// - answers with nothing at all.
+//
+// It is the one reading of those facts: the skip a guard records after the claim, the skip
+// recorded before it and the row of a job admitted to the encoder all take theirs from
+// here, so the three cannot describe one source three ways. The dimensions are both or
+// neither, the rule withSourceDimensions keeps.
+func sourceFactsOf(props *probe.VideoProps) store.SourceFacts {
+	if props == nil {
+		return store.SourceFacts{}
+	}
+	src := store.SourceFacts{Codec: props.Codec()}
+	if w, h, ok := props.Dimensions(); ok {
+		src.Width, src.Height = ptr(w), ptr(h)
+	}
+	return src
 }
 
 // withSourceDimensions records the SOURCE's pixel dimensions on a terminal outcome, from the
