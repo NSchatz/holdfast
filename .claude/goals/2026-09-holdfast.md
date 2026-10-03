@@ -1094,7 +1094,7 @@ H. A fresh adversarial subagent checked every line above against the repos and f
 
 A. The precondition checks, printed with their output
 B. Every P1 row is DONE or a listed follow-up (count printed)
-C. The full gate passes on a fresh clone of origin/main: tail and wall-clock
+C. The full gate passes on CI on origin/main's head (`build`, `package`): the run's link, result and wall-clock
 D. (foundation) A minor release is out per docs/release.md: dry-run run URL, tag, green release run, `crane digest` of the pulled image, and the compose pin commit
 E. The homelab PR (never merged) is open with its item in the owner's queue: PR URL
 F. docs/program-report-2026-09-holdfast.md exists with sections for what was built, tests and runtimes, NEEDS-OWNER, proposals, follow-ups and the worker variables: path and its `## ` headings
