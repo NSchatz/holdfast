@@ -334,8 +334,8 @@ because nothing looked at those files and a row would be a record of a decision 
 The worker-node lease protocol. A node only encodes: an upload lands in a working file the server
 named and is a candidate for the server's own gates, never more. The rule and its reasons are in
 [docs/design/nodes.md](design/nodes.md#leases). In this build only **mapped mode** exists (the
-node reads the source through its own mount), and until the engine's hand-off is wired a server
-with `node_token` set answers these endpoints 503.
+node reads the source through its own mount). A `serve` with `node_token` set answers these
+endpoints 503 `not_ready` only until its start-up recovery has run; `holdfast worker` is the client.
 
 **Authentication.** `Authorization: Bearer <token>` with the value `node_token` points at, and
 nothing else: no Basic form, nothing from the URL. With no `node_token` configured all five answer

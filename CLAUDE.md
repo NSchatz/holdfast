@@ -73,7 +73,7 @@ reasoning lives in the document, not in this file.
 ## Layout
 
 - `cmd/holdfast` - the CLI: `run` (oneshot engine), `serve` (same engine behind
-  the HTTP API, graceful drain on SIGTERM), `analyze` (a read-only census of the
+  the HTTP API, graceful drain on SIGTERM), `worker` (a node: leases encodes, uploads), `analyze` (a read-only census of the
   library roots; `--health` adds a full-decode report), `plan` (what this
   configuration would do to the library and what it would save), `resolve`
   (operator determination for a job parked indeterminate, made durable BEFORE any
@@ -116,6 +116,7 @@ reasoning lives in the document, not in this file.
   was decided by the owner (T14, T18) and is not built).
 - `internal/sourceoffer` - the AGPL section 13 Corresponding Source offer the root path carries.
 - `internal/node` - the worker-node lease protocol's server side: the lease state machine, the caps and the digest-checked upload.
+- `internal/nodeworker` - the `holdfast worker` loop: acquire, map and check the source, encode, upload, complete.
 - `internal/metrics`, `internal/notify` - Prometheus collectors and best-effort
   shoutrrr notifications.
 - `internal/config` - koanf layered config: defaults, then YAML, then `HOLDFAST_*`.
