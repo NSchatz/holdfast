@@ -45,7 +45,9 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g11-b
 
 | What | Value | Source |
 |---|---|---|
-| `make check` under `goals-heavy` then `flock -o` `holdfast-heavy` | running (started 2026-10-03 04:10Z) | `gate-baseline.log` |
+| `make check` under `goals-heavy` then `flock -o` `holdfast-heavy` | exit 0 in 2647 s (lock wait included) | `gate-baseline.log` |
+| `internal/engine` under `go test -race` (from that run) | ok, 89.0% coverage, 2251.7 s (62.5% of `TEST_TIMEOUT` 60m) | `gate-baseline.log` |
+| `cmd/holdfast`, `internal/server` (from that run) | ok, 855.7 s; ok, 285.0 s | `gate-baseline.log` |
 | `func Test` count, all packages | 1834 | `rg -c '^func Test' -g '*_test.go'`, `functest-start.txt` |
 | `docs/design/swap.md`, `docs/design/quality-gate.md` lines | 66, 80 | `wc -l` |
 | `CLAUDE.md` lines | 199 | `wc -l` |
@@ -60,7 +62,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g11-b
 |---|---|---|
 | 1.1 | Precondition checked (header above) | DONE (`8d9c23b`): goal 10's COMPLETE line is on `origin/main` |
 | 1.2 | Ledger created as the goal's first commit, straight to `main` | DONE (the commit that adds this file): fast docs checks passed first |
-| 1.3 | Baseline gate with timings | DOING |
+| 1.3 | Baseline gate with timings | DONE (`8d9c23b`): `make check` exit 0 in 2647 s; the table above |
 
 ## Phase 2 - Triage rows (line B)
 
@@ -148,6 +150,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g11-b
 
 ## Resume here
 
-Phase 1: the baseline gate is running detached (`/cache/tmp/holdfast-g11/gate-baseline.log`, script
-`/cache/tmp/holdfast-g11/gate.sh <worktree> <log>`). Next: start the `holdfast-g11/protocol`
-builder in `/cache/wt/holdfast/g11-protocol`.
+Phase 3: the `holdfast-g11/protocol` builder agent is working in `/cache/wt/holdfast/g11-protocol`
+(branch `holdfast-g11/protocol`). Next: adversarial review of its branch, the gate
+(`/cache/tmp/holdfast-g11/gate.sh <worktree> <log>`), the PR, CI, merge; then the
+`holdfast-g11/worker` track (phase 4).
