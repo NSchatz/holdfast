@@ -40,6 +40,10 @@ const (
 	DefaultDigestRetries = 3
 	// DefaultSweepEvery is how often expired leases are looked for.
 	DefaultSweepEvery = time.Second
+	// DefaultCoolOffAfter is how many leases of one node may end in a row, with none
+	// succeeding between, before the node is offered nothing for DefaultCoolOff.
+	DefaultCoolOffAfter = 3
+	DefaultCoolOff      = 5 * time.Minute
 	// DefaultLeaseRetention is how long a terminal lease row is kept before the prune may
 	// take it. The newest row of every path is kept regardless.
 	DefaultLeaseRetention = 7 * 24 * time.Hour
@@ -176,6 +180,10 @@ type Options struct {
 	DigestRetries        int
 	SweepEvery           time.Duration
 	LeaseRetention       time.Duration
+	// CoolOffAfter is how many leases of one node may end in a row without one succeeding
+	// before the node is offered nothing for CoolOff. Both default to the constants above.
+	CoolOffAfter int
+	CoolOff      time.Duration
 	// Now is the server's clock, the only one a lease's liveness is judged by.
 	Now func() time.Time
 	// FreeSpace reports the free bytes on the filesystem holding a directory
@@ -209,6 +217,9 @@ type Hub struct {
 	// uploads is the upload writing each working file, by path.
 	uploads   map[string]*upload
 	transfers int
+	// cooling is, per node, the leases that ended in a row with none succeeding between,
+	// and the instant until which the node is offered nothing.
+	cooling map[string]*coolState
 	// changed is closed and replaced whenever something WaitDemand waits on moves.
 	changed chan struct{}
 }
@@ -245,12 +256,15 @@ func New(o Options) *Hub {
 	defInt(&o.MaxLeasesPerNode, 1)
 	defInt(&o.MaxTransfers, 2)
 	defInt(&o.DigestRetries, DefaultDigestRetries)
+	defInt(&o.CoolOffAfter, DefaultCoolOffAfter)
+	def(&o.CoolOff, DefaultCoolOff)
 	if o.MinUploadRate <= 0 {
 		o.MinUploadRate = DefaultMinUploadRate
 	}
 	return &Hub{
 		o: o, tickets: map[*Ticket]struct{}{}, live: map[string]string{},
 		waits: map[string]*wait{}, uploads: map[string]*upload{}, changed: make(chan struct{}),
+		cooling: map[string]*coolState{},
 	}
 }
 
@@ -317,9 +331,6 @@ type poll struct {
 	encoders []string
 	reply    chan pollReply
 	state    pollState
-	// timedOut is set when the long-poll ran out while the poll was reserved: it is then
-	// answered with no work as soon as its ticket is released unused.
-	timedOut bool
 }
 
 // pollReply is what an acquire request is answered with: a grant, or a refusal.
@@ -329,6 +340,8 @@ type pollReply struct {
 	status int
 	reason string
 	detail string
+	// retry is the Retry-After of a refusal that states its own, and 0 for the default.
+	retry time.Duration
 }
 
 // Ticket is one waiting node's poll, reserved for one job. It is used exactly once: by
@@ -377,11 +390,103 @@ func (h *Hub) nodeLoadLocked(node string) (onNode, all int) {
 }
 
 // Ready lets the acquire endpoint grant work. The engine calls it once it has taken back,
-// or abandoned, every lease Recover returned.
+// or abandoned, every lease Recover returned. Every recovered lease that is still live is
+// given one TTL from NOW first: the grace Recover gave started before the engine's own
+// start-up work, and a node must not lose its lease to the time that work took.
 func (h *Hub) Ready() {
+	h.mu.Lock()
+	ids := make([]string, 0, len(h.live))
+	for id := range h.live {
+		ids = append(ids, id)
+	}
+	h.mu.Unlock()
+	ctx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+	defer stop()
+	now := h.o.Now()
+	for _, id := range ids {
+		if _, err := h.apply(ctx, id, func(cur Lease) (Lease, error) {
+			return decideGrace(cur, now, h.o.TTL)
+		}); err != nil && !errors.Is(err, ErrGone) {
+			h.o.Log.Warn("a recovered node lease could not be given its grace again", "lease", id, "err", err)
+		}
+	}
 	h.mu.Lock()
 	h.ready = true
 	h.mu.Unlock()
+}
+
+// pollWaiting reports whether the ticket's node is still waiting on its poll.
+func (h *Hub) pollWaiting(t *Ticket) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return t.p.state == pollReserved
+}
+
+// coolState is one node's run of leases that ended without one succeeding.
+type coolState struct {
+	streak  int
+	reasons []string
+	until   time.Time
+}
+
+// ErrCoolingOff is a node that is offered nothing for a while: its leases kept ending
+// without one succeeding.
+var ErrCoolingOff = errors.New("node: the node is cooling off")
+
+// Report is the engine saying how a lease of that node ended. An empty reason is a lease
+// whose output the server took; it clears the node's run. Any other is a lease that ended
+// without one - the node could not run it, or it failed - and after CoolOffAfter of those
+// in a row the node is offered nothing for CoolOff: its queued polls are answered 503
+// `node_cooling_off`, and so is every poll it sends meanwhile. One broken node - a wrong
+// path map, a missing mount - therefore stops taking jobs instead of failing every file
+// the feed offers it.
+func (h *Hub) Report(node, reason string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if reason == "" {
+		delete(h.cooling, node)
+		return
+	}
+	c := h.cooling[node]
+	if c == nil {
+		c = &coolState{}
+		h.cooling[node] = c
+	}
+	c.streak++
+	c.reasons = append(c.reasons, reason)
+	if c.streak < h.o.CoolOffAfter {
+		return
+	}
+	c.until = h.o.Now().Add(h.o.CoolOff)
+	h.o.Log.Warn("node cooling off: its leases kept ending without an output, so it is offered no work for a while",
+		"node", node, "ended_in_a_row", c.streak, "reasons", strings.Join(c.reasons, " "), "cool_off", h.o.CoolOff.String())
+	c.streak, c.reasons = 0, nil
+	kept := h.polls[:0]
+	for _, p := range h.polls {
+		if p.node != node {
+			kept = append(kept, p)
+			continue
+		}
+		p.state = pollAnswered
+		p.reply <- h.coolingReplyLocked(c)
+	}
+	h.polls = kept
+	h.notifyLocked()
+}
+
+// coolingLocked is the node's cool-off while it is in force, and nil otherwise. h.mu is held.
+func (h *Hub) coolingLocked(node string) *coolState {
+	c := h.cooling[node]
+	if c == nil || !h.o.Now().Before(c.until) {
+		return nil
+	}
+	return c
+}
+
+// coolingReplyLocked is the refusal a cooling node's poll is answered with. h.mu is held.
+func (h *Hub) coolingReplyLocked(c *coolState) pollReply {
+	return pollReply{status: statusUnavailable, reason: errCoolingOff, detail: refusalDetail[errCoolingOff],
+		retry: c.until.Sub(h.o.Now())}
 }
 
 // WaitDemand blocks until a node is long-polling for work under both lease caps, and
@@ -414,7 +519,8 @@ func (h *Hub) WaitDemand(ctx context.Context) (*Ticket, error) {
 }
 
 // Release gives an unused ticket back. With a nil refusal the poll goes back to the front
-// of the queue and may be matched to another job. A refusal that is ErrNoRoom answers the
+// of the queue and may be matched to another job; a poll that was answered or left while
+// it was reserved is simply let go. A refusal that is ErrNoRoom answers the
 // poll 503 `no_room`; any other answers it 503 `refused`. Releasing a used ticket does
 // nothing.
 func (h *Hub) Release(t *Ticket, refusal error) {
@@ -441,9 +547,6 @@ func (h *Hub) Release(t *Ticket, refusal error) {
 	case reason != "":
 		p.state = pollAnswered
 		p.reply <- pollReply{status: statusUnavailable, reason: reason, detail: refusalDetail[reason]}
-	case p.timedOut:
-		p.state = pollAnswered
-		p.reply <- pollReply{status: statusNoWork}
 	default:
 		p.state = pollQueued
 		h.polls = append([]*poll{p}, h.polls...)
@@ -483,6 +586,13 @@ func (h *Hub) Encode(ctx context.Context, t *Ticket, job Job, progress func(frac
 	if !recovered {
 		h.Release(t, nil)
 		return Result{}, ErrNotRecovered
+	}
+	if !h.pollWaiting(t) {
+		// The node is no longer waiting on this poll: its long-poll ran out and was
+		// answered with no work, or its request ended. Nothing is granted - no lease
+		// row, nothing recorded against the job - and the ticket is spent.
+		h.Release(t, nil)
+		return Result{}, fmt.Errorf("%w: node %s", ErrPollGone, t.Node())
 	}
 	if err := job.validate(); err != nil {
 		h.Release(t, nil)

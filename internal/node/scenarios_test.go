@@ -854,31 +854,171 @@ func TestNodeFixture_TheLongPollAnswers204WithRetryAfterWhenNoWorkArrives(t *tes
 		t.Errorf("%d polls are still queued after the long-poll ran out", n)
 	}
 
-	// A poll reserved when its long-poll runs out waits for the ticket's outcome: released
-	// unused, it is answered with no work rather than queued again.
+	// A poll RESERVED when its long-poll runs out is answered with no work all the same,
+	// and its ticket is dead: a grant on it would be a lease nobody holds, so Encode refuses
+	// before it grants anything - no lease row, no working file.
 	answered := make(chan reply, 1)
 	go func() { answered <- f.acquire("node-b") }()
 	tk, err := f.hub.WaitDemand(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "the reserved poll's long-poll to run out", func() bool {
-		f.hub.mu.Lock()
-		defer f.hub.mu.Unlock()
-		return tk.p.timedOut
-	})
-	select {
-	case r := <-answered:
-		t.Fatalf("a reserved poll was answered %d before its ticket was used", r.status)
-	default:
+	if r := <-answered; r.status != http.StatusNoContent || r.header.Get("Retry-After") != "7" {
+		t.Fatalf("a reserved poll at its long-poll bound answered %d Retry-After=%q, want 204 and 7", r.status, r.header.Get("Retry-After"))
 	}
-	f.hub.Release(tk, nil)
-	if r := <-answered; r.status != http.StatusNoContent {
-		t.Errorf("a timed-out poll released unused answered %d, want 204", r.status)
+	job := f.job("reserved-then-gone", 1000)
+	if _, err := f.hub.Encode(context.Background(), tk, job, nil); !errors.Is(err, ErrPollGone) {
+		t.Fatalf("Encode on a ticket whose poll was answered = %v, want ErrPollGone", err)
+	} else if !strings.Contains(err.Error(), "node-b") {
+		t.Errorf("the refusal does not name the node: %v", err)
+	}
+	var none *LeaseError
+	if _, err := f.hub.Encode(context.Background(), tk, job, nil); !errors.Is(err, ErrTicketUsed) || errors.As(err, &none) {
+		t.Errorf("a second Encode on the dead ticket = %v, want ErrTicketUsed", err)
+	}
+	if live, err := f.st.LiveLeases(context.Background()); err != nil || len(live) != 0 {
+		t.Errorf("a dead ticket left %d live lease(s) (%v)", len(live), err)
+	}
+	if exists(job.Temp) {
+		t.Error("a dead ticket left a working file")
 	}
 	if n := f.queuedPolls(); n != 0 {
 		t.Errorf("a timed-out poll was queued again")
 	}
+	// The dead ticket no longer counts against its node: node-b can be reserved again.
+	again := make(chan reply, 1)
+	go func() { again <- f.acquire("node-b") }()
+	tk2, err := f.hub.WaitDemand(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.hub.Release(tk2, ErrNoRoom)
+	is503(t, "the next poll of the same node", <-again, errNoRoom)
+
+	// A poll whose REQUEST ended while it was reserved is dead the same way.
+	ctx, cancel := context.WithCancel(context.Background())
+	left := make(chan struct{})
+	go func() {
+		defer close(left)
+		body, _ := json.Marshal(acquireBody("node-c"))
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, f.srv.URL+mount+RouteLeases, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	tk3, err := f.hub.WaitDemand(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	<-left
+	eventually(t, "the handler to see its request end", func() bool { return !f.hub.pollWaiting(tk3) })
+	if _, err := f.hub.Encode(context.Background(), tk3, f.job("left", 1000), nil); !errors.Is(err, ErrPollGone) {
+		t.Fatalf("Encode on a ticket whose request ended = %v, want ErrPollGone", err)
+	}
+	if live, _ := f.st.LiveLeases(context.Background()); len(live) != 0 {
+		t.Errorf("a ticket whose request ended left %d live lease(s)", len(live))
+	}
+}
+
+// TestNodeFixture_ANodeWhoseLeasesKeepEndingCoolsOff: after CoolOffAfter leases of one node
+// end in a row with none succeeding between, the node is offered nothing for CoolOff - its
+// queued poll and every poll it sends meanwhile answer 503 node_cooling_off with the time
+// left as Retry-After - while another node is served as before. A success clears the run,
+// and so does the cool-off running out.
+func TestNodeFixture_ANodeWhoseLeasesKeepEndingCoolsOff(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, nil)
+	if f.hub.o.CoolOffAfter != 3 || f.hub.o.CoolOff != 5*time.Minute {
+		t.Fatalf("defaults: cool off after %d for %s, want 3 and 5m", f.hub.o.CoolOffAfter, f.hub.o.CoolOff)
+	}
+	// Two endings, a success, two endings: no cool-off, the run was cleared.
+	for _, reason := range []string{"unmapped_source", "expired", "", "unmapped_source", "source_mismatch"} {
+		f.hub.Report("node-a", reason)
+	}
+	queued := make(chan reply, 1)
+	go func() { queued <- f.acquire("node-a") }()
+	eventually(t, "node-a's poll to queue", func() bool { return f.queuedPolls() == 1 })
+	other := make(chan reply, 1)
+	go func() { other <- f.acquire("node-b") }()
+	eventually(t, "node-b's poll to queue", func() bool { return f.queuedPolls() == 2 })
+
+	// The third in a row: the queued poll is answered now, with the whole cool-off to wait.
+	f.hub.Report("node-a", "encode_failed")
+	r := <-queued
+	isTyped(t, "the cooling node's queued poll", r, http.StatusServiceUnavailable, errCoolingOff)
+	if got := r.header.Get("Retry-After"); got != "300" {
+		t.Errorf("Retry-After = %q, want 300", got)
+	}
+	if n := f.queuedPolls(); n != 1 {
+		t.Fatalf("%d poll(s) queued, want node-b's alone", n)
+	}
+	f.clk.advance(4*time.Minute + 30*time.Second)
+	r = f.acquire("node-a")
+	isTyped(t, "a poll during the cool-off", r, http.StatusServiceUnavailable, errCoolingOff)
+	if got := r.header.Get("Retry-After"); got != "30" {
+		t.Errorf("Retry-After with 30 s left = %q, want 30", got)
+	}
+	if f.queuedPolls() != 1 {
+		t.Error("a cooling node's poll was queued")
+	}
+	// The other node is served as before.
+	tk, err := f.hub.WaitDemand(context.Background())
+	if err != nil || tk.Node() != "node-b" {
+		t.Fatalf("WaitDemand = %v, %v; want node-b's poll", tk, err)
+	}
+	f.hub.Release(tk, ErrNoRoom)
+	is503(t, "node-b's poll", <-other, errNoRoom)
+
+	// At the cool-off's end the node is served again, and its run starts from nothing: two
+	// more endings do not cool it off.
+	f.clk.advance(30 * time.Second)
+	f.hub.Report("node-a", "expired")
+	f.hub.Report("node-a", "expired")
+	back := make(chan reply, 1)
+	go func() { back <- f.acquire("node-a") }()
+	tk, err = f.hub.WaitDemand(context.Background())
+	if err != nil || tk.Node() != "node-a" {
+		t.Fatalf("after the cool-off WaitDemand = %v, %v; want node-a's poll", tk, err)
+	}
+	f.hub.Release(tk, ErrNoRoom)
+	is503(t, "node-a's poll after the cool-off", <-back, errNoRoom)
+}
+
+// TestNodeFixture_ReadyGivesEveryRecoveredLeaseItsGraceAgain: the grace Recover gave runs
+// while the engine takes the leases back. Ready gives each lease that is still live one TTL
+// from the moment the server can be reached, and never revives one that ended meanwhile.
+func TestNodeFixture_ReadyGivesEveryRecoveredLeaseItsGraceAgain(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, nil)
+	kept, _ := f.grant("node-a", f.job("kept", 1000))
+	dropped, _ := f.grant("node-b", f.job("dropped", 1000))
+	f.srv.Close()
+	_ = f.st.Close()
+	f.open(nil)
+	live, err := f.hub.Recover(context.Background())
+	if err != nil || len(live) != 2 {
+		t.Fatalf("Recover = %d lease(s), %v; want 2", len(live), err)
+	}
+	// The engine's start-up work takes most of a TTL; one lease is abandoned during it.
+	f.clk.advance(ttl - 2*time.Second)
+	if err := f.hub.Abandon(context.Background(), dropped.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.Ready()
+	if got, want := f.row(kept.LeaseID).ExpiresAt, f.clk.Now().Add(ttl); !got.Equal(want.Truncate(time.Second)) {
+		t.Errorf("after Ready the recovered lease expires at %s, want one TTL from Ready (%s)", got, want)
+	}
+	if row := f.row(dropped.LeaseID); row.State.Live() {
+		t.Errorf("Ready revived an abandoned lease: it is %s", row.State)
+	}
+	// Past the grace Recover gave, inside the one Ready gave: still the node's lease.
+	f.clk.advance(ttl - 2*time.Second)
+	if r := f.heartbeat(kept.LeaseID, kept.Epoch, 0); r.status != http.StatusOK {
+		t.Errorf("a heartbeat inside the grace Ready gave answered %d, want 200", r.status)
+	}
+	is410(t, "a heartbeat on the abandoned lease", f.heartbeat(dropped.LeaseID, dropped.Epoch, 0))
 }
 
 // TestNodeFixture_AVersionMismatchIs409NamingBothVersions.
@@ -1048,9 +1188,16 @@ func TestNodeFixture_APollThatLeftBeforeTheGrantLeavesNoLiveLease(t *testing.T) 
 		return tk.p.state == pollGone
 	})
 	job := f.job("film", 1000)
-	_, err = f.hub.Encode(context.Background(), tk, job, nil)
-	if le := leaseErr(t, err); le.Reason != ReasonPollGone || le.Node != "node-a" {
-		t.Errorf("Encode on a poll that left returned %+v, want poll_gone", le)
+	// Nothing is granted on a ticket whose poll left: no lease row at all, at any epoch.
+	if _, err = f.hub.Encode(context.Background(), tk, job, nil); !errors.Is(err, ErrPollGone) {
+		t.Errorf("Encode on a poll that left returned %v, want ErrPollGone", err)
+	}
+	var le *LeaseError
+	if errors.As(err, &le) {
+		t.Errorf("Encode on a poll that left granted lease %s", le.LeaseID)
+	}
+	if exists(job.Temp) {
+		t.Error("a working file was left")
 	}
 	if live, _ := f.st.LiveLeases(context.Background()); len(live) != 0 {
 		t.Errorf("a poll that left holds %d live leases", len(live))
