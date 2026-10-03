@@ -1,0 +1,136 @@
+# Goal 12 ledger - worker nodes: HTTP streaming, TLS and deployment
+
+- Brief: `.claude/goals/2026-09-holdfast.md` §0, §4 and §16 (spec v1.1, the `/goals:spec` skill);
+  goal file `.claude/goals/2026-09-holdfast-g12.goal.txt`. Amended by
+  `.claude/goals/CHECKPOINT-T.approved`: "P4 proposal-node-protocol.md: approved, option (a):
+  HTTP+JSON leases on the existing server, with a holdfast worker subcommand."
+- Started: 2026-10-03, from `/workspace/holdfast` in the maker container, by the goals supervisor's
+  `/goal` condition.
+- Goal-start SHA: `e37599788f4bc69930b6c906ef0b8b19306d3764` (`git rev-parse origin/main` before
+  any work).
+- Earlier ledgers: `2026-09-holdfast-g1.status.md` to `2026-09-holdfast-g11.status.md` (ends
+  `COMPLETE (goal 11): 2026-10-03`). The owner's queue at start (`goals needs list`): ten open
+  holdfast items, queue #50 to #56 and #202 to #204.
+- Precondition, as checked:
+
+```
+$ git fetch origin && git rev-parse HEAD origin/main
+e37599788f4bc69930b6c906ef0b8b19306d3764
+e37599788f4bc69930b6c906ef0b8b19306d3764
+$ git grep -n "COMPLETE (goal 11)" origin/main -- .claude/goals/2026-09-holdfast-g11.status.md
+origin/main:.claude/goals/2026-09-holdfast-g11.status.md:233:COMPLETE (goal 11): 2026-10-03
+$ echo "$GOFLAGS $GOMAXPROCS"
+-p=4 12
+$ goals admit --agents 4
+decision: admit a goal
+agents: 4 of 4 allowed (requested)
+```
+
+## What the approval assigns to this goal
+
+P1 (`.claude/goals/2026-09-holdfast-research/proposal-triage.md`, line 65, "Per goal", last
+changed in `d4d70a6`): "**Goal 12** (worker nodes: streaming, TLS): none." So line B has no row to
+build.
+
+P4 (`.claude/goals/2026-09-holdfast-research/proposal-node-protocol.md`), option (a): this goal
+builds what goal 11 left of it - the http mode of rule 1 (`GET /api/node/v1/leases/{id}/source`)
+with the source digest of rule 5 and the worker half of rule 6, and the TLS stance of rule 10
+(`server_tls_cert`, `server_tls_key` by reference, `worker_insecure_http`, the warnings in
+`docs/docker.md` and `docs/design/nodes.md`); and §16 item 4, the rewrite of the distributed
+statement in `README.md` and `docs/migration.md` and the worker deployment in `docs/docker.md`.
+
+## Baselines
+
+Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g12-baseline`), with
+`TMPDIR=/cache/tmp/holdfast-g12/tmp` and the pinned dynamic-HDR tools on PATH. Logs under
+`/cache/tmp/holdfast-g12/`.
+
+| What | Value | Source |
+|---|---|---|
+| `make check` under `goals-heavy` then `flock -o` `holdfast-heavy` | running at the time of this commit | `gate-baseline.log` |
+| `func Test` count, all packages | 1958 | `rg -c '^func Test' -g '*_test.go'`, `functest-start.txt` |
+| `docs/design/swap.md`, `docs/design/quality-gate.md` lines | 66, 80 | `wc -l` |
+| `CLAUDE.md` lines | 199 | `wc -l` |
+| `config.SecretBearingKeys` | 9 keys | `internal/config/config.go` |
+| Usage headroom | five_hour 15%, seven_day 47%; 4 of 4 agents allowed | `goals admit --agents 4` |
+| Host load at start | load average 18 on 56 CPUs (quota 28) | `uptime` |
+
+## Phase 1 - Start-up
+
+| # | Item | State |
+|---|---|---|
+| 1.1 | Precondition checked (header above) | DONE (`e375997`): goal 11's COMPLETE line is on `origin/main` |
+| 1.2 | Ledger created as the goal's first commit, straight to `main` | DONE (the commit that adds this file): fast docs checks passed first |
+| 1.3 | Baseline gate with timings | DOING |
+
+## Phase 2 - Triage rows (line B)
+
+| # | Item | State |
+|---|---|---|
+| 2.1 | Rows P1 assigns to goal 12 | DONE (`proposal-triage.md` line 65): P1 assigns none |
+
+## Phase 3 - HTTP-streaming mode and the TLS stance (track `holdfast-g12/transport`)
+
+| # | Item | State |
+|---|---|---|
+| 3.1 | `GET /api/node/v1/leases/{id}/source` on a live lease at its epoch; the server hashes what it streams; `worker_mode: http` downloads, checks and encodes with no mount | TODO |
+| 3.2 | The source digest checked both ways, the output digest as in goal 11; fixtures for an error page offered as the source, a short source and a source changed in transit | TODO |
+| 3.3 | End to end on loopback in http mode with a real tiny encode (line C) | TODO |
+| 3.4 | Built-in TLS: `server_tls_cert`, `server_tls_key` by reference in `config.SecretBearingKeys`; `worker_tls_ca`; the worker refuses plain `http://` to a non-loopback server unless `worker_insecure_http: true`, logged at every start (line D) | TODO |
+| 3.5 | `make api-schema-diff`: additions only | TODO |
+| 3.6 | Adversarial review of the branch before its gate | TODO |
+
+## Phase 4 - The documents (track `holdfast-g12/docs`)
+
+| # | Item | State |
+|---|---|---|
+| 4.1 | The distributed statement rewritten in `README.md` and `docs/migration.md` | TODO |
+| 4.2 | `docs/design/nodes.md`: the transport rule with anchors and the warnings of P4 rule 10; its `CLAUDE.md` line | TODO |
+| 4.3 | `docs/docker.md`: a worker deployment (both modes, TLS or a reverse proxy, the read token, the read-only mount) | TODO |
+| 4.4 | The owner's queue: a run against a real second host (goal 11's D19) | TODO |
+
+## Phase 5 - Report
+
+| # | Item | State |
+|---|---|---|
+| 5.1 | Gate integrity counted from the goal-start SHA | TODO |
+| 5.2 | Adversarial review of the report | TODO |
+
+## Decisions taken
+
+- D1 (2026-10-03): tracks. `holdfast-g12/transport` (the http mode, the source digest, the TLS
+  keys and the worker's transport refusals, with their reference documents) and
+  `holdfast-g12/docs` (the statement rewrite, the design document's transport rule, the worker
+  deployment). They are built side by side in their own worktrees on key names fixed here, each
+  reviewed by a fresh adversarial agent; the documents merge second, after they are checked
+  against the merged code.
+- D2 (2026-10-03): names. Server: `server_tls_cert` (a plain path) and `server_tls_key` (a secret
+  reference), both or neither, as P4 rule 10 names them. Worker: `worker_mode` (`mapped`, the
+  default, or `http`), `worker_insecure_http` (P4's name) and `worker_tls_ca` (a plain path to a
+  PEM bundle the worker trusts beside the system roots: P4's test plan has "the worker trusting
+  its certificate", and a server with a private certificate is otherwise unreachable over TLS).
+  Certificate verification is never switched off: there is no skip-verify key.
+- D3 (2026-10-03): the mode is the node's choice, per node (T17), stated in every request for
+  work; the server adds no key to permit http mode. P4 rule 10 already says what a `node_token`
+  can read in http mode and the documents carry that warning; a lease's source endpoint serves
+  only the source of a live lease at its epoch, never a path a request names.
+- D4 (2026-10-03): a source download restarts from zero and is not resumed by the worker (the
+  proposal's own stance for uploads). The server still answers `Range` through
+  `http.ServeContent`, and whatever was streamed it hashes its own copy of the source once before
+  the gates, as it does in mapped mode, so a ranged read can never go unchecked.
+- D5 (2026-10-03): every gate in this goal runs with `TMPDIR` under `/cache/tmp/holdfast-g12/`
+  and `PATH=/cache/opt/dynhdr-tools/bin:$PATH`, goal shells use `rg` or `git grep`, and commits
+  carry no trailer (T38, `CLAUDE.md`).
+- D6 (2026-10-03): PR #156 (`speed/gate`) and the dependency PRs #108 to #110 are not this
+  goal's and were open at its start; this goal touches none of their branches (§0.13).
+
+## Proposals awaiting the owner
+
+Carried from goal 11, unchanged: hardware encoders on a node; which lease endings count against a
+file's `max_failures`; the park at the retry bound; no maximum lease lifetime; files queued
+outside a pass are encoded by the server.
+
+## Resume here
+
+The baseline gate is running (`/cache/tmp/holdfast-g12/gate-baseline.log`). Next: start the two
+build agents in worktrees `/cache/wt/holdfast/g12-transport` and `/cache/wt/holdfast/g12-docs`.
