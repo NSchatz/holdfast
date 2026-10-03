@@ -230,6 +230,12 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	for _, n := range cfg.Notices() {
 		fmt.Fprintf(stdout, "note: %s\n", n)
 	}
+	// The read surface, in the only terms `validate` can vouch for (S0175): it sees the file
+	// and its own environment, not the environment of the process that will serve, so a
+	// token it cannot find is "not set in this config" rather than an exposure it asserts.
+	for _, n := range cfg.ReadSurfaceNotices(config.ReadSurfaceValidating) {
+		fmt.Fprintf(stdout, "note: %s\n", n)
+	}
 	reportLedgerAgainstConfig(cfg, stdout)
 	// Valid, but a safety gate is weakened — say so. These are not errors (each is a
 	// legitimate choice), but a config that has quietly lost its worst-frame floor
@@ -1229,6 +1235,7 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 	log := logging.New(cfg.LogLevel)
 	logResolvedProfiles(cfg, log)
 	logConfigWarnings(cfg, log)
+	logReadSurface(cfg, log)
 
 	// One context for the whole daemon: SIGINT/SIGTERM cancels it, which stops the
 	// scan loop, releases SSE streams, and cancels any in-flight encode (ffmpeg
@@ -1271,6 +1278,10 @@ func logResolvedProfiles(cfg *config.Config, log *slog.Logger) {
 	}
 }
 
+// logConfigWarnings logs the notices and then the warnings (the reasoning for both is at
+// its announcement, above logResolvedProfiles). What it does NOT say is anything about the
+// read surface. `run` goes through here too and
+// binds no listener, so that statement belongs to `serve` alone: see logReadSurface.
 func logConfigWarnings(cfg *config.Config, log *slog.Logger) {
 	for _, n := range cfg.Notices() {
 		log.Warn(n)
@@ -1279,6 +1290,21 @@ func logConfigWarnings(cfg *config.Config, log *slog.Logger) {
 		log.Warn(w)
 	}
 	logPathFilters(cfg, log)
+}
+
+// logReadSurface states, when `serve` starts and before it builds anything, what the read
+// API is open to (S0175). It is `serve`'s alone: this is the one process that binds the
+// address and has every layer the token can arrive through, so its statement is unhedged,
+// and a command that opens no listener - `run` in any of its shapes, `worker`, `plan`,
+// `analyze` - has no surface to describe and says nothing.
+//
+// WARN, for the reason logConfigWarnings gives for every notice: a statement that vanishes
+// at `log_level: warn` has not been made, and this is the one that tells an operator their
+// media paths are served without a credential.
+func logReadSurface(cfg *config.Config, log *slog.Logger) {
+	for _, n := range cfg.ReadSurfaceNotices(config.ReadSurfaceServing) {
+		log.Warn(n)
+	}
 }
 
 // logPathFilters states, at daemon startup, which paths each root's filters keep this

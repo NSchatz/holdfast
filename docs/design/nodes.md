@@ -290,7 +290,7 @@ equally those of a TLS-terminating proxy that is bypassed:
   accident; TLS is the defence against someone on the path.
 - Nodes on other hosts need an explicit non-loopback `server_addr`. Without `server_read_token`
   that address serves every media path in the read API to that network, without a credential
-  (the start-up notice says so). **A worker deployment sets `server_read_token` too.**
+  (`serve` says so when it starts). **A worker deployment sets `server_read_token` too.**
 - **No mTLS.** A node is authenticated by `node_token` and by nothing else; the server asks for
   no client certificate.
 

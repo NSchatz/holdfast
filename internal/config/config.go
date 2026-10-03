@@ -735,11 +735,12 @@ type Config struct {
 	// values, so the more privileged holder would otherwise be locked out of the less
 	// privileged surface. The reverse never holds - a read token buys no mutation.
 	//
-	// It does NOT gate the ROOT PATH or /metrics. holdfast ships no frontend: the root
-	// serves a plain-text page naming the endpoints and carrying the AGPL section 13
-	// source offer, and it holds no library datum for a credential to protect. /metrics
-	// is governed by metrics_enable alone and its exposition names no file. Both are
-	// stated by Notices() at startup rather than left for an operator to discover.
+	// It does NOT gate the ROOT PATH or /metrics. The root serves the web UI's page
+	// to a request that asks for HTML and a plain-text page otherwise, with the AGPL section
+	// 13 source offer either way; the page's static files under /assets/ are open too, and it holds no library datum for a credential to protect.
+	// /metrics is governed by metrics_enable alone and its exposition names no file. Both
+	// are stated by ReadSurfaceNotices when `serve` starts rather than left for an operator
+	// to discover.
 	//
 	// A literal token here, or in HOLDFAST_SERVER_READ_TOKEN, is a startup REFUSAL, for
 	// the same reason the control token's is: a credential in holdfast's environment is
@@ -2094,6 +2095,10 @@ func resolvedOrSelf(p string) string {
 // the behaviour somebody deleting originals should hear stated before the first one
 // goes.
 //
+// Every statement here is true in every mode, which is the rule for joining the list: the
+// two statements about the read surface are true only of a process that serves, so they
+// live in ReadSurfaceNotices and each command asks for them in the scope it can answer for.
+//
 // `validate` prints these as `note:`; `run` and `serve` log them at startup. They are
 // logged at WARN rather than INFO, not because a notice is a warning, but because
 // `log_level: warn` is a legal setting and a startup statement nobody can hear at a
@@ -2125,34 +2130,10 @@ func (c *Config) Notices() []string {
 			"encode that misses one is still rejected with the source untouched. Set bitrate_kbps to 0 (the default) "+
 			"to go back to the quality target.")
 	}
-	// The read surface, stated on whichever side of it this configuration lands. Both of
-	// these are notices and neither is a warning: the shipped default is an open read API
-	// on a loopback bind, and a default can never be a weakened gate.
-	//
-	// The bind is read through EffectiveServerAddr, never through ServerAddr, because the
-	// two disagree on exactly the value an operator is most likely to have: an ABSENT
-	// server_addr binds the loopback default, while an explicit `:8080` binds every
-	// interface. Judging the raw field would announce a library-wide exposure to somebody
-	// who configured nothing, and stay silent for the one who wrote the bare port.
-	switch {
-	case strings.TrimSpace(c.ServerReadToken) != "":
-		n = append(n, "server_read_token is set - the read endpoints under /api require a bearer "+
-			"token, BUT THE ROOT PATH AT / IS STILL SERVED WITHOUT A CREDENTIAL, and so is /metrics: "+
-			"this key gates /api reads and nothing else. holdfast ships no frontend, so the root is a "+
-			"plain-text page naming the endpoints and carrying the Corresponding Source offer, and it "+
-			"carries NO LIBRARY DATUM - the media paths live behind /api/queue, /api/history and "+
-			"/api/events, which this key now gates. In front of the read API your reverse proxy's own "+
-			"authentication is now defence in depth rather than the only barrier.")
-	case !isLoopbackBind(c.EffectiveServerAddr()):
-		n = append(n, "server_addr is "+c.EffectiveServerAddr()+", which is NOT a loopback address, and "+
-			"server_read_token is empty: EVERY MEDIA PATH IN YOUR LIBRARY IS SERVED WITHOUT A "+
-			"CREDENTIAL on that address. /api/queue and /api/history return the full path of every "+
-			"file holdfast has seen, the /api/events stream pushes both on every change, and nothing "+
-			"in this daemon checks a credential for any of them - the loopback bind was the whole of "+
-			"what protected them, and this address is not it. Point server_read_token at a secret "+
-			"(file:/run/secrets/... or cmd:...) to require a bearer token on those reads. It does not "+
-			"gate the plain-text root page, which carries no library datum, or /metrics.")
-	}
+	// The read surface is NOT stated here: what is true of it depends on whether this
+	// process is the one that serves, which a configuration cannot know about itself. See
+	// ReadSurfaceNotices, which `serve` and `validate` each ask in their own scope and no
+	// other command asks at all.
 	// The deinterlace, stated once per root that asks for one and NAMING that root: one
 	// process may run over a film library that is left alone and a broadcast library that is
 	// deinterlaced, and an unattributed notice would leave an operator unable to tell which.
@@ -2191,6 +2172,96 @@ func (c *Config) Notices() []string {
 			"a full write-plus-read cycle per transcode, at video-file sizes.")
 	}
 	return n
+}
+
+// ReadSurfaceScope is who is asking ReadSurfaceNotices: the process that will open the
+// listener, or one that only read the configuration. The two can be told different things
+// by the same file, because the token is usually supplied through the environment of the
+// container that serves and a `validate` run anywhere else cannot see that environment.
+//
+// The ZERO VALUE is the serving scope, deliberately. It is the one whose statement is
+// unhedged, so a caller that forgets to choose says the loud thing rather than the soft
+// one: the failure this type must never have is an operator whose library really is served
+// without a credential being told that it "may be" gated somewhere else.
+type ReadSurfaceScope int
+
+const (
+	// ReadSurfaceServing is `serve`: this process binds the address and has resolved
+	// every layer the token can arrive through, so what it says about the surface is a
+	// fact about the surface.
+	ReadSurfaceServing ReadSurfaceScope = iota
+	// ReadSurfaceValidating is `validate`: it sees the file and ITS OWN HOLDFAST_* layer
+	// and nothing of the process that will serve, so an unset token is "not set in this
+	// config" and never "unset where it matters".
+	ReadSurfaceValidating
+)
+
+// readSurfaceRoot is what both read-surface statements say about the root path, in one
+// place so the two cannot drift: what is served there depends on the build, and neither
+// rendering carries anything a credential would protect.
+const readSurfaceRoot = "the root serves the web UI's page to a request that asks for HTML and a " +
+	"plain-text page to every other request and where the build carries no UI, with the " +
+	"Corresponding Source offer either way, and the page's static files are under /assets/ for any " +
+	"client; all of it carries NO LIBRARY DATUM"
+
+// ReadSurfaceNotices states the read surface on whichever side of it this configuration
+// lands, to a command that has one to state. They are notices and neither is a warning: the
+// shipped default is an open read API on a loopback bind, and a default can never be a
+// weakened gate.
+//
+// They are kept OUT of Notices because Notices is what every command says, and these are
+// true only where a listener exists. A oneshot `run` binds nothing, so "every media path is
+// served without a credential" said there is false whatever the file holds - and a statement
+// that cries wolf on every `run --limit 1` is how the real one gets skipped. So `run`, and
+// every other command that does not serve, does not call this at all; server_addr is still
+// VALIDATED for all of them, by Validate, which this does not touch.
+//
+// The bind is read through EffectiveServerAddr, never through ServerAddr, because the two
+// disagree on exactly the value an operator is most likely to have: an ABSENT server_addr
+// binds the loopback default, while an explicit `:8080` binds every interface. Judging the
+// raw field would announce a library-wide exposure to somebody who configured nothing, and
+// stay silent for the one who wrote the bare port.
+//
+// Neither statement carries the token's reference or its value: the key is named and that
+// is all.
+func (c *Config) ReadSurfaceNotices(scope ReadSurfaceScope) []string {
+	addr := c.EffectiveServerAddr()
+	switch {
+	case strings.TrimSpace(c.ServerReadToken) != "":
+		// A token this process can see is set wherever this configuration is the one in
+		// force, so the statement is the same in both scopes.
+		return []string{"server_read_token is set - the read endpoints under /api require a bearer " +
+			"token, BUT THE ROOT PATH AT / IS STILL SERVED WITHOUT A CREDENTIAL, and so is /metrics: " +
+			"this key gates /api reads and nothing else. Of those two, " + readSurfaceRoot + " - the " +
+			"media paths live behind /api/queue, /api/history and /api/events, which this key now " +
+			"gates. In front of the read API your reverse proxy's own authentication is now defence " +
+			"in depth rather than the only barrier."}
+	case isLoopbackBind(addr):
+		return nil
+	case scope == ReadSurfaceValidating:
+		// The hedged form. It asserts what `validate` can observe (the key is empty after
+		// the file and this command's own environment) and states the exposure as the
+		// CONSEQUENCE of the same being true where `serve` runs, never as a fact.
+		return []string{"server_read_token is NOT SET IN THIS CONFIG - neither in the file nor in " +
+			"this command's own environment - and server_addr is " + addr + ", which is NOT a loopback " +
+			"address. It may be supplied by HOLDFAST_SERVER_READ_TOKEN in the environment of the process " +
+			"that runs `serve`, which `validate` cannot see. If it is unset there as well, EVERY MEDIA " +
+			"PATH IN YOUR LIBRARY WILL BE SERVED WITHOUT A CREDENTIAL on that address: /api/queue and " +
+			"/api/history return the full path of every file holdfast has seen, the /api/events stream " +
+			"pushes both on every change, and nothing in the daemon checks a credential for any of them. " +
+			"`serve` states at startup which of the two it is. Point server_read_token at a secret " +
+			"(file:/run/secrets/... or cmd:...) to require a bearer token on those reads. It does not " +
+			"gate the root path or /metrics: " + readSurfaceRoot + "."}
+	default:
+		return []string{"server_addr is " + addr + ", which is NOT a loopback address, and " +
+			"server_read_token is empty: EVERY MEDIA PATH IN YOUR LIBRARY IS SERVED WITHOUT A " +
+			"CREDENTIAL on that address. /api/queue and /api/history return the full path of every " +
+			"file holdfast has seen, the /api/events stream pushes both on every change, and nothing " +
+			"in this daemon checks a credential for any of them - the loopback bind was the whole of " +
+			"what protected them, and this address is not it. Point server_read_token at a secret " +
+			"(file:/run/secrets/... or cmd:...) to require a bearer token on those reads. It does not " +
+			"gate the root path or /metrics: " + readSurfaceRoot + "."}
+	}
 }
 
 // deinterlaceNotices is what Notices says about a configuration that deinterlaces: one
