@@ -20,6 +20,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
 	"github.com/NSchatz/holdfast/internal/store"
+	"github.com/NSchatz/holdfast/internal/ui"
 )
 
 // Server is the HTTP surface: chi router + read endpoints + SSE + token-gated
@@ -27,9 +28,9 @@ import (
 // (`server_auth_token`) on the mutating endpoints, the read token
 // (`server_read_token`) on the reads under /api when it is configured, the webhook
 // token (`webhook_token`) on the Sonarr and Radarr intake and nowhere else, and the node
-// token (`node_token`) on the worker-node lease endpoints and nowhere else. The plain-text
-// root page and /metrics are gated by neither, for the reasons given at their routes.
-// holdfast ships no frontend, so /api IS the interface. It holds no
+// token (`node_token`) on the worker-node lease endpoints and nowhere else. The root
+// path, the web UI's static assets and /metrics are gated by none of them, for the reasons
+// given at their routes. /api IS the machine-readable interface. It holds no
 // media handles - every mutating action routes through the Controller (scan/pause), which
 // cannot touch a file.
 type Server struct {
@@ -72,6 +73,11 @@ type Server struct {
 	// health is the library health sweep's live state, read by GET /api/health beside the
 	// ledger. nil is a daemon that runs no sweep; the route answers either way.
 	health HealthSource
+
+	// ui is the embedded web UI, set with SetUI. nil is a binary that carries none, or a
+	// test that wired none: the root path then answers every request with the plain-text
+	// page and the asset route answers 404.
+	ui *ui.Site
 }
 
 // HealthSource is the health sweep's in-memory state, which the ledger does not hold.
@@ -81,6 +87,10 @@ type HealthSource interface {
 
 // SetHealth wires the health sweep's live state. Set it once, before serving.
 func (s *Server) SetHealth(h HealthSource) { s.health = h }
+
+// SetUI wires the embedded web UI (internal/ui). Set it once, before serving. The routes
+// exist either way, for the reason SetSubmissions gives.
+func (s *Server) SetUI(site *ui.Site) { s.ui = site }
 
 // SetSubmissions wires the targeted-scan queue. Set it once, before serving. The route
 // exists either way - a surface that appeared and disappeared with a wiring detail would
@@ -105,8 +115,9 @@ func (s *Server) Wait() {
 // handler (TRANSCODE-8); pass nil to omit the route. The caller starts hub.Run and
 // listens on cfg.EffectiveServerAddr() with s as the handler.
 //
-// holdfast ships no frontend: the root path serves RootHandler's plain-text page and
-// the HTTP JSON API under /api is the whole of the machine-readable interface.
+// The root path serves the web UI's page to a request that asks for HTML, once SetUI has
+// wired one, and RootHandler's plain-text page to every other request; the HTTP JSON API
+// under /api is the whole of the machine-readable interface.
 //
 // token is the control token RESOLVED from cfg's `server_auth_token` reference; an empty
 // one leaves the mutating endpoints disabled, exactly as an unconfigured key does.
@@ -235,16 +246,122 @@ func (s *Server) routes() *chi.Mux {
 		r.Handle("/metrics", s.metrics)
 	}
 
-	// The root path, and DELIBERATELY NOT GATED either: it is a plain-text page naming
-	// the API's endpoints and carrying the AGPL section 13 source offer, so there is
-	// nothing behind it for a credential to protect.
-	r.Get("/", RootHandler())
+	// The root path, and DELIBERATELY NOT GATED either: it is the web UI's page, or a
+	// plain-text page naming the API's endpoints, and both carry the AGPL section 13
+	// source offer and no library datum, so there is nothing behind it for a credential
+	// to protect. The same holds for the UI's static assets, which are the page's script
+	// and stylesheet and name no file of any library.
+	plain := RootHandler()
+	r.Get("/", s.handleRoot(plain))
+	r.Get(UIAssetsPrefix+"*", s.handleUIAsset)
 	return r
 }
 
-// RootHandler serves the plain-text page at "/". holdfast ships no frontend, so this is
-// the whole of the root response: a line naming the read endpoints, and the AGPL
-// section 13 source offer. It is a root response a remote user can get, so it owes that
+// UIAssetsPrefix is the path the web UI's static assets are served under: the one
+// directory of the build the page references (internal/ui.AssetsDir).
+const UIAssetsPrefix = "/" + ui.AssetsDir + "/"
+
+// uiContentSecurityPolicy is sent with the page. The build has no inline script and no
+// inline style and loads nothing from another origin (web/src/page.test.ts holds the page
+// to that, web/vite.config.ts inlines no asset), so every source is this server alone: a
+// script injected into the page by any route has nowhere to load from and nothing to
+// run as. It names the API as the one thing the page may connect to, forbids framing,
+// and gives a form nowhere to post.
+const uiContentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; " +
+	"img-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; " +
+	"frame-ancestors 'none'"
+
+// handleRoot answers "/" with one of two representations of the same root: the web UI's
+// page for a request that asks for HTML, and the plain-text page for every other request.
+//
+// The plain-text page is the DEFAULT, and that is deliberate. It is what "/" answered
+// before there was a UI, so a client that never asked for HTML - curl, a health probe, a
+// script that greps the banner - gets the bytes it always got, and the surface document's
+// description of this path stays true of a request that states no preference. A browser
+// navigation always names text/html, so a person gets the UI. Both carry the source
+// offer: the page has it written in by internal/ui.Load, the text page ends with it.
+//
+// With no UI wired, or on a build that carries none, every request gets the text page.
+func (s *Server) handleRoot(plain http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// The answer depends on Accept in either branch, and a cache must know it.
+		w.Header().Add("Vary", "Accept")
+		if s.ui == nil || !acceptsHTML(r.Header.Values("Accept")) {
+			plain(w, r)
+			return
+		}
+		h := w.Header()
+		h.Set("Content-Type", "text/html; charset=utf-8")
+		h.Set("Content-Security-Policy", uiContentSecurityPolicy)
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		// The page names its assets by content hash, so it is the one file that must be
+		// asked for again: a cached page would pin a browser to a build that is gone.
+		h.Set("Cache-Control", "no-cache")
+		_, _ = w.Write(s.ui.Page())
+	}
+}
+
+// handleUIAsset serves one static asset of the web UI. It answers only for a name
+// internal/ui.Load read out of the build - a map lookup, never a path resolved against
+// anything at request time - and 404 for every other path, including every path when no
+// UI is wired.
+func (s *Server) handleUIAsset(w http.ResponseWriter, r *http.Request) {
+	if s.ui == nil {
+		http.NotFound(w, r)
+		return
+	}
+	asset, ok := s.ui.Asset(strings.TrimPrefix(r.URL.Path, UIAssetsPrefix))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", asset.ContentType)
+	h.Set("X-Content-Type-Options", "nosniff")
+	// A name carries the hash of its content, so the bytes behind a name never change.
+	h.Set("Cache-Control", "public, max-age=31536000, immutable")
+	_, _ = w.Write(asset.Body)
+}
+
+// acceptsHTML reports whether an Accept header asks for HTML by name: a media range of
+// text/html or application/xhtml+xml with a quality above zero. A wildcard is not a
+// request for HTML - `*/*` is what curl sends and what a client that states no preference
+// means - and neither is an absent or unreadable header. An unreadable quality reads as
+// zero: the plain-text page is the answer whenever the request is not clear.
+func acceptsHTML(accept []string) bool {
+	for _, line := range accept {
+		for _, part := range strings.Split(line, ",") {
+			fields := strings.Split(part, ";")
+			switch strings.ToLower(strings.TrimSpace(fields[0])) {
+			case "text/html", "application/xhtml+xml":
+			default:
+				continue
+			}
+			q := 1.0
+			for _, param := range fields[1:] {
+				name, value, ok := strings.Cut(strings.TrimSpace(param), "=")
+				if !ok || !strings.EqualFold(strings.TrimSpace(name), "q") {
+					continue
+				}
+				parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+				if err != nil || parsed < 0 || parsed > 1 {
+					parsed = 0
+				}
+				q = parsed
+			}
+			if q > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// RootHandler serves the plain-text page at "/": a line naming the read endpoints, and
+// the AGPL section 13 source offer. It is the whole of the root response on a build that
+// carries no web UI, and the root's answer to every request that does not ask for HTML on
+// one that does (handleRoot). It is a root response a remote user can get, so it owes that
 // offer (LICENSE-3) - the source URL in effect, the licence name and the build identity,
 // with the literal label immediately before the URL. No markup, so the URL is written
 // verbatim.

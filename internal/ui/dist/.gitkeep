@@ -1,0 +1,3 @@
+The web UI is built into this directory by `make ui-build` and embedded from it. This
+file is the committed placeholder: it keeps `go build` and `go vet` working with no UI
+built, and a binary built that way serves the plain-text root page.

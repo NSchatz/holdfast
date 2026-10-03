@@ -47,6 +47,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
 	"github.com/NSchatz/holdfast/internal/startup"
 	"github.com/NSchatz/holdfast/internal/store"
+	"github.com/NSchatz/holdfast/internal/ui"
 	"github.com/NSchatz/holdfast/internal/version"
 	"github.com/NSchatz/holdfast/internal/vmaf"
 )
@@ -1476,6 +1477,8 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	srv := server.New(ctx, *cfg, secrets.Get("server_auth_token"), secrets.Get("server_read_token"),
 		st, ctrl, hub, metricsHandler, log)
 	srv.SetSubmissions(subs)
+	// The web UI this binary embeds, if it embeds one and it can be served as declared.
+	wireUI(srv, ui.Embedded(), log)
 	// The webhook intake's one credential, handed to its one consumer. Unset, both intake
 	// endpoints answer 403.
 	srv.SetWebhookToken(secrets.Get(config.WebhookTokenKey))

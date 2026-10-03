@@ -69,6 +69,7 @@ reasoning lives in the document, not in this file.
 - **A media server is told about a swap only after it has committed, once, by directory; and a file being played is held, which only ever delays** - [`docs/design/media-clients.md`](docs/design/media-clients.md#media-clients).
 - **A node's output is only ever a candidate: it lands in a working file the server named, on a live lease at the current epoch, with the declared length and digest, and the server's own gates and rename decide** - [`docs/design/nodes.md`](docs/design/nodes.md#leases).
 - **A worker speaks to its server over TLS or to loopback; plain HTTP to any other host is refused unless the operator wrote `worker_insecure_http: true`, which is logged at every start; and a node's source is streamed only on a live lease, with its sha-256 compared on the server before any gate** - [`docs/design/nodes.md`](docs/design/nodes.md#transport).
+- **The web UI is built by one pinned toolchain, embedded in the binary, and served at `/` only to a request that asks for HTML; every root response carries the source offer** - [`docs/design/web-ui.md`](docs/design/web-ui.md#embed).
 - **An arr's webhook is authenticated by a credential that can only queue; both Sonarr Download shapes and Radarr's are read; each file goes through the targeted scan; an unrecognised shape queues nothing** - [`docs/design/media-clients.md`](docs/design/media-clients.md#webhook-intake).
 
 ## Layout
@@ -114,7 +115,8 @@ reasoning lives in the document, not in this file.
 - `internal/schedule` - host-fair run windows.
 - `internal/server` - the HTTP surface, with the webhook intake and the node lease routes. No frontend yet:
   the JSON API is the interface, and `/` is a plain-text page carrying the source offer (a web UI
-  was decided by the owner (T14, T18) and is not built).
+  was decided by the owner (T14, T18); its shell is embedded and its views are not built).
+- `internal/ui` + `web/` - the embedded web UI and its Svelte source; `scripts/ui.sh` runs its gate steps on the pinned Node and pnpm.
 - `internal/sourceoffer` - the AGPL section 13 Corresponding Source offer the root path carries.
 - `internal/node` - the worker-node lease protocol's server side: the lease state machine, the caps, the hashed source stream and the digest-checked upload.
 - `internal/nodeworker` - the `holdfast worker` loop: acquire, map or download and check the source, encode, upload, complete.
@@ -141,12 +143,10 @@ reasoning lives in the document, not in this file.
 
 Go 1.25+. The gate is `make check`, and the `check:` target IS its definition -
 read the target rather than any prose about it (`make tier-full` is `check`; `make tier-fast` its quick subset). The Makefile owns the tool pins
-and CI invokes the same target, so a PR, a release and a human run the identical
-thing.
+and CI invokes the same target, so a PR, a release and a human run the identical thing.
 
-CI adds two things `check` deliberately does not: the config-schema self-test
-(proves `validate` reds on a bad config) and the image smoke gate
-(`scripts/smoke-image.sh`, needs Docker).
+CI adds two things `check` deliberately does not: the config-schema self-test (proves `validate`
+reds on a bad config) and the image smoke gate (`scripts/smoke-image.sh`, needs Docker).
 
 The gate needs the pinned ffmpeg (`scripts/install-ffmpeg.sh`), and it is not
 skipped when absent - a grader that skips is a false green.

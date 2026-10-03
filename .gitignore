@@ -43,3 +43,11 @@ control-token.txt
 core
 !core/
 core.[0-9]*
+
+# The web UI (web/). Its dependencies and its build output are never committed; the
+# build is copied into internal/ui/dist beside the committed placeholder, which is the
+# one file of that directory git tracks.
+/web/node_modules/
+/web/dist/
+/internal/ui/dist/*
+!/internal/ui/dist/.gitkeep

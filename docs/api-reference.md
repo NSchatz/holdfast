@@ -9,7 +9,8 @@ per-field reference `README.md` points at rather than restates.
 
 | Method & path | Auth | Purpose |
 |---|---|---|
-| `GET /` | - | a plain-text page naming the endpoints and carrying the AGPL section 13 source offer. holdfast ships no frontend yet (a web UI is to ship on this API - decided 2026-09-29 by the owner (T14, T18)). Never gated: it holds no library datum |
+| `GET /` | - | a plain-text page naming the endpoints and carrying the AGPL section 13 source offer. holdfast ships no frontend yet (a web UI is to ship on this API - decided 2026-09-29 by the owner (T14, T18)). Never gated: it holds no library datum. A request whose `Accept` header names `text/html` is answered, on a build that embeds the web UI's shell, with that page instead, carrying the same offer ([design](design/web-ui.md#root)) |
+| `GET /assets/*` | - | the static files the web UI's page names (its script and stylesheet), by exact name; `404` for anything else and on a build that embeds no UI. Never gated: they hold no library datum |
 | `GET /api/summary` | read | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** (see below). It does not carry `bytes_held_by_undo_window`: that figure rides the SSE snapshot and the `/metrics` gauge only |
 | `GET /api/queue` | read | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
 | `GET /api/history?limit=N` | read | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
