@@ -86,17 +86,17 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g12-b
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | The distributed statement rewritten in `README.md` and `docs/migration.md` | DOING |
+| 4.1 | The distributed statement rewritten in `README.md` and `docs/migration.md` | DONE (PR #160, `e679d0a`): `README.md` lines 102 and 174 (`#worker-nodes`), `docs/migration.md` line 132 (`#server-and-nodes`); gate exit 0 in 2572 s on `add09f4` (`internal/engine` 2384.6 s, 66.2% of `TEST_TIMEOUT`; `cmd/holdfast` 908.3 s); CI green (`build`, `package`, `mutation`); 0 fix rounds |
 | 4.2 | `docs/design/nodes.md`: the transport rule with anchors and the warnings of P4 rule 10; its `CLAUDE.md` line | DONE (PR #159, `f48d4e0`): `docs/design/nodes.md#transport` and `#http-mode`; `CLAUDE.md` line 71 (199 lines) |
-| 4.3 | `docs/docker.md`: a worker deployment (both modes, TLS or a reverse proxy, the read token, the read-only mount) | DOING |
-| 4.4 | The owner's queue: a run against a real second host (goal 11's D19) | TODO |
+| 4.3 | `docs/docker.md`: a worker deployment (both modes, TLS or a reverse proxy, the read token, the read-only mount) | DONE (PR #160, `e679d0a`): `docs/docker.md#worker-nodes`, line 515 on; checked against #159 as merged (every linked `docs/design/nodes.md` anchor exists) |
+| 4.4 | The owner's queue: a run against a real second host (goal 11's D19) | DONE (queue #219, kind physical): one worker on a real second host, once in each mode; T49 keeps it out of every goal |
 
 ## Phase 5 - Report
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | Gate integrity counted from the goal-start SHA | TODO |
-| 5.2 | Adversarial review of the report | TODO |
+| 5.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `e679d0a`): `func Test` 1958 -> 2004, no package fell (`cmd/holdfast` 264 -> 269, `internal/config` 170 -> 174, `internal/engine` 597 -> 598, `internal/node` 54 -> 73, `internal/nodeworker` 23 -> 40, every other package unchanged); `git diff --numstat e375997 origin/main -- docs/design/swap.md docs/design/quality-gate.md` empty (66 and 80 lines); `*_test.go` +3463 -15, the 15 deleted lines in D10; zero `co-authored-by` in `git log e375997..origin/main --format=%B` |
+| 5.2 | Adversarial review of the report | DOING |
 
 ## Decisions taken
 
@@ -165,6 +165,14 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g12-b
   (`TestNodeFixture_UploadOnAnExpiredLeaseIs410AndLeavesNoFile` now reds by named assertion); the
   two in `internal/engine/nodes_test.go` are unchanged and stay recorded there.
 
+- D12 (2026-10-03): PR #160 was built beside #159 on the names of D2 and merged second, after its
+  statements were checked against #159 as merged and three sentences were added for what the
+  review changed (what an http-mode worker leaves behind, re-sends and refuses for room). Its
+  gate ran on the branch merged up to `f48d4e0`; `main` then moved only by a ledger commit, so the
+  result stood (brief §0.3).
+- D13 (2026-10-03): no minor release is cut by this goal (T37 optional): the release is goal 15's,
+  and the owner's queue item #219 is worded for "the next release".
+
 ## Proposals awaiting the owner
 
 Carried from goal 11, unchanged: hardware encoders on a node; which lease endings count against a
@@ -181,8 +189,6 @@ New in this goal:
 
 ## Resume here
 
-PR #159 (transport) is merged at `f48d4e0`. PR #160 (`holdfast-g12/docs`, worktree
-`/cache/wt/holdfast/g12-docs`, head `add09f4`) is open; its local gate writes
-`/cache/tmp/holdfast-g12/gate-docs-1.log`. Next: paste the gate tail into #160, wait for CI,
-merge; file the owner's queue item for a run against a real second host; gate integrity; the
-adversarial review of the report; `goals check`; the COMPLETE line.
+Both PRs are merged (#159 at `f48d4e0`, #160 at `e679d0a`); no branch, worktree or open PR of
+this goal remains (#156 and #108 to #110 are not this goal's). Queue #219 is filed. Next: the
+adversarial review of the report (5.2), `goals check`, the COMPLETE line.
