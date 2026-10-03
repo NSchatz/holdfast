@@ -33,6 +33,9 @@ type Result struct {
 	// NoOwner is true when the target has no movie, series or section owning Dir, so
 	// nothing was sent.
 	NoOwner bool
+	// WholeLocation is true when Dir is itself a Plex section's location: a refresh
+	// restricted to it would scan the whole location, so nothing was sent.
+	WholeLocation bool
 	// Failure is why the request did not succeed, nil otherwise.
 	Failure *failure
 }
@@ -161,6 +164,11 @@ func (h *Hook) announce(path string) {
 				"service's own scheduled rescan remains the fallback",
 				"target", t.Name(), "file", path, "directory", res.Dir,
 				"attempted", res.Attempted, "failure", res.Failure.String())
+		case res.WholeLocation:
+			h.log.Info("post-swap rescan not sent: the file's directory is a Plex section location itself, "+
+				"and a scan restricted to it would be a scan of the whole location; Plex's own scheduled "+
+				"scan remains the fallback",
+				"target", t.Name(), "file", path, "directory", res.Dir)
 		case res.NoOwner:
 			h.log.Info("post-swap rescan not sent: the target has nothing that owns this directory",
 				"target", t.Name(), "file", path, "directory", res.Dir)

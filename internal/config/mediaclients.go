@@ -107,7 +107,7 @@ func checkTargetURL(key, raw string) error {
 		return fmt.Errorf("%s must be an absolute http or https URL (http://host:port, with an optional "+
 			"base path): the configured value is not one", key)
 	}
-	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(raw, "#?") {
 		return fmt.Errorf("%s must carry only a scheme, a host and an optional base path: the configured "+
 			"value has userinfo, a query or a fragment, and a credential belongs in its own key, by reference",
 			key)

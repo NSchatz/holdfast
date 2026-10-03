@@ -49,7 +49,9 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g10-b
 
 | What | Value | Source |
 |---|---|---|
-| `make check` under `goals-heavy` then `flock -o` `holdfast-heavy` | running at ledger creation; filled in at the next phase boundary | `gate-baseline.log` |
+| `make check` under `goals-heavy` then `flock -o` `holdfast-heavy` | exit 0 in 2488 s | `gate-baseline.log` |
+| `internal/engine` under `go test -race` (from that run) | ok, 89.0% coverage, 2283.9 s (84.6% of `TEST_TIMEOUT` 45m) | `gate-baseline.log` |
+| `cmd/holdfast` under `go test -race` (from that run) | ok, 89.2% coverage, 773.7 s | `gate-baseline.log` |
 | `func Test` count, all packages | 1724 in 34 directories | `rg -c '^func Test' -g '*_test.go'`, `functest-start.txt` |
 | `docs/design/swap.md`, `docs/design/quality-gate.md` lines | 66, 80 | `wc -l` |
 | `CLAUDE.md` lines | 199 | `wc -l` |
@@ -63,7 +65,8 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g10-b
 |---|---|---|
 | 1.1 | Precondition checked (header above) | DONE (`6e1058f`): goal 9's COMPLETE line is on `origin/main` |
 | 1.2 | Ledger created as the goal's first commit, straight to `main` | DONE (the commit that adds this file): fast docs checks passed first |
-| 1.3 | Baseline gate with timings | DOING |
+| 1.3 | Baseline gate with timings | DONE (`6e1058f`): `make check` exit 0 in 2488 s; the table above |
+| 1.4 | `TEST_TIMEOUT` raised in its own commit (the engine passed 80%, I15) | DOING |
 
 ## Phase 2 - Triage rows (line B)
 
@@ -122,13 +125,33 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g10-b
   and `PATH=/cache/opt/dynhdr-tools/bin:$PATH` (goal 9's finding), goal shells use `rg` or
   `git grep`, and commits carry no trailer (T38).
 
+- D5 (2026-10-02): the baseline put `internal/engine` at 84.6% of `TEST_TIMEOUT`, past the 80%
+  line of §4 (I15), so track `holdfast-g10/test-timeout` (PR #151) raises it from 45m to 60m in
+  its own commit with the measurement, and merges first.
+- D6 (2026-10-02): the webhook intake's credential is a new key `webhook_token`, by reference,
+  that can only queue a file. The arr Webhook connection sends HTTP Basic (`Username`,
+  `Password`) and custom `Headers` (`WebhookSettings.cs` and `WebhookProxy.cs` at Sonarr
+  v4.0.20.3014 and Radarr v6.4.4.10685, read through `gh api` 2026-10-02), so the token is
+  accepted as a bearer header or as the Basic password, never in the URL.
+- D7 (2026-10-02): S0178 AC-6 as built (PR #152): a `preserve_mtime` value that is not a boolean
+  refuses to start naming the key. Two readings tighten: a number in the file used to read as
+  true, and an empty `HOLDFAST_PRESERVE_MTIME` used to read as false; both now refuse (fail-safe:
+  never a confident wrong reading). An empty key in the file still loads as the default (I5).
+- D8 (2026-10-02): the clients track's own decisions (PR #153) are in its PR body and
+  `docs/design/media-clients.md`: package `internal/mediaclient`; the Plex section list read from
+  `GET /library/sections/all` as the official reference documents it; JSON only; path maps have
+  no environment form; no command without an id and no unscoped refresh can be built; the hold at
+  the door writes no row, and the wait before the swap has no upper bound.
+
 ## Proposals awaiting the owner
 
 - Fail-open against fail-closed for the Plex play hold (D3).
 
 ## Resume here
 
-Phase 1: the ledger is being committed; the baseline gate runs in the background
-(`/cache/tmp/holdfast-g10/gate-baseline.log`). Next: launch the `clients` and `mtime-statement`
-agents in worktrees under `/cache/wt/holdfast/`, then `webhook` and `live-check` on top of the
-clients branch.
+PRs open: #151 (`TEST_TIMEOUT`, gate running, merges first), #152 (S0178 statement half, CI
+green, awaits its gate), #153 (clients, awaits CI and its gate). Agents still building on the
+clients branch: `holdfast-g10/webhook` and `holdfast-g10/live-check`. Merge order: #151, #152,
+#153, webhook, live-check; each gate runs on the branch merged up to `origin/main` with
+`/cache/tmp/holdfast-g10/gate.sh <worktree> <log>`. Then file the three live-check items on the
+owner's queue, count gate integrity, run the adversarial review, write the COMPLETE line.

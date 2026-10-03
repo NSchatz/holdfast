@@ -216,3 +216,149 @@ func TestPlayHold_NoHoldConfiguredAsksNothingAndWaitsForNothing(t *testing.T) {
 		t.Errorf("the default poll is %s; docs/post-swap-hook.md states 15 seconds", DefaultPlayHoldPoll)
 	}
 }
+
+// TestPlayHold_TheWaitSitsAheadOfTheSwapsOwnChecks pins WHERE the wait is: ahead of the
+// source re-fingerprint and the collision re-check, so both still run immediately before the
+// rename, against the files as they are once the wait is over. A source rewritten during the
+// hold, and a file that appears at the swap's target during the hold, are each refused by the
+// check that always refused them - the source and the newcomer intact, no swap, the working
+// file discarded. A wait moved below either check would let that swap through, and this reds.
+func TestPlayHold_TheWaitSitsAheadOfTheSwapsOwnChecks(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+
+	// during runs fn once, on the second question of the pre-swap wait (the first question
+	// overall is the door's), and releases the hold on the question after it.
+	during := func(eng *Engine, fn func()) {
+		var n atomic.Int64
+		eng.PlayHoldPoll = 5 * time.Millisecond
+		eng.PlayHold = func(context.Context, string) (bool, string) {
+			switch n.Add(1) {
+			case 1:
+				return false, ""
+			case 2:
+				return true, "the file is being played in a test"
+			case 3:
+				fn()
+				return true, "the file is being played in a test"
+			}
+			return false, ""
+		}
+	}
+
+	t.Run("the source is rewritten during the hold", func(t *testing.T) {
+		root, _ := scratchDirs(t)
+		src := filepath.Join(root, "a.mkv")
+		mkH264(t, ffmpeg, src, "8M")
+		eng, ts := buildEngineAndStore(t, ffmpeg, ffprobe, root, nil, nil)
+		rewritten := []byte("a newer file written by something else while the swap was held")
+		during(eng, func() {
+			if err := os.WriteFile(src, rewritten, 0o644); err != nil {
+				t.Error(err)
+			}
+		})
+		if err := eng.ProcessFile(context.Background(), "w0", src); err != nil {
+			t.Fatalf("ProcessFile: %v", err)
+		}
+		if got, _ := os.ReadFile(src); !bytes.Equal(got, rewritten) {
+			t.Fatal("the newer source was overwritten by a swap that waited through its rewrite")
+		}
+		if got := listDir(t, root); len(got) != 1 || got[0] != "a.mkv" {
+			t.Errorf("the refused swap left %v, want only the source", got)
+		}
+		rows, err := ts.List(context.Background(), nil, 0)
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("want one ledger row, got %+v (%v)", rows, err)
+		}
+		if rows[0].Status != store.Failed || !strings.Contains(rows[0].Outcome.Reason, "source changed during encode") {
+			t.Errorf("the row is %s (%q), want failed by the source re-fingerprint", rows[0].Status, rows[0].Outcome.Reason)
+		}
+	})
+
+	t.Run("a file appears at the target during the hold", func(t *testing.T) {
+		root, _ := scratchDirs(t)
+		src := filepath.Join(root, "a.mp4") // the configured container is mkv, so the target is a.mkv
+		target := filepath.Join(root, "a.mkv")
+		mkH264(t, ffmpeg, src, "8M")
+		before, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eng, ts := buildEngineAndStore(t, ffmpeg, ffprobe, root, nil, nil)
+		newcomer := []byte("a distinct file that arrived at the target while the swap was held")
+		during(eng, func() {
+			if err := os.WriteFile(target, newcomer, 0o644); err != nil {
+				t.Error(err)
+			}
+		})
+		if err := eng.ProcessFile(context.Background(), "w0", src); err != nil {
+			t.Fatalf("ProcessFile: %v", err)
+		}
+		if got, _ := os.ReadFile(target); !bytes.Equal(got, newcomer) {
+			t.Fatal("the file that appeared at the target was clobbered by a swap that waited through its arrival")
+		}
+		if got, _ := os.ReadFile(src); !bytes.Equal(got, before) {
+			t.Fatal("the source was modified by a swap that was refused")
+		}
+		if got := listDir(t, root); len(got) != 2 {
+			t.Errorf("the refused swap left %v, want the source and the newcomer", got)
+		}
+		rows, err := ts.List(context.Background(), nil, 0)
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("want one ledger row, got %+v (%v)", rows, err)
+		}
+		if rows[0].Status != store.Failed || !strings.Contains(rows[0].Outcome.Reason, "target appeared during encode") {
+			t.Errorf("the row is %s (%q), want failed by the collision re-check", rows[0].Status, rows[0].Outcome.Reason)
+		}
+	})
+}
+
+// TestPlayHold_AWaitingSwapSaysSoAgainEveryReminderInterval: the wait has no bound, so a
+// swap still held says so again every PlayHoldReminder, naming the path, for as long as it
+// waits - and not more often than that.
+func TestPlayHold_AWaitingSwapSaysSoAgainEveryReminderInterval(t *testing.T) {
+	if PlayHoldReminder != 10*time.Minute {
+		t.Fatalf("the reminder interval is %s; docs/post-swap-hook.md states 10 minutes", PlayHoldReminder)
+	}
+	var logs bytes.Buffer
+	eng := &Engine{Log: slog.New(slog.NewTextHandler(&logs, nil)), PlayHoldPoll: time.Millisecond}
+	now := time.Unix(1_000_000, 0)
+	eng.playHoldNow = func() time.Time { return now }
+	// Each question moves the clock on by the step for that question; the hold releases at
+	// the end. The reminders fall due on the questions at 10 and at 20 minutes.
+	steps := []time.Duration{0, 9 * time.Minute, time.Minute - time.Second, time.Second, 5 * time.Minute, 5 * time.Minute, time.Minute}
+	asked := 0
+	eng.PlayHold = func(context.Context, string) (bool, string) {
+		if asked == len(steps) {
+			return false, ""
+		}
+		now = now.Add(steps[asked])
+		asked++
+		return true, "the file is being played in a test"
+	}
+	const file = "/media/a film.mkv"
+	if err := eng.waitWhilePlayed(context.Background(), file); err != nil {
+		t.Fatalf("waitWhilePlayed: %v", err)
+	}
+	out := logs.String()
+	if got := strings.Count(out, "the swap waits until the file is no longer held"); got != 1 {
+		t.Errorf("want one record saying the swap waits, got %d:\n%s", got, out)
+	}
+	var reminders []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "still waiting for playback to end") {
+			reminders = append(reminders, line)
+			if !strings.Contains(line, "level=INFO") || !strings.Contains(line, `file="`+file+`"`) {
+				t.Errorf("the reminder is not an info record naming the path: %s", line)
+			}
+		}
+	}
+	if len(reminders) != 2 {
+		t.Fatalf("want a reminder at 10 and at 20 minutes and none between, got %d:\n%s", len(reminders), out)
+	}
+	if !strings.Contains(reminders[0], "waited=10m0s") || !strings.Contains(reminders[1], "waited=20m0s") {
+		t.Errorf("the reminders do not say how long the swap has waited:\n%s", strings.Join(reminders, "\n"))
+	}
+	if !strings.Contains(out, "the swap proceeds: the file is no longer held") || !strings.Contains(out, "waited=21m0s") {
+		t.Errorf("the release record does not say the swap proceeded after 21 minutes:\n%s", out)
+	}
+}

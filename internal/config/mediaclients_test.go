@@ -169,16 +169,19 @@ func TestMediaTargets_AC13_AHalfConfiguredTargetIsRefusedNamingBothKeys(t *testi
 // names the key and never quotes the value, which may be where a credential was pasted.
 func TestMediaTargets_AC13_AnAddressThatIsNotAnAbsoluteHTTPURLIsRefused(t *testing.T) {
 	bad := map[string]string{
-		"no scheme":          "media.invalid:8989",
-		"a path":             "/api",
-		"another scheme":     "ftp://media.invalid",
-		"no host":            "http://",
-		"a port and no host": "http://:8989",
-		"userinfo":           "http://user:PASTED-SECRET@media.invalid",
-		"a query":            "http://media.invalid/?apikey=PASTED-SECRET",
-		"an empty query":     "http://media.invalid/?",
-		"a fragment":         "http://media.invalid/#PASTED-SECRET",
-		"unparseable":        "http://media.invalid/%zz",
+		"no scheme":             "media.invalid:8989",
+		"a path":                "/api",
+		"another scheme":        "ftp://media.invalid",
+		"no host":               "http://",
+		"a port and no host":    "http://:8989",
+		"userinfo":              "http://user:PASTED-SECRET@media.invalid",
+		"a query":               "http://media.invalid/?apikey=PASTED-SECRET",
+		"an empty query":        "http://media.invalid/?",
+		"a fragment":            "http://media.invalid/#PASTED-SECRET",
+		"a bare trailing #":     "http://media.invalid#",
+		"a bare # after a path": "http://media.invalid/base#",
+		"a bare trailing ?":     "http://media.invalid?",
+		"unparseable":           "http://media.invalid/%zz",
 	}
 	for _, cred := range mediaCredentials {
 		for name, addr := range bad {
@@ -365,6 +368,16 @@ func TestPathMap_MapAndReverse(t *testing.T) {
 	}
 	if got := crossed.Map("/a/b/c/f.mkv"); got != "/x/f.mkv" {
 		t.Errorf("Map over crossed lengths = %q, want /x/f.mkv", got)
+	}
+	// ReverseMatched says whether an entry covered the path; Reverse passes it through.
+	for p, want := range map[string]bool{"/data/x.mkv": true, "/shows": true, "/dataset/x.mkv": false, "/other": false} {
+		got, matched := m.ReverseMatched(p)
+		if matched != want || got != m.Reverse(p) {
+			t.Errorf("ReverseMatched(%q) = %q, %v; want matched %v and Reverse's answer", p, got, matched, want)
+		}
+	}
+	if _, matched := (PathMap{}).ReverseMatched("/data/x.mkv"); matched {
+		t.Error("the empty map reported a match")
 	}
 	// The empty map changes nothing in either direction.
 	var none PathMap
