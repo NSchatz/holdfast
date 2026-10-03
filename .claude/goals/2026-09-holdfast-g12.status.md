@@ -47,7 +47,9 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g12-b
 
 | What | Value | Source |
 |---|---|---|
-| `make check` under `goals-heavy` then `flock -o` `holdfast-heavy` | running at the time of this commit | `gate-baseline.log` |
+| `make check` under `goals-heavy` then `flock -o` `holdfast-heavy` | exit 0 in 2476 s (lock wait included) | `gate-baseline.log` |
+| `internal/engine` under `go test -race` (from that run) | ok, 89.1% coverage, 2293.1 s (63.7% of `TEST_TIMEOUT` 60m) | `gate-baseline.log` |
+| `cmd/holdfast`, `internal/server`, `internal/node`, `internal/nodeworker` (from that run) | ok, 847.1 s; 302.7 s; 4.3 s; 1.8 s | `gate-baseline.log` |
 | `func Test` count, all packages | 1958 | `rg -c '^func Test' -g '*_test.go'`, `functest-start.txt` |
 | `docs/design/swap.md`, `docs/design/quality-gate.md` lines | 66, 80 | `wc -l` |
 | `CLAUDE.md` lines | 199 | `wc -l` |
@@ -61,7 +63,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g12-b
 |---|---|---|
 | 1.1 | Precondition checked (header above) | DONE (`e375997`): goal 11's COMPLETE line is on `origin/main` |
 | 1.2 | Ledger created as the goal's first commit, straight to `main` | DONE (the commit that adds this file): fast docs checks passed first |
-| 1.3 | Baseline gate with timings | DOING |
+| 1.3 | Baseline gate with timings | DONE (`e375997`): `make check` exit 0 in 2476 s; the table above |
 
 ## Phase 2 - Triage rows (line B)
 
@@ -132,5 +134,8 @@ outside a pass are encoded by the server.
 
 ## Resume here
 
-The baseline gate is running (`/cache/tmp/holdfast-g12/gate-baseline.log`). Next: start the two
-build agents in worktrees `/cache/wt/holdfast/g12-transport` and `/cache/wt/holdfast/g12-docs`.
+The baseline gate passed. The documents track is committed locally (`d0bfced` on
+`holdfast-g12/docs`, worktree `/cache/wt/holdfast/g12-docs`, not pushed) and waits to be checked
+against the transport code; the transport agent is building in
+`/cache/wt/holdfast/g12-transport`. Next: review the transport branch (fresh adversarial agent),
+push, PR, gate, CI, merge; then the documents PR.
