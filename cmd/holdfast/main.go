@@ -62,6 +62,7 @@ Usage:
 Commands:
   run        Load config and run one transcode scan over the library roots
   serve      Run the HTTP API (scan on demand / on an interval)
+  worker     Lease encodes from a serve at worker_server and upload the outputs (a node)
   analyze    Census the library roots: file counts, bytes and distributions (reads only)
   plan       Report what this configuration would do to the library and what it would save
   resolve    Report and resolve a job whose swap outcome could not be established
@@ -93,6 +94,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return cmdRun(args[1:], stdout, stderr)
 	case "serve":
 		return cmdServe(args[1:], stdout, stderr)
+	case "worker":
+		return cmdWorker(args[1:], stdout, stderr)
 	case "analyze":
 		return cmdAnalyze(args[1:], stdout, stderr)
 	case "plan":
@@ -1425,6 +1428,20 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		srv.SetHealth(sweep)
 	}
 
+	// WORKER NODES, only where node_token is set (docs/design/nodes.md#restart). The leases a
+	// previous process left live are recovered and taken back - or abandoned - here, before
+	// the listener accepts and before the first scan can offer a file to a node; the hub
+	// grants nothing until that is done.
+	joinNodes := func() {}
+	if cfg.NodesEnabled() {
+		join, err := startNodes(ctx, cfg, eng, st, srv, log)
+		if err != nil {
+			fmt.Fprintf(stderr, "holdfast: refusing to start: %v\n", err)
+			return 1
+		}
+		joinNodes = join
+	}
+
 	var bg sync.WaitGroup
 	bg.Add(5)
 	go func() { defer bg.Done(); hub.Run(ctx) }()
@@ -1441,7 +1458,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	httpSrv := &http.Server{Addr: addr, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("serve listening",
+		listening := []any{
 			"addr", addr,
 			"control_enabled", !secrets.Get("server_auth_token").Empty(),
 			"read_gated", !secrets.Get("server_read_token").Empty(),
@@ -1455,7 +1472,13 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 			"max_load", cfg.MaxLoad,
 			"tautulli", tautulli != nil,
 			"version", version.Version,
-		)
+		}
+		if cfg.NodesEnabled() {
+			// Said only where nodes are on, so an existing configuration's record is the
+			// one it always was.
+			listening = append(listening, "nodes_enabled", true)
+		}
+		log.Info("serve listening", listening...)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -1489,6 +1512,8 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	// ever named.
 	srv.Wait()
 	bg.Wait()
+	// The lease sweep and every job that took a recovered lease back have ended with ctx.
+	joinNodes()
 	// Every swap this daemon will commit has been committed and observed: keep attempting
 	// the rescan requests still pending for at most the drain bound, then exit regardless.
 	drainMediaClients()

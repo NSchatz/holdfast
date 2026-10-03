@@ -51,6 +51,7 @@ const (
 	errGlobalCap        = "global_cap"
 	errNoRoom           = "no_room"
 	errRefused          = "refused"
+	errCoolingOff       = "node_cooling_off"
 	errTransfersFull    = "transfers_full"
 	errLeaseGone        = "lease_gone"
 	errUnknownLease     = "unknown_lease"
@@ -72,6 +73,8 @@ var refusalDetail = map[string]string{
 	errGlobalCap: "the cap on live leases (node_max_leases) is reached",
 	errNodeCap:   "this node holds as many leases as it may (node_max_leases_per_node)",
 	errRefused:   "the server did not lease the job it had for this node",
+	errCoolingOff: "this node's leases kept ending without an output, so it is offered no work for a while; " +
+		"its log says why each one ended",
 }
 
 const (
@@ -358,6 +361,12 @@ func (h *Hub) serveAcquire(w http.ResponseWriter, r *http.Request) {
 		h.unavailable(w, errNotReady, "the server is not leasing work yet")
 		return
 	}
+	if c := h.coolingLocked(req.Node); c != nil {
+		rep := h.coolingReplyLocked(c)
+		h.mu.Unlock()
+		h.answerPoll(w, rep)
+		return
+	}
 	onNode, all := h.liveLoadLocked(req.Node)
 	if all >= h.o.MaxLeases {
 		h.mu.Unlock()
@@ -382,11 +391,11 @@ func (h *Hub) serveAcquire(w http.ResponseWriter, r *http.Request) {
 			h.answerPoll(w, rep)
 			return
 		case <-timer.C:
-			if h.withdraw(p, true) {
+			if h.withdraw(p) {
 				h.noWork(w)
 				return
 			}
-			// Reserved for a job: the answer comes from that job's grant or its release.
+			// Answered in the same instant: the answer is in the channel.
 		case <-r.Context().Done():
 			h.leave(p)
 			return
@@ -410,17 +419,23 @@ func (h *Hub) liveLoadLocked(node string) (onNode, all int) {
 	return onNode, len(h.live)
 }
 
-// withdraw takes a poll that is still queued out of the queue and reports whether it did.
-// A poll already reserved is marked timed out when the long-poll ran out, and stays.
-func (h *Hub) withdraw(p *poll, timedOut bool) bool {
+// withdraw is a poll whose long-poll ran out: it is answered with no work. One still queued
+// leaves the queue. One RESERVED for a job leaves too, and its ticket is dead from here: the
+// node was told there is no work, so a grant on that ticket would be a lease nobody holds
+// (Encode refuses it before granting anything). It reports false only for a poll that has
+// already been answered, whose answer is on its way.
+func (h *Hub) withdraw(p *poll) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if p.state != pollQueued {
-		p.timedOut = p.timedOut || timedOut
+	switch p.state {
+	case pollQueued:
+		h.dequeueLocked(p)
+	case pollReserved:
+	default:
 		return false
 	}
-	h.dequeueLocked(p)
 	p.state = pollGone
+	h.notifyLocked()
 	return true
 }
 
@@ -476,6 +491,9 @@ func (h *Hub) answerPoll(w http.ResponseWriter, rep pollReply) {
 		})
 	case rep.status == statusNoWork:
 		h.noWork(w)
+	case rep.retry > 0:
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(rep.retry)))
+		writeError(w, http.StatusServiceUnavailable, rep.reason, rep.detail)
 	default:
 		h.unavailable(w, rep.reason, rep.detail)
 	}

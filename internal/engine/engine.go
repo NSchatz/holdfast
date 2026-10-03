@@ -460,6 +460,24 @@ type Engine struct {
 	// encoder (cmd/holdfast sets it); nil probed nothing. See Hardware.
 	Hardware Hardware
 
+	// Nodes is the worker-node lease hub (cmd/holdfast sets it under `serve` when node_token
+	// is configured); nil is nodes OFF, and the pool, every command line and every decision
+	// are then exactly what they are without it (docs/design/nodes.md#seam).
+	Nodes Nodes
+	// nodeGate is the node gate slots (node_gate_slots), built on first use.
+	nodeGate     *nodeGate
+	nodeGateOnce sync.Once
+	// nodeAttempts remembers, per path, the node attempts that failed in this process, for
+	// the one record that names them when the retry bound parks the file.
+	nodeAttemptsMu   sync.Mutex
+	nodeAttempts     map[string][]string
+	nodeAttemptsKeep map[string]bool
+	// NodeRedemand is how long a job whose node stopped waiting before the grant waits for
+	// another node to ask for work; 0 is DefaultNodeRedemand.
+	NodeRedemand time.Duration
+	// nodeFeederIdle replaces defaultFeederIdle. Unexported test seam.
+	nodeFeederIdle time.Duration
+
 	// DoviTool and HDR10PlusTool are the dovi_tool and hdr10plus_tool binaries a carried
 	// dynamic-HDR job runs (cmd/holdfast sets them from HOLDFAST_DOVI_TOOL and
 	// HOLDFAST_HDR10PLUS_TOOL); "" looks each up on PATH by its own name. A job that needs one
@@ -1487,43 +1505,54 @@ func (e *Engine) scanOnce(ctx context.Context, pass *listings, bud *budget) (map
 	var mu sync.Mutex
 	var firstCancelErr error
 
+	// process carries one file through the pipeline for one worker of this pass, and reports
+	// whether that worker should stop. pctx is the pass's own context for a local worker, and
+	// the same context carrying a node job for a node feeder.
+	process := func(pctx context.Context, workerID, f string) bool {
+		// The release is deferred inside this closure rather than written after
+		// the call, so every way out of one file - a cancellation, an error, an
+		// ordinary return - gives the bound its slot back exactly once.
+		//
+		// The file's own slot, for an encode bound to learn whether THIS file
+		// reached an encode (S0174; see budget.track).
+		fctx, slot := bud.track(pctx)
+		defer bud.releaseSlot(slot)
+		if ctx.Err() != nil {
+			return true
+		}
+		if err := e.ProcessFile(fctx, workerID, f); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				mu.Lock()
+				if firstCancelErr == nil {
+					firstCancelErr = err
+				}
+				mu.Unlock()
+				return true
+			}
+			// A per-file error is logged and recorded inside ProcessFile and
+			// never takes down the scan; a non-context error here is unexpected.
+			e.Log.Warn("process file error (continuing)", "file", f, "err", err)
+		}
+		return false
+	}
 	for i := 0; i < n; i++ {
 		workerID := "w" + strconv.Itoa(i)
 		wg.Add(1)
 		go func(workerID string) {
 			defer wg.Done()
 			for f := range ch {
-				// The release is deferred inside this closure rather than written after
-				// the call, so every way out of one file - a cancellation, an error, an
-				// ordinary return - gives the bound its slot back exactly once.
-				done := func() bool {
-					// The file's own slot, for an encode bound to learn whether THIS file
-					// reached an encode (S0174; see budget.track).
-					fctx, slot := bud.track(ctx)
-					defer bud.releaseSlot(slot)
-					if ctx.Err() != nil {
-						return true
-					}
-					if err := e.ProcessFile(fctx, workerID, f); err != nil {
-						if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-							mu.Lock()
-							if firstCancelErr == nil {
-								firstCancelErr = err
-							}
-							mu.Unlock()
-							return true
-						}
-						// A per-file error is logged and recorded inside ProcessFile and
-						// never takes down the scan; a non-context error here is unexpected.
-						e.Log.Warn("process file error (continuing)", "file", f, "err", err)
-					}
-					return false
-				}()
-				if done {
+				if process(ctx, workerID, f) {
 					return
 				}
 			}
 		}(workerID)
+	}
+	// THE NODE FEEDERS, only where nodes are on (docs/design/nodes.md#seam): beside the local
+	// workers, each takes a file from this same feed only while a node is asking for work.
+	// With nodes off none is started and the pool is the local workers alone.
+	stopFeeders := func() {}
+	if e.Nodes != nil {
+		stopFeeders = e.startFeeders(ctx, &wg, ch, process)
 	}
 
 	// Pause control: stop handing out NEW files the moment we are paused, and say so ONCE.
@@ -1604,6 +1633,7 @@ func (e *Engine) scanOnce(ctx context.Context, pass *listings, bud *budget) (map
 	})
 	holdOut.report()
 	close(ch)
+	stopFeeders()
 	wg.Wait()
 
 	if firstCancelErr != nil {
@@ -2430,6 +2460,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 				return ctx.Err()
 			}
 			e.Log.Warn("FAIL (not enough room beside the source, source untouched)", "file", f, "err", err)
+			// A node that was offered this job is told why it got none: 503 `no_room`.
+			e.refuseNoRoom(ctx)
 			e.fail(ctx, f, key, GateOther, withSourceDimensions(
 				&store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by}, props))
 			return nil
@@ -2468,6 +2500,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 				return ctx.Err()
 			}
 			e.Log.Warn("FAIL (not enough room in the scratch directory, source untouched)", "file", f, "err", err)
+			e.refuseNoRoom(ctx)
 			e.fail(ctx, f, key, GateOther, withSourceDimensions(
 				&store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by}, props))
 			return nil
@@ -2631,7 +2664,10 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			"decode_device", job.Video.DecodeDevice, "encoder", job.Video.Encoder.Key)
 	}
 	encStart := time.Now()
-	err = e.encode(ctx, worker, f, work, props, job)
+	// THE SEAM (docs/design/nodes.md#seam). A job a node feeder carried here is leased to its
+	// node where its plan is leasable, and the node's output arrives in `work`; every other
+	// job - all of them with nodes off - is encoded here by Engine.encode, as it always was.
+	err = e.encodeAt(ctx, worker, key, fi, f, work, props, job)
 	// A HARDWARE ENCODE THAT FAILED, under a root whose hw_fallback is software, is encoded
 	// once more with the software encoder of the same codec, from a plan derived for that
 	// encoder (docs/design/hardware.md#fallback). Nothing about the source has moved - the
@@ -2656,13 +2692,18 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			err = derr
 		} else {
 			job = again
-			err = e.encode(ctx, worker, f, work, props, job)
+			err = e.encodeAt(ctx, worker, key, fi, f, work, props, job)
 		}
 	}
 	if err != nil {
 		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish — leave active for RecoverStale
 			_ = os.Remove(tmp)
 			return ctx.Err()
+		}
+		if errors.Is(err, errNodeInterrupted) {
+			// The lease was ended by the server's own shutdown: the same interruption.
+			_ = os.Remove(tmp)
+			return context.Canceled
 		}
 		// An encode the memory watchdog aborted leaves through this same branch, and says so
 		// in its own one record with the figures it was aborted on. Its class is transient
@@ -2672,6 +2713,18 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			e.Log.Warn("FAIL (encode aborted for memory, source untouched)", "file", f,
 				"rss_bytes", mem.RSS, "memory_limit_bytes", mem.Limit, "memory_threshold_bytes", mem.Threshold)
 			out.FailureClass = store.FailureTransient
+		} else if e.nodeFailure(f, err) {
+			// A lease that ended without an output, or a node's output refused before the
+			// gates. It leaves through this same branch and is transient on purpose: the
+			// next attempt may go to another node or to the server itself, and max_failures
+			// bounds the retries, so a poison job cannot loop across nodes.
+			e.Log.Warn("FAIL (node encode failed, source untouched)", "file", f, "err", err)
+			out.FailureClass = store.FailureTransient
+			_ = os.Remove(tmp)
+			out.Reason = err.Error()
+			e.fail(ctx, f, key, GateEncode, out)
+			e.reportNodePark(ctx, f, key)
+			return nil
 		} else {
 			e.Log.Warn("FAIL (encode error, source untouched)", "file", f, "err", err)
 		}
@@ -3689,6 +3742,9 @@ func (e *Engine) countTerminalRow(s store.Status) {
 // unwritten park as a park - would be a park that exists only in a process that has since
 // exited, which is not a park at all.
 func (e *Engine) finishStore(ctx context.Context, path, key string, s store.Status, o *store.Outcome) {
+	if e.Nodes != nil {
+		e.forgetNodeAttempts(path)
+	}
 	if err := e.Store.Finish(ctx, path, key, s, o, e.Cfg.MaxFailures); err != nil {
 		e.Log.Warn("store finish failed", "file", path, "status", s, "err", err)
 		return

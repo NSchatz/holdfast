@@ -334,8 +334,8 @@ because nothing looked at those files and a row would be a record of a decision 
 The worker-node lease protocol. A node only encodes: an upload lands in a working file the server
 named and is a candidate for the server's own gates, never more. The rule and its reasons are in
 [docs/design/nodes.md](design/nodes.md#leases). In this build only **mapped mode** exists (the
-node reads the source through its own mount), and until the engine's hand-off is wired a server
-with `node_token` set answers these endpoints 503.
+node reads the source through its own mount). A `serve` with `node_token` set answers these
+endpoints 503 `not_ready` only until its start-up recovery has run; `holdfast worker` is the client.
 
 **Authentication.** `Authorization: Bearer <token>` with the value `node_token` points at, and
 nothing else: no Basic form, nothing from the URL. With no `node_token` configured all five answer
@@ -345,7 +345,7 @@ included - is **401**. Every refusal past the credential check is JSON,
 
 | endpoint | request | answers |
 |---|---|---|
-| `POST /leases` | `{"node", "version", "slots", "mode": "mapped", "encoders": [...]}` | **200** one lease: `lease_id`, `epoch`, `ttl_sec`, `heartbeat_sec`, `mode`, `path`, `source_size`, `source_mtime_ns`, `encoder`, `pre`, `body`, `max_output_bytes`. **204** with `Retry-After`: no work arrived inside the long-poll. **400** `bad_request`, or `unsupported_mode` for any mode but `mapped`. **409** `version_mismatch`, with `server_version` and `worker_version`. **503** with `Retry-After`: `not_ready`, `node_cap`, `global_cap`, `no_room`, `refused`, `draining` |
+| `POST /leases` | `{"node", "version", "slots", "mode": "mapped", "encoders": [...]}` | **200** one lease: `lease_id`, `epoch`, `ttl_sec`, `heartbeat_sec`, `mode`, `path`, `source_size`, `source_mtime_ns`, `encoder`, `pre`, `body`, `max_output_bytes`. **204** with `Retry-After`: no work arrived inside the long-poll. **400** `bad_request`, or `unsupported_mode` for any mode but `mapped`. **409** `version_mismatch`, with `server_version` and `worker_version`. **503** with `Retry-After`: `not_ready`, `node_cap`, `global_cap`, `no_room`, `refused`, `draining`, `node_cooling_off` (this node's leases kept ending without an output; `Retry-After` is the time left) |
 | `POST /leases/{id}/heartbeat` | `{"epoch", "progress"}` (progress 0 to 1) | **200** `{"ttl_sec"}`. **410** `lease_gone` |
 | `PUT /leases/{id}/output` | the output as the body, with `Content-Length`, `Content-Digest: sha-256=:<base64>:` and `Holdfast-Lease-Epoch` | **200** `{"state", "output_bytes", "output_digest"}`, also for a repeat of the accepted upload, which rewrites nothing. **400** `digest_mismatch` (the working file is deleted; the upload may be sent again, and the third mismatch fails the lease), `bad_digest`, `short_body`, `bad_request`. **408** `upload_stalled`. **409** `digest_conflict` (a different output after acceptance), `upload_in_progress`. **410** `lease_gone`. **411** `length_required`. **413** `too_large` (past `max_output_bytes`, one byte under the source). **503** with `Retry-After`: `transfers_full`, `no_room`, `not_ready` |
 | `POST /leases/{id}/complete` | `{"epoch", "output_digest", "source_digest", "output_bytes", "encode_sec"}` | **200** `{"state", "output_bytes", "output_digest", "source_digest"}`, idempotent on a repeat. **409** `not_uploaded`, `digest_conflict`. **410** `lease_gone` |

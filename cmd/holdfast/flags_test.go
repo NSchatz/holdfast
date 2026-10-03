@@ -56,9 +56,10 @@ func TestFlags_RunServeAndValidateListExactlyTheFlagsThePinListed(t *testing.T) 
 		"run":      {"config", "file", "limit", "limit-encodes", "queue-order"},
 		"serve":    {"config"},
 		"validate": {"config"},
+		"worker":   {"config"},
 	}
 
-	for _, cmd := range []string{"run", "serve", "validate"} {
+	for _, cmd := range []string{"run", "serve", "validate", "worker"} {
 		t.Run(cmd, func(t *testing.T) {
 			var out, errOut bytes.Buffer
 			if code := dispatch([]string{cmd, "-h"}, &out, &errOut); code != 0 {

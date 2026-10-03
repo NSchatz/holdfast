@@ -8,12 +8,13 @@ and links here rather than restating it. The keys are described in
 ledger is `internal/store/lease.go`, and the route group and its credential check are in
 `internal/server`.
 
-**What this build has.** The protocol, its durable lease rows, the `node_token` credential and
-the configuration keys. Only **mapped mode** exists: a node reads the source through its own
-mount of the library and uploads the output over HTTP. The `holdfast worker` command, the
-engine's hand-off of a job to a node, and the mode in which the server streams the source over
-HTTP land in following changes. Until the engine is wired, a server with `node_token` set
-answers the lease endpoints `503`, and leases nothing.
+**What this build has.** The protocol, its durable lease rows, the `node_token` credential, the
+configuration keys, the engine's hand-off of a job to a node ([the seam](#seam)) and the
+`holdfast worker` command ([the worker](#worker)). Only **mapped mode** exists: a node reads the
+source through its own mount of the library and uploads the output over HTTP. The mode in which
+the server streams the source over HTTP, built-in TLS and the deployment guide land in a
+following change. A `serve` with `node_token` set leases work as soon as its start-up recovery
+has run; `run` leases nothing.
 
 ## The rule
 
@@ -138,13 +139,196 @@ graceful shutdown never waits one out. The caps - live leases across every node
 (`node_max_leases`, 4), per node (`node_max_leases_per_node`, 1) and uploads in flight
 (`node_max_transfers`, 2), all **ASSUMED** - answer `503` with `Retry-After` and a typed reason,
 and are enforced again inside the grant transaction. `node_gate_slots` (1, **ASSUMED**) is
-declared and validated in this change and enforced by nothing yet: the engine wiring that
-follows is what holds the number of node outputs gated at once to it. A node whose build version is not the server's is answered `409` naming both
+enforced by the engine ([the gate slots](#gate-slots)). A node whose build version is not the server's is answered `409` naming both
 versions. Not `426`: RFC 9110 section 15.5.22 says "The server MUST send an Upgrade header field
 in a 426 response to indicate the required protocol(s)", and no protocol is on offer.
 
 A node reports the encoders its own probe found, and a job is leased only to a node that reports
 the job's encoder.
+
+## The seam
+
+<a id="seam"></a>
+
+**A node job is an ordinary job whose encode step is "lease it and wait for the upload into the
+working file this job already named"; everything before that step and everything after it is the
+code a local job runs, on the server.**
+
+`ProcessFile` has one encode seam. Before it: the guards, the claim, the server-named working
+file (beside the source, or the scratch working path under `scratch_dir`), the free-space hold
+and the owner record. After it: every gate, the play hold, the copy beside the source, the
+metadata carry and the durable rename. None of that knows whether the bytes in the working file
+came from the server's ffmpeg or from a node, so no verdict of a node licenses a swap, and
+[swap.md](swap.md#swap-invariant) and [quality-gate.md](quality-gate.md#vmaf-pooling) are
+unchanged.
+
+**The feeders.** With nodes on, a pass starts `node_max_leases` feeders beside its `workers`
+local workers, on the same feed. A feeder takes a file from the feed **only while it holds a
+node's poll**: with no node asking for work the feeders consume nothing and the local workers see
+the feed exactly as they do with nodes off. A feeder that ends a file without leasing it gives
+the poll back; one that holds a poll with no file arriving - the feed is paused, or every file is
+with a local worker - lets it go after one second (**ASSUMED**) and asks again. When the feed
+closes or the pass is cancelled every feeder stops, and none outlives the pass. With `node_token`
+unset no feeder is started and the pool, every command line and every decision are the ones of a
+build without nodes.
+
+**A poll is always answered at its long-poll bound.** One still queued, and one a feeder holds
+reserved, are both answered `204` when the bound runs out. A reserved poll's ticket is dead from
+that moment, and so is the ticket of a poll whose request ended: nothing is granted on a dead
+ticket - no lease row, nothing recorded against the job. The job that carried it waits for
+another node to ask, for up to two long-poll bounds (**ASSUMED**), and is leased to that one;
+failing that the server encodes it.
+
+Nodes are given work only while a pass runs: the initial scan, an interval scan
+(`scan_interval_sec`) or a rescan. A file submitted through `POST /api/scan` is encoded by the
+server.
+
+<a id="leasable"></a>
+
+**Which jobs are leased.** Only a plan whose command line is self-contained on another host: a
+software encoder the node reported, software decode, no device argument, no loudness-normalised
+track (its gate reads the encoder's own report channel), no dynamic-HDR carriage (its pre-pass
+files sit beside the working file), no picture carried as a Matroska attachment (copied out
+beside the working file first), and never the software second attempt of a failed hardware
+encode. Every other job a feeder carries to the seam is encoded by the server itself, the poll
+going back to its node unused: fail safe, never a guess on the node. Hardware encoders on a node
+would need the node's own start-time probe to gate the job ([hardware.md](hardware.md#probe));
+that is not built.
+
+**What a lease carries.** The ffmpeg options the server's plan builds - those between the input
+and the output, with the container's - and not a second description of the plan, so the command
+line and every gate still read one plan ([encode-plan.md](encode-plan.md#encode-plan)). The
+server's libx265 pool figures are left out: they describe the server, and the node's libx265 uses
+its own. The fixed leading options, `-i`, the muxer-queue bounds and the output are added on the
+node by the one function every local encode's command line goes through, so the two cannot drift.
+
+**Before the gates.** When a lease completes, the server hashes **its own copy of the source**
+once (sha-256, one sequential read) and compares it with the digest of the bytes the node read.
+A mismatch fails the job at the encode gate naming a wrong `worker_path_map` entry or a stale
+mount; nothing is gated, the working file is removed and the source is untouched. The working
+file must also be the length the lease recorded.
+
+<a id="endings"></a>
+
+**How a lease that ended without an output is read.** There are two kinds, and only one is a
+fact about the file.
+
+- **The node could not run it**: the worker failed the lease `unmapped_source`,
+  `source_mismatch`, `source_unreadable`, `unsupported_encoder`, `refused_plan` or
+  `worker_stopping`; or the re-derived job after a restart is not the leased one; or the hub
+  granted nothing. **Nothing is recorded against the file.** The server encodes the job itself,
+  in the same attempt, inside a gate slot, exactly as it does a plan that is not leasable, and
+  one record names the node and the reason.
+- **The lease was really attempted**: it expired, the node's encode failed, its uploads failed
+  the digest bound, or the server refused the completed output before its gates. The job fails
+  at the encode gate, class transient, through the branch a failed local encode leaves by.
+  `max_failures` counts it, and at the bound the existing claim holds the row out, so a poison
+  job cannot loop across nodes; one record then names the node attempts this process saw since
+  the file's last other outcome.
+
+The approved proposal charged every ended lease to the file. That let one broken node - a wrong
+path map fails a lease in milliseconds - park every file the feed offered it, so the first kind
+is split off: a departure from the letter of the proposal's retry rule, recorded as one.
+
+**A node whose leases keep ending is cooled off.** After three leases of one node end in a row
+(either kind) with none succeeding between, that node is offered nothing for five minutes (both
+**ASSUMED**): its polls answer `503 node_cooling_off` with the time left as `Retry-After`, and
+one `warn` record names the node, the reasons and the cool-off. A lease whose output the server
+took clears the run. A poll that left before its grant counts for nothing.
+
+A cancelled pass, and a lease the server ended because it is stopping, record nothing against
+the file, exactly as an interrupted local encode does not.
+
+**Free space.** A feeder's job takes the same free-space reservation a local job takes, before
+anything is leased. A refusal fails the job as it always did, and the node's poll is answered
+`503 no_room`. The upload re-checks the filesystem once its length is known.
+
+<a id="gate-slots"></a>
+
+**The gate slots.** Every node output costs the server a source hash, a full decode-integrity
+pass and a VMAF run. `node_gate_slots` (1, **ASSUMED**) is how many node jobs the server does
+that work for at once, beside its `workers` local jobs: a slot is held from the moment a lease
+hands its output back - or from the start of the server's own encode of a job that was not
+leasable - until the job ends. While every slot is held **and** as many jobs again are already
+waiting for one, the feeders stop asking for demand, so a node's poll is answered with no work
+rather than with a job whose output would only queue. Leases granted before the queue filled are
+not withdrawn.
+
+A job a feeder carried to the seam that the server ends up encoding itself - a plan that is not
+leasable, a node that could not run its lease - is one more encode on the server beside its
+`workers`, and `node_gate_slots` is what bounds how many of those run at once.
+
+**Known limit: a lease has no maximum lifetime.** A node that keeps heartbeating holds its job
+for as long as it does, as a hung local encode holds its worker. Nothing ends such a lease but
+the node, a restart of either side, or the pass being cancelled.
+
+<a id="worker"></a>
+
+## The worker
+
+`holdfast worker --config <file>` is the node. It reads `worker_server`, `node_token` (by
+reference, resolved once), `worker_name` (default: the host name), `worker_slots`,
+`worker_path_map` and `worker_work_dir` (default: `holdfast-worker` under the OS temp directory),
+and it refuses to start naming the key when `worker_server` or `node_token` is missing. Its
+configuration is loaded and validated like every other command's, so it names `library_roots`:
+the worker's own mount of the library.
+
+**It refuses a plain `http://` server whose host is not loopback.** Over plain HTTP the node
+credential crosses the network in cleartext on every request. `https://` is accepted, which any
+reverse proxy in front of the server provides.
+
+At start it runs the start-up probe encode of every software encoder in the registry through its
+own ffmpeg and reports the ones that work, with its build version, in every request for work.
+Each of its slots then loops:
+
+1. **Ask for work.** Only a `200` whose body is the JSON of a whole lease is a lease. A `204` is
+   asked again after the server's `Retry-After`; a `503`, any other status, a `200` that is not
+   JSON and a failed call are backed off from exponentially with jitter, 5 s to 5 min
+   (**ASSUMED**), never under a stated `Retry-After`; a `409 version_mismatch` stops the worker,
+   naming both versions. An error page is never taken for a lease, whatever its status.
+2. **Check the lease.** The source path is mapped through `worker_path_map`; one no entry covers
+   fails the lease `unmapped_source`. An encoder the worker did not report fails it
+   `unsupported_encoder`. A mapped source that is not exactly the size the lease was granted on,
+   or whose modification time is more than two seconds away, fails it `source_mismatch`: one file
+   read through two mounts can show two times (FAT keeps two-second stamps, SMB and NFS round),
+   and this is only the early refusal - the proof is the source digest the server compares. A
+   command line outside the shape the server's plans have fails it `refused_plan`, unrun (below).
+3. **Encode** into the work directory, heartbeating every `heartbeat_sec` with its progress. A
+   `410` stops the encode at once and discards the output.
+4. **Hash** the source it read and the output (sha-256), and **upload** the output with its
+   `Content-Length`, `Content-Digest` and the epoch. A digest mismatch and a `503` are sent again
+   while the lease lives, at most five times (**ASSUMED**); the server's own bound ends the lease
+   first.
+5. **Complete**, and remove the local output - which it does on every way out it lives through.
+   A killed worker leaves its output in the work directory; the next start removes the files
+   there that carry its own output naming (32 hex characters, the epoch, `.out`) and nothing
+   else.
+
+After a lease it failed itself the worker backs off before it asks again, exponentially: what
+stopped it is very likely still there.
+
+<a id="refused-plan"></a>
+
+**The worker does not run whatever a lease carries.** It holds the node credential's word for
+what to execute, so it refuses, unrun, a lease with any option before the input, or whose
+options carry `-i`, `-attach`, `-dump_attachment`, `-y`, `-progress`, `-filter_script`,
+`-filter_complex_script` (each with or without a stream specifier), a `--` token, an argument
+that is an absolute path, or one that climbs out of its directory with `..`. The server's
+leasable plans emit none of these.
+
+**Mount the library read-only on a node.** A worker only ever reads the library: the output goes
+to its work directory and from there over HTTP, and the server is the only writer beside the
+sources. The refusal above is a second line, not the first - a filter or a muxer option this
+list does not name could still name a file - so the mount should not let the node's ffmpeg write
+there whatever it is told. A read-only mount also makes "the server is the only writer into the
+library" true by construction rather than by the worker's good behaviour.
+
+**It follows no redirect.** A `3xx` is the answer itself and never a lease: following one would
+carry the credential, and an upload's body, to wherever it points. `worker_server` carrying
+userinfo, a query or a fragment refuses to start.
+
+On SIGTERM it stops its encodes, fails their leases `worker_stopping` best-effort, and exits 0.
+The worker writes nothing into the library: the server stays the only writer there.
 
 ## A server restart
 
@@ -171,6 +355,22 @@ Lease rows survive. At start, before anything is granted:
 
 Until this recovery has run every lease endpoint answers `503`, and no lease is expired: an
 expiry read before the grace was given is one the server's own downtime ran out.
+
+<a id="restart"></a>
+
+**The engine takes each lease back before anything is granted.** `serve` runs the recovery before
+its listener accepts and before its first scan. Each recovered lease's path is run through
+`ProcessFile` again: it claims the row (the rows a dead process left active are reset first),
+re-takes the free-space hold and a working file through its ordinary code, re-derives the plan,
+and at the seam re-attaches the lease. A lease whose job never gets there - the guards now skip
+the file, it is gone, its plan is no longer leasable - is abandoned. Only when every recovered
+lease has re-taken its holds or been abandoned may the server grant again.
+
+The recovered leases' jobs run at once, not one after another, and the whole step is bounded by
+one lease TTL: a lease whose job has not reached the seam by then is abandoned, and that job
+carries on as the server's own. The listener is therefore never held for longer than that. When
+the server is ready to grant, every recovered lease still live is given **one TTL from that
+moment**, so the grace is not spent on the server's own start-up work.
 
 ## What is kept
 
