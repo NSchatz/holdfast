@@ -676,6 +676,14 @@ type Hub struct {
 	// what is in the set, what is deliberately not, and why the bound exists.
 	figures ledgerCache
 
+	// rootFigures is the per-root ledger read GET /api/summary publishes, held between
+	// refreshes on the same interval (summary_roots.go). No frame carries it.
+	rootFigures rootLedgerCache
+
+	// live says this process runs with `dry_run: false` (SetLiveEngine). The zero value
+	// reports the per-status counts exactly as the ledger holds them.
+	live atomic.Bool
+
 	// now is the clock the frame's `now` basis and every figure's age are measured on.
 	// It is a field rather than a direct time.Now call so a test can advance the clock
 	// across the refresh interval without sleeping through it.
@@ -1021,12 +1029,8 @@ func (h *Hub) buildSnapshot(ctx context.Context, mayRefresh bool) (snapshot, err
 	if err != nil {
 		return snapshot{}, err
 	}
-	counts := make(map[string]int, len(sum))
-	for st, n := range sum {
-		counts[string(st)] = n
-	}
 	return snapshot{
-		Summary: counts,
+		Summary: h.reportedCounts(sum),
 		Queue:   h.queueDTOs(queue),
 		// History rows are terminal, so they are projected WITHOUT live progress — a
 		// finished file carries the proof its swap was safe, never a running figure.

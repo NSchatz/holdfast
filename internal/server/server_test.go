@@ -3,13 +3,17 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +22,7 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/engine"
+	"github.com/NSchatz/holdfast/internal/metrics"
 	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/store"
 )
@@ -1850,4 +1855,409 @@ func postWithHeaders(t *testing.T, url string, headers map[string]string) (int, 
 	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(body)
+}
+
+// --- would-transcode under a live engine (S0172) ------------------------------
+//
+// "Live" is a process serving with `dry_run: false`, "dry" one serving with `dry_run: true`.
+// N is the ledger's would-transcode rows and P its pending rows. Every case reads a REAL
+// store through the real handler, hub and collector; the setting reaches them the way
+// `holdfast serve` hands it over, through SetLiveEngine.
+
+// liveFixtureP and liveFixtureN are the pending and would-transcode rows liveFixture seeds.
+const (
+	liveFixtureP = 2
+	liveFixtureN = 3
+)
+
+// liveFixture seeds a ledger a dry run left behind and a real run has started on: P
+// pending rows, N would-transcode rows written over real files under lib, and one row in
+// each of encoding, done, skipped and failed. It returns the store, the paths of the
+// would-transcode rows and the whole ledger's per-status counts as the store reads them.
+func liveFixture(t *testing.T) (st *store.SQLite, candidates []string, ledger map[store.Status]int) {
+	t.Helper()
+	ctx := context.Background()
+	var err error
+	if st, err = store.Open(filepath.Join(t.TempDir(), "jobs.db")); err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	lib := t.TempDir()
+
+	// Pending first: RecoverStale returns every claimed row to pending.
+	for i := 0; i < liveFixtureP; i++ {
+		mustClaim(t, st, filepath.Join(lib, "pending"+strconv.Itoa(i)+".mkv"), "p:p")
+	}
+	if _, err := st.RecoverStale(ctx); err != nil {
+		t.Fatalf("RecoverStale: %v", err)
+	}
+	for i := 0; i < liveFixtureN; i++ {
+		p := filepath.Join(lib, "candidate"+strconv.Itoa(i)+".mkv")
+		if err := os.WriteFile(p, []byte("the bytes of candidate "+strconv.Itoa(i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		candidates = append(candidates, p)
+		seedCandidate(t, st, p, "c:c", &store.Outcome{
+			SourceCodec: "h264", SourceBytes: i64p(int64(1000 + i)), TargetPath: p,
+			Decision: store.Decision{LibraryRoot: lib, ProfileDigest: "digest-" + strconv.Itoa(i)},
+		})
+	}
+	for name, status := range map[string]store.Status{
+		"done.mkv": store.Done, "skipped.mkv": store.Skipped, "failed.mkv": store.Failed,
+	} {
+		p := filepath.Join(lib, name)
+		mustClaim(t, st, p, "t:t")
+		if err := st.Finish(ctx, p, "t:t", status, &store.Outcome{Reason: "seeded"}, 3); err != nil {
+			t.Fatalf("Finish(%s): %v", status, err)
+		}
+	}
+	mustClaim(t, st, filepath.Join(lib, "encoding.mkv"), "e:e")
+	if err := st.Advance(ctx, filepath.Join(lib, "encoding.mkv"), "e:e", store.Encoding); err != nil {
+		t.Fatal(err)
+	}
+
+	if ledger, err = st.Summary(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ledger[store.Pending] != liveFixtureP || ledger[store.WouldTranscode] != liveFixtureN {
+		t.Fatalf("the fixture holds %d pending and %d would-transcode rows, want %d and %d: %v",
+			ledger[store.Pending], ledger[store.WouldTranscode], liveFixtureP, liveFixtureN, ledger)
+	}
+	return st, candidates, ledger
+}
+
+// servedOver wires a server, hub and metric set over st the way `holdfast serve` does,
+// with the engine live or dry.
+func servedOver(t *testing.T, st store.Store, live bool) (*httptest.Server, *Hub) {
+	t.Helper()
+	ctx := context.Background()
+	ctrl := NewController(ctx, func(context.Context) error { return nil }, discard())
+	hub := NewHub(st, ctrl, discard())
+	hub.SetLiveEngine(live)
+	mx := metrics.New(st, nil)
+	mx.SetLiveEngine(live)
+	ts := httptest.NewServer(New(ctx, configZero(), secret.Value{}, secret.Value{}, st, ctrl, hub, mx.Handler(), discard()))
+	t.Cleanup(ts.Close)
+	return ts, hub
+}
+
+// polledSummary is the `summary` map of GET /api/summary.
+func polledSummary(t *testing.T, base string) map[string]int {
+	t.Helper()
+	var got controlState
+	getJSON(t, base+"/api/summary", &got)
+	return got.Summary
+}
+
+// streamedSummary is the `summary` map of the first frame GET /api/events publishes.
+func streamedSummary(t *testing.T, base string) map[string]int {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/events", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/events: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	event, data := readSSEFrame(t, resp.Body, 5*time.Second)
+	if event != "snapshot" {
+		t.Fatalf("first SSE event = %q, want snapshot", event)
+	}
+	var snap snapshot
+	if err := json.Unmarshal([]byte(data), &snap); err != nil {
+		t.Fatalf("SSE data is not a snapshot: %v", err)
+	}
+	return snap.Summary
+}
+
+var queueDepthSample = regexp.MustCompile(`(?m)^holdfast_queue_depth\{state="([^"]*)"\} (\S+)$`)
+
+// scrapedDepth is every holdfast_queue_depth sample of GET /metrics, by state.
+func scrapedDepth(t *testing.T, base string) map[string]int {
+	t.Helper()
+	resp, err := http.Get(base + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics = %d", resp.StatusCode)
+	}
+	out := map[string]int{}
+	for _, m := range queueDepthSample.FindAllStringSubmatch(string(body), -1) {
+		v, err := strconv.ParseFloat(m[2], 64)
+		if err != nil {
+			t.Fatalf("holdfast_queue_depth{state=%q} is not a number: %q", m[1], m[2])
+		}
+		out[m[1]] = int(v)
+	}
+	return out
+}
+
+// foldedLedger is the per-status counts a live engine must report for ledger, written out
+// here independently of the code under test: would-transcode leaves, pending gains it.
+func foldedLedger(ledger map[store.Status]int) map[string]int {
+	out := map[string]int{}
+	for st, n := range ledger {
+		out[string(st)] = n
+	}
+	out["pending"] += out["would-transcode"]
+	delete(out, "would-transcode")
+	return out
+}
+
+// TestS0172_AC1_LiveSummaryCountsWouldTranscodeInsidePending grades [AC-1]: under a live
+// engine the summary map has no would-transcode key, pending is P + N, and every other
+// status is exactly what the ledger holds.
+func TestS0172_AC1_LiveSummaryCountsWouldTranscodeInsidePending(t *testing.T) {
+	st, _, ledger := liveFixture(t)
+	ts, _ := servedOver(t, st, true)
+
+	got := polledSummary(t, ts.URL)
+
+	if n, ok := got["would-transcode"]; ok {
+		t.Errorf("a live engine's summary carries a would-transcode key (%d)", n)
+	}
+	if got["pending"] != liveFixtureP+liveFixtureN {
+		t.Errorf("pending = %d, want P + N = %d", got["pending"], liveFixtureP+liveFixtureN)
+	}
+	for _, status := range []store.Status{store.Encoding, store.Done, store.Skipped, store.Failed} {
+		if got[string(status)] != ledger[status] || ledger[status] != 1 {
+			t.Errorf("%s = %d, the ledger holds %d", status, got[string(status)], ledger[status])
+		}
+	}
+	if want := foldedLedger(ledger); !reflect.DeepEqual(got, want) {
+		t.Errorf("summary = %v, want %v", got, want)
+	}
+}
+
+// TestS0172_AC2_LiveSnapshotSummaryIsThePolledSummary grades [AC-2]: the SSE snapshot's
+// summary map is identical, key for key and count for count, to GET /api/summary's over
+// the same ledger - on the first frame and on a frame a later transition publishes.
+func TestS0172_AC2_LiveSnapshotSummaryIsThePolledSummary(t *testing.T) {
+	st, _, ledger := liveFixture(t)
+	ts, hub := servedOver(t, st, true)
+
+	polled, streamed := polledSummary(t, ts.URL), streamedSummary(t, ts.URL)
+	if !reflect.DeepEqual(polled, streamed) {
+		t.Errorf("the stream and the poll disagree over one ledger:\n stream %v\n poll   %v", streamed, polled)
+	}
+	if _, ok := streamed["would-transcode"]; ok || streamed["pending"] != liveFixtureP+liveFixtureN {
+		t.Errorf("the SSE snapshot's summary is not the live reading: %v", streamed)
+	}
+	if want := foldedLedger(ledger); !reflect.DeepEqual(streamed, want) {
+		t.Errorf("the SSE snapshot's summary = %v, want %v", streamed, want)
+	}
+
+	// A broadcast frame goes through the same rule as the first one.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hub.Run(ctx)
+	ch, unsub := hub.Subscribe(ctx)
+	defer unsub()
+	drainFrames(ch)
+	hub.Trigger()
+	select {
+	case data := <-ch:
+		var snap snapshot
+		if err := json.Unmarshal(data, &snap); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(snap.Summary, polled) {
+			t.Errorf("a broadcast frame's summary = %v, the poll says %v", snap.Summary, polled)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no broadcast frame arrived")
+	}
+}
+
+// TestS0172_AC4_LiveGaugeAndSummaryShareOneVocabulary grades [AC-4]: for one ledger state
+// the set of `state` label values on holdfast_queue_depth equals the set of keys in the
+// summary map, and each label's value equals that key's count.
+func TestS0172_AC4_LiveGaugeAndSummaryShareOneVocabulary(t *testing.T) {
+	st, _, _ := liveFixture(t)
+	ts, _ := servedOver(t, st, true)
+
+	summary, depth := polledSummary(t, ts.URL), scrapedDepth(t, ts.URL)
+
+	if len(depth) == 0 {
+		t.Fatal("/metrics carries no holdfast_queue_depth sample at all")
+	}
+	if !reflect.DeepEqual(summary, depth) {
+		t.Errorf("the two surfaces report different vocabularies or counts for one ledger:\n summary     %v\n queue depth %v",
+			summary, depth)
+	}
+	if _, ok := depth["would-transcode"]; ok {
+		t.Errorf("a live engine's gauge carries state=\"would-transcode\": %v", depth)
+	}
+}
+
+// TestS0172_AC5_DrySummaryReportsWouldTranscodeAsItself grades [AC-5] on the summary and
+// the stream (internal/metrics grades the gauge): under a dry engine, and for a hub nobody
+// told either way, would-transcode is its own key with value N and pending is P.
+func TestS0172_AC5_DrySummaryReportsWouldTranscodeAsItself(t *testing.T) {
+	st, _, ledger := liveFixture(t)
+	asLedger := map[string]int{}
+	for status, n := range ledger {
+		asLedger[string(status)] = n
+	}
+
+	dry, _ := servedOver(t, st, false)
+	// A hub SetLiveEngine was never called on: the constructors' zero value.
+	h := newHarnessOn(t, st, "", "")
+	untold := httptest.NewServer(h.srv)
+	defer untold.Close()
+
+	for name, base := range map[string]string{"dry": dry.URL, "never told": untold.URL} {
+		for surface, got := range map[string]map[string]int{
+			"summary": polledSummary(t, base), "stream": streamedSummary(t, base),
+		} {
+			if got["would-transcode"] != liveFixtureN || got["pending"] != liveFixtureP {
+				t.Errorf("%s %s: would-transcode = %d and pending = %d, want %d and %d",
+					name, surface, got["would-transcode"], got["pending"], liveFixtureN, liveFixtureP)
+			}
+			if !reflect.DeepEqual(got, asLedger) {
+				t.Errorf("%s %s = %v, want the ledger's own counts %v", name, surface, got, asLedger)
+			}
+		}
+	}
+	if depth := scrapedDepth(t, dry.URL); !reflect.DeepEqual(depth, asLedger) {
+		t.Errorf("the dry gauge = %v, want the ledger's own counts %v", depth, asLedger)
+	}
+}
+
+// TestS0172_AC6_TheRelabelConservesTheTotal grades [AC-6]: live or dry, on the summary,
+// the stream and the gauge, the reported counts sum to the number of rows in the ledger.
+func TestS0172_AC6_TheRelabelConservesTheTotal(t *testing.T) {
+	st, _, ledger := liveFixture(t)
+	rows := 0
+	for _, n := range ledger {
+		rows += n
+	}
+	if rows != liveFixtureP+liveFixtureN+4 {
+		t.Fatalf("the fixture holds %d rows", rows)
+	}
+	all, err := st.List(context.Background(), nil, 0)
+	if err != nil || len(all) != rows {
+		t.Fatalf("List: %d rows, %v; the ledger counts %d", len(all), err, rows)
+	}
+
+	for _, live := range []bool{true, false} {
+		ts, _ := servedOver(t, st, live)
+		for surface, got := range map[string]map[string]int{
+			"summary": polledSummary(t, ts.URL), "stream": streamedSummary(t, ts.URL), "gauge": scrapedDepth(t, ts.URL),
+		} {
+			sum := 0
+			for _, n := range got {
+				sum += n
+			}
+			if sum != rows {
+				t.Errorf("live=%v %s reports %d rows in total, the ledger holds %d: %v", live, surface, sum, rows, got)
+			}
+		}
+	}
+}
+
+// TestS0172_AC7_LiveReadsLeaveTheLedgerAndTheLibraryUnchanged grades [AC-7]: reading the
+// summary, the stream and /metrics under a live engine rewrites nothing. Every
+// would-transcode row keeps its status and its recorded outcome, and every file those rows
+// name is byte-identical. The server is handed the WRITE handle, so "wrote nothing" is a
+// fact about the code and not about the door.
+func TestS0172_AC7_LiveReadsLeaveTheLedgerAndTheLibraryUnchanged(t *testing.T) {
+	st, candidates, _ := liveFixture(t)
+	ctx := context.Background()
+
+	digests := func() map[string][sha256.Size]byte {
+		t.Helper()
+		out := map[string][sha256.Size]byte{}
+		for _, p := range candidates {
+			b, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatalf("a file a would-transcode row names is gone: %v", err)
+			}
+			out[p] = sha256.Sum256(b)
+		}
+		return out
+	}
+	rows := func() []store.Job {
+		t.Helper()
+		jobs, err := st.List(ctx, nil, 0)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		return jobs
+	}
+	filesBefore, rowsBefore := digests(), rows()
+
+	ts, _ := servedOver(t, st, true)
+	for i := 0; i < 5; i++ {
+		if got := polledSummary(t, ts.URL); got["pending"] != liveFixtureP+liveFixtureN {
+			t.Fatalf("the reads under test are not the live reading: %v", got)
+		}
+		streamedSummary(t, ts.URL)
+		scrapedDepth(t, ts.URL)
+	}
+
+	if !reflect.DeepEqual(filesBefore, digests()) {
+		t.Error("a file a would-transcode row names changed under the reads")
+	}
+	rowsAfter := rows()
+	if !reflect.DeepEqual(rowsBefore, rowsAfter) {
+		t.Errorf("the ledger changed under the reads:\n before %+v\n after  %+v", rowsBefore, rowsAfter)
+	}
+	kept := 0
+	for _, j := range rowsAfter {
+		if j.Status != store.WouldTranscode {
+			continue
+		}
+		kept++
+		o := j.Outcome
+		if o.SourceCodec != "h264" || o.SourceBytes == nil || *o.SourceBytes < 1000 || o.TargetPath != j.Path ||
+			o.LibraryRoot != filepath.Dir(j.Path) || !strings.HasPrefix(o.ProfileDigest, "digest-") {
+			t.Errorf("%s lost a recorded outcome field: %+v", j.Path, o)
+		}
+	}
+	if kept != liveFixtureN {
+		t.Errorf("%d rows still read would-transcode in the ledger, want all %d: the relabel is a "+
+			"reading, never a rewrite", kept, liveFixtureN)
+	}
+}
+
+// unreadableLedger is a store whose Summary fails: the dependency behind the per-status
+// counts, outside the server's boundary.
+type unreadableLedger struct{ *store.SQLite }
+
+func (unreadableLedger) Summary(context.Context) (map[store.Status]int, error) {
+	return nil, errors.New("database disk image is malformed")
+}
+
+// TestS0172_AC12_AnUnreadableLedgerIsStillA5xxUnderALiveEngine grades [AC-12]: when the
+// ledger cannot be read, a live engine's /api/summary answers the 5xx it gives today and
+// never a 200 carrying a partial or folded map.
+func TestS0172_AC12_AnUnreadableLedgerIsStillA5xxUnderALiveEngine(t *testing.T) {
+	st, _, _ := liveFixture(t)
+	bodies := map[bool]string{}
+	for _, live := range []bool{true, false} {
+		ts, _ := servedOver(t, unreadableLedger{st}, live)
+		resp, err := http.Get(ts.URL + "/api/summary")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Errorf("live=%v: GET /api/summary over an unreadable ledger = %d, want 500", live, resp.StatusCode)
+		}
+		for _, leak := range []string{"pending", "would-transcode", "{"} {
+			if strings.Contains(string(body), leak) {
+				t.Errorf("live=%v: the error response carries %q: %q", live, leak, body)
+			}
+		}
+		bodies[live] = string(body)
+	}
+	if bodies[true] != bodies[false] || bodies[true] != "internal error reading summary\n" {
+		t.Errorf("the live error response %q is not the one given today %q", bodies[true], bodies[false])
+	}
 }

@@ -1248,7 +1248,7 @@ func (s *SQLite) ReclaimedTotal(ctx context.Context) (int64, error) {
 func (s *SQLite) HeldByUndoWindow(ctx context.Context) (int64, error) {
 	var total int64
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(source_bytes), 0) FROM retained_originals WHERE restored_at IS NULL`).
+		`SELECT COALESCE(SUM(source_bytes), 0) FROM retained_originals WHERE `+liveRetention).
 		Scan(&total); err != nil {
 		return 0, fmt.Errorf("store: held by undo window: %w", err)
 	}
@@ -1326,7 +1326,7 @@ func (s *SQLite) GetRetained(ctx context.Context, path string) (Retained, bool, 
 func (s *SQLite) ListRetained(ctx context.Context) ([]Retained, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+retainedColumns+` FROM retained_originals
-		 WHERE restored_at IS NULL ORDER BY expires_at ASC, source_path ASC`)
+		 WHERE `+liveRetention+` ORDER BY expires_at ASC, source_path ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list retained: %w", err)
 	}
