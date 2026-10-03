@@ -345,15 +345,16 @@ A literal token in `config.yaml` **or** in `HOLDFAST_SERVER_AUTH_TOKEN` refuses 
 That is deliberate: holdfast starts `ffmpeg` as a child process, a child inherits its
 parent's environment, and a credential in the environment is readable from every encoder
 invocation's `/proc/<pid>/environ`. The same applies to `server_read_token`, `notify_url`,
-`tautulli_api_key`, `radarr_api_key`, `sonarr_api_key` and `plex_token`. `docs/secrets.md` has
-the reference forms and the migration.
+`tautulli_api_key`, `radarr_api_key`, `sonarr_api_key`, `plex_token` and `webhook_token`.
+`docs/secrets.md` has the reference forms and the migration.
 
 ## Telling holdfast about one file: Sonarr / Radarr
 
-`POST /api/scan` takes a list of paths and looks at exactly those files. The *arr already
-knows when an import finished, which is the hard part, so wiring this up lets you turn the
-periodic scan off entirely (`scan_interval_sec: 0`) and still have every new file examined
-the moment it lands.
+Sonarr and Radarr already know the moment an import finishes, which is the hard part. Point a
+`Connect > Webhook` connection in each at holdfast's **native webhook intake** and every imported,
+upgraded or renamed file is examined as it lands - so the periodic scan can be turned off entirely
+(`scan_interval_sec: 0`). Nothing sits in between: no script in the arr's container and no shim to
+reshape the payload. holdfast reads the arr's own JSON.
 
 No *arr to wire up? A library root can carry `watch: true` instead, and holdfast hears about
 the file from the platform's own filesystem events - see
@@ -366,7 +367,127 @@ guards, the same claim and the same swap discipline a whole-library scan puts it
 and records the same verdict. It re-encodes nothing a scan would have skipped, and it is
 **not** `requeue`: a file a terminal row already answered stays answered.
 
-### The request
+<a id="webhook"></a>
+
+### Sonarr / Radarr: `Connect > Webhook`
+
+**1. Give the intake a credential of its own.** It is off until you do: with no `webhook_token`
+both endpoints answer **403**.
+
+```yaml
+# config.yaml
+webhook_token: file:/run/secrets/holdfast_webhook_token
+```
+
+```yaml
+# compose
+services:
+  holdfast:
+    secrets: [holdfast_webhook_token]
+secrets:
+  holdfast_webhook_token:
+    file: ./secrets/holdfast_webhook_token
+```
+
+Like every credential it is a **reference** (`file:` or `cmd:`), and a literal value in the file
+or in `HOLDFAST_WEBHOOK_TOKEN` refuses to start ([docs/secrets.md](secrets.md)). It is **not**
+`server_auth_token`, deliberately: the secret an arr holds can queue a file inside a configured
+library root and do nothing else - it cannot pause holdfast, start a scan or withhold a path, and
+it is not accepted where `server_read_token` gates the reads - and the control token is not accepted on the intake, so there is no reason to hand it
+to an arr. Writing `webhook_token` as the same reference as `server_auth_token` or
+`server_read_token` refuses to start, and so does a `webhook_token` that resolves to the same
+value as either. (If `server_read_token` is unset the read endpoints are open to every caller
+anyway, as they are without this key - see [the control surface](#reverse-proxy-posture).)
+
+**2. Add the connection.** In each arr: `Settings > Connect > + > Webhook`.
+
+| Field | Sonarr | Radarr |
+|---|---|---|
+| Triggers | **On File Import**, **On File Upgrade**; optionally **On Import Complete** and **On Rename** | **On File Import**, **On File Upgrade**; optionally **On Rename** |
+| Webhook URL | `http://holdfast:8080/api/webhook/sonarr` | `http://holdfast:8080/api/webhook/radarr` |
+| Method | `POST` (`PUT` is accepted too) | `POST` (`PUT` is accepted too) |
+| Username | anything, for example `holdfast` - it is not checked | the same |
+| Password | the webhook token's value | the same |
+
+That sends the token as the password of HTTP Basic authentication. If you would rather send a
+header, leave Username and Password empty and add one under the advanced **Headers** field:
+`Authorization` = `Bearer <the token's value>`. Either is accepted; nothing else is. There is no
+URL form of the credential (`?token=...`), because a URL reaches access logs.
+
+Press **Test**. holdfast answers **200** to a Test that carries the right credential and comes
+from the right arr, and queues nothing for it. A Test that fails tells you which thing is wrong:
+
+| Test result | What it means |
+|---|---|
+| 403 | `webhook_token` is not configured in holdfast |
+| 401 | the Password (or the header) is not the token's value |
+| 400 | the connection points at the other arr's endpoint (a Sonarr connection at `/api/webhook/radarr`, or the reverse) |
+
+**3. Which events do what.**
+
+| Event | What holdfast does |
+|---|---|
+| **On File Import** | queues the imported file |
+| **On File Upgrade** | queues the new file. An upgrade arrives as the same `Download` event with `isUpgrade` set; the file it replaced is not touched |
+| **On Import Complete** (Sonarr) | queues every file of the import. With On File Import also ticked each file is announced twice; both mentions go through the same claim, so the file is not encoded twice |
+| **On Rename** | queues the file under its new path. A job already queued under the old path is not dropped: when its turn comes the old path no longer exists, and it ends with nothing claimed and nothing recorded |
+| anything else, if ticked | answered **200** and ignored |
+
+The answer is **202** with a per-file report, and it comes back immediately: the file is queued,
+not encoded while the arr waits. Every case in which nothing is queued for a reason that is not a
+fault - an event holdfast does not act on, a file outside every library root, holdfast paused - is
+answered **200** with the reason in the body and one line in holdfast's log, so the arr does not
+mark the connection as failing. The full response shape and every status are in
+[docs/api-reference.md](api-reference.md#webhook-intake).
+
+The payload shapes were read from the arr source at Sonarr `v4.0.20.3014` and Radarr
+`v6.4.4.10685` (read 2026-10-02; the citations are in
+[docs/design/media-clients.md](design/media-clients.md#webhook-intake)). It has not been run
+against a live Sonarr or Radarr by this project: a live check is the owner's to run.
+
+### The paths must be the paths holdfast sees
+
+An arr sends the path *it* knows the file by, and that is the path inside **its** container.
+holdfast resolves what it is sent against its own filesystem and its own `library_roots`, so
+`/tv/Show/S01E01.mkv` from Sonarr means nothing to a holdfast that mounts the same file at
+`/library/tv/Show/S01E01.mkv`: the file is **refused**, under `outside-library-roots` or
+`not-a-regular-file`, named in the response and in the log. It is never silently ignored, and it
+never reaches a file holdfast was not pointed at.
+
+Two ways out:
+
+- **Mount the library at the same path in every container.** Give Sonarr, Radarr and holdfast
+  the identical bind (`/library:/library`), so every path any of them produces is a path all of
+  them understand. This is the same advice the *arr documentation gives for hardlinks and atomic
+  moves, so a deployment that already follows it needs nothing here.
+- **Declare the difference in a path map.** Where the mounts cannot be aligned, say so once, in
+  holdfast's configuration:
+
+  ```yaml
+  sonarr_path_map:
+    - {from: /library/tv, to: /tv}          # holdfast's view -> Sonarr's view
+  radarr_path_map:
+    - {from: /library/movies, to: /movies}  # holdfast's view -> Radarr's view
+  ```
+
+  These are the same two maps the post-swap rescan uses
+  ([docs/post-swap-hook.md](post-swap-hook.md)), read in the other direction: the intake takes a
+  path in the arr's view (`to`) and answers holdfast's (`from`). The longest matching prefix wins,
+  on whole path components, and a path no entry matches is left as it is. A path map needs no
+  `sonarr_url` or `radarr_url` beside it: the intake works without the rescan client.
+
+  holdfast will not guess a prefix that is not written down - guessing a path on a tool that
+  replaces originals is not a trade worth making.
+
+The mapped path is then resolved (symbolic links followed) **before** it is checked against
+`library_roots`, exactly as a path sent to `POST /api/scan` is, so a link pointing outside your
+library is refused rather than acted on. A path carrying a `.` or `..` segment, a doubled slash or
+a trailing slash is refused outright (`path-not-clean`), unmapped: an arr does not send one.
+
+### Anything else: `POST /api/scan`
+
+`POST /api/scan` is the generic form of the same thing, for whatever is not an arr: it takes a
+list of paths, in holdfast's own view, and looks at exactly those files.
 
 ```bash
 curl -sS -X POST http://holdfast:8080/api/scan \
@@ -376,85 +497,10 @@ curl -sS -X POST http://holdfast:8080/api/scan \
 ```
 
 The token is the value `server_auth_token` points at - the same one `rescan`, `pause` and
-`resume` take. With no control token configured this answers **403**, like every other
-mutating endpoint.
-
-The answer is **202** with a per-path report, and it comes back immediately: the file is
-queued, not encoded while you wait. Full request and response shapes, every refusal status,
-and the per-request limits are in [docs/api-reference.md](api-reference.md).
-
-### Sonarr / Radarr: `Connect > Custom Script`
-
-This is the route that needs nothing in between, because the *arr hands the script the
-imported file's path in its own environment variable. Add a script to the container the
-*arr runs in, and point `Settings > Connect > + > Custom Script` at it with **On Import**
-and **On Upgrade** ticked:
-
-```bash
-#!/bin/sh
-# Sonarr sets sonarr_episodefile_path; Radarr sets radarr_moviefile_path.
-# On a Test both are empty, which is how this exits 0 without calling anything.
-path="${sonarr_episodefile_path:-$radarr_moviefile_path}"
-[ -n "$path" ] || exit 0
-
-curl -sS --fail-with-body -X POST http://holdfast:8080/api/scan \
-  -H "Authorization: Bearer ${HOLDFAST_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "$(printf '{"paths":["%s"]}' "$path")"
-```
-
-### Sonarr / Radarr: `Connect > Webhook`
-
-The Webhook connection posts **the *arr's own JSON**, which carries the path under
-`episodeFile.path` (Sonarr) or `movieFile.path` (Radarr), inside an envelope with an
-`eventType` and a good deal else. holdfast does not parse it: it reads `{"paths": [...]}`
-and nothing else, deliberately, because a webhook payload shape is a third party's schema
-and this endpoint is not an *arr client. So the Webhook connection reaches holdfast through
-a shim that reshapes the body - anything that speaks HTTP will do:
-
-| Field | Value |
-|---|---|
-| URL | `http://your-shim:9000/sonarr` |
-| Method | `POST` |
-| Username / Password | leave empty - holdfast takes a bearer token, not basic auth |
-
-and the shim forwards, adding the header and picking the one field out:
-
-```bash
-# jq -r '.episodeFile.path // .movieFile.path' turns the *arr envelope into the path,
-# and the body holdfast reads is built from that and nothing else.
-curl -sS -X POST http://holdfast:8080/api/scan \
-  -H "Authorization: Bearer ${HOLDFAST_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "$(jq -c '{paths: [(.episodeFile.path // .movieFile.path)]}' <<<"$arr_payload")"
-```
-
-If you would rather not run a shim, use the Custom Script route above.
-
-### The paths must be the paths holdfast sees
-
-**This is the one thing that bites.** Sonarr sends the path *it* knows the file by, and
-that is the path inside **Sonarr's** container. holdfast resolves what it is sent against
-its own filesystem and against its own `library_roots`, so `/tv/Show/S01E01.mkv` from
-Sonarr means nothing to a holdfast that mounts the same file at
-`/library/tv/Show/S01E01.mkv`: the submission is **rejected**, under
-`outside-library-roots` or `not-a-regular-file`, and reported as such in the response. It
-is never silently ignored, and it never reaches a file holdfast was not pointed at.
-
-Two ways out, and the first is much better:
-
-- **Mount the library at the same path in both containers.** Give Sonarr, Radarr and
-  holdfast the identical bind (`/library:/library`), so every path any of them produces is
-  a path all of them understand. This is the same advice the *arr documentation gives for
-  hardlinks and atomic moves, so a deployment that already follows it needs nothing here.
-- **Rewrite the prefix in the shim or the script**, if the mounts genuinely cannot be
-  aligned: `path=$(printf '%s' "$path" | sed 's|^/tv/|/library/tv/|')`. Keep the rewrite in
-  one place. holdfast will not guess it for you - guessing a path prefix on a tool that
-  deletes originals is not a trade worth making.
-
-A submitted path is resolved (symbolic links followed, `..` resolved away) **before** it is
-checked against `library_roots`, so a path that climbs out of your library, or a link
-pointing outside it, is refused rather than acted on.
+`resume` take, and **not** the webhook token. With no control token configured this answers
+**403**, like every other mutating endpoint. It applies no path map: the paths it is sent are
+judged as they stand. Full request and response shapes, every refusal status and the per-request
+limits are in [docs/api-reference.md](api-reference.md).
 
 ## GPU passthrough
 

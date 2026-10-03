@@ -119,6 +119,11 @@ holdfast sees it, `to` is the same directory as that service sees it.
 The Plex play hold uses `plex_path_map` in the other direction, to turn the file Plex says it is
 playing back into the path holdfast knows it by.
 
+The webhook intake uses `sonarr_path_map` and `radarr_path_map` in that other direction too, to
+turn the path an arr announces an import by into the path holdfast knows the file by. It needs
+neither `sonarr_url` nor `radarr_url`: the maps are read whether or not the rescan target is on
+([docs/docker.md](docker.md#telling-holdfast-about-one-file-sonarr--radarr)).
+
 <a id="x265-warning"></a>
 
 ## Warning: an arr rescan can undo holdfast's work

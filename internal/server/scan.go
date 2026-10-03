@@ -189,43 +189,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results := make([]scanResult, 0, len(paths))
-	accept := make([]int, 0, len(paths)) // indexes into results, in submission order
-	seen := map[string]bool{}
-	for _, p := range paths {
-		resolved, rule, detail, ok := s.subs.Judge(p)
-		switch {
-		case !ok:
-			// Not retryable: every eligibility rule is a property of the path and of the
-			// configuration, and neither changes because the same path arrives again.
-			results = append(results, scanResult{Path: p, Rule: rule, Detail: detail})
-		case seen[resolved]:
-			results = append(results, scanResult{Path: p, Rule: ruleDuplicate, Detail: fmt.Sprintf(
-				"%s was already named in this request and is accepted at most once", resolved)})
-		default:
-			seen[resolved] = true
-			results = append(results, scanResult{Path: p, Accepted: true, Resolved: resolved})
-			accept = append(accept, len(results)-1)
-		}
-	}
-
-	// Offered only now, after every path has been judged, so a queue that fills partway
-	// through reports exactly which paths it could not take.
-	full := false
-	for _, i := range accept {
-		if !s.subs.Offer(results[i].Resolved) {
-			full = true
-			results[i].Accepted = false
-			results[i].Resolved = ""
-			results[i].Rule = ruleQueueFull
-			// The one per-path refusal that IS retryable: the queue drains, and nothing
-			// about this path was decided.
-			results[i].Retryable = true
-			results[i].Detail = fmt.Sprintf(
-				"the submission queue is full (capacity %d); this path was NOT taken and nothing was "+
-					"recorded for it - retry it", s.subs.Cap())
-		}
-	}
+	results, full := s.admit(paths)
 
 	body := scanResponse{Results: results}
 	for _, res := range results {
@@ -256,6 +220,51 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// admit is the ONE admission step every network caller of the targeted scan goes through:
+// POST /api/scan and the webhook intake both hand it their paths and report what it
+// answers. Each path is judged by the engine's own eligibility decision, a path named twice
+// is accepted at most once, and only then are the passing paths offered to the queue. It
+// returns one result per path, in order, and whether the queue could not take one.
+func (s *Server) admit(paths []string) (results []scanResult, full bool) {
+	results = make([]scanResult, 0, len(paths))
+	accept := make([]int, 0, len(paths)) // indexes into results, in submission order
+	seen := map[string]bool{}
+	for _, p := range paths {
+		resolved, rule, detail, ok := s.subs.Judge(p)
+		switch {
+		case !ok:
+			// Not retryable: every eligibility rule is a property of the path and of the
+			// configuration, and neither changes because the same path arrives again.
+			results = append(results, scanResult{Path: p, Rule: rule, Detail: detail})
+		case seen[resolved]:
+			results = append(results, scanResult{Path: p, Rule: ruleDuplicate, Detail: fmt.Sprintf(
+				"%s was already named in this request and is accepted at most once", resolved)})
+		default:
+			seen[resolved] = true
+			results = append(results, scanResult{Path: p, Accepted: true, Resolved: resolved})
+			accept = append(accept, len(results)-1)
+		}
+	}
+
+	// Offered only now, after every path has been judged, so a queue that fills partway
+	// through reports exactly which paths it could not take.
+	for _, i := range accept {
+		if !s.subs.Offer(results[i].Resolved) {
+			full = true
+			results[i].Accepted = false
+			results[i].Resolved = ""
+			results[i].Rule = ruleQueueFull
+			// The one per-path refusal that IS retryable: the queue drains, and nothing
+			// about this path was decided.
+			results[i].Retryable = true
+			results[i].Detail = fmt.Sprintf(
+				"the submission queue is full (capacity %d); this path was NOT taken and nothing was "+
+					"recorded for it - retry it", s.subs.Cap())
+		}
+	}
+	return results, full
+}
+
 // scanRefusal is a whole-request refusal: the request never reached the per-path stage.
 // It carries the same three things every per-path refusal carries - a stable token, whether
 // a retry could succeed, and the reason in words - so a caller reads one shape.
@@ -282,6 +291,24 @@ type bodyRefusal struct {
 	refusal scanRefusal
 }
 
+// readBoundedBody reads a request body under MaxScanBodyBytes, the one body bound every
+// caller of the targeted scan shares. A body over the bound is a 413 naming it, and a body
+// that cannot be read is a 400; either way nothing was parsed and nothing was enqueued.
+func readBoundedBody(w http.ResponseWriter, r *http.Request) ([]byte, *bodyRefusal) {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxScanBodyBytes))
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			return nil, &bodyRefusal{http.StatusRequestEntityTooLarge, scanRefusal{ruleBodyTooLarge, false, fmt.Sprintf(
+				"request body is larger than the maximum this endpoint accepts (%d bytes); "+
+					"nothing was enqueued", MaxScanBodyBytes)}}
+		}
+		return nil, &bodyRefusal{http.StatusBadRequest, scanRefusal{ruleUnreadableBody, false,
+			"could not read the request body: " + err.Error()}}
+	}
+	return raw, nil
+}
+
 // readScanBody parses and bounds the request body, returning the submitted paths IN
 // ORDER. Every way a body can be wrong is a refusal that processes nothing and records
 // nothing, and each one says what was wrong:
@@ -298,16 +325,9 @@ func readScanBody(w http.ResponseWriter, r *http.Request) ([]string, *bodyRefusa
 		return &bodyRefusal{http.StatusBadRequest, scanRefusal{ruleMalformedBody, false, msg}}
 	}
 
-	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxScanBodyBytes))
-	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			return nil, &bodyRefusal{http.StatusRequestEntityTooLarge, scanRefusal{ruleBodyTooLarge, false, fmt.Sprintf(
-				"request body is larger than the maximum this endpoint accepts (%d bytes); "+
-					"nothing was enqueued", MaxScanBodyBytes)}}
-		}
-		return nil, &bodyRefusal{http.StatusBadRequest, scanRefusal{ruleUnreadableBody, false,
-			"could not read the request body: " + err.Error()}}
+	raw, bad := readBoundedBody(w, r)
+	if bad != nil {
+		return nil, bad
 	}
 
 	var obj map[string]json.RawMessage

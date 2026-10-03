@@ -319,7 +319,8 @@ func describedKey(declared map[string][]Response, method, path string) (string, 
 //
 // 401 and 403 are the token gates' own answers and belong to every endpoint behind one:
 // requireReadToken answers 401 on the reads while a read token is configured, and
-// requireToken answers 403 with control disabled and 401 on a wrong credential.
+// requireToken answers 403 with control disabled and 401 on a wrong credential, and
+// requireWebhookToken answers the same two on the webhook intake.
 func declaredResponses() (map[string][]Response, error) {
 	var firstErr error
 	body := func(v any) Shape {
@@ -428,6 +429,20 @@ func declaredResponses() (map[string][]Response, error) {
 		"* /metrics": {
 			{Status: http.StatusOK, MediaType: mediaMetric, Body: Shape{Kind: kindText}},
 		},
+	}
+	// The webhook intake: one description per arr and per method, each the same answers
+	// behind the webhook gate (401 on a wrong credential, 403 with the intake disabled).
+	for _, app := range webhookApps {
+		for _, method := range []string{http.MethodPost, http.MethodPut} {
+			declared[method+" "+WebhookPathPrefix+app.name] = []Response{
+				jsonOK(http.StatusOK, webhookResponse{}),
+				jsonOK(http.StatusAccepted, webhookResponse{}),
+				jsonOK(http.StatusBadRequest, webhookResponse{}),
+				jsonOK(http.StatusRequestEntityTooLarge, webhookResponse{}),
+				jsonOK(http.StatusServiceUnavailable, webhookResponse{}),
+				text(http.StatusUnauthorized), text(http.StatusForbidden),
+			}
+		}
 	}
 	if firstErr != nil {
 		return nil, firstErr
