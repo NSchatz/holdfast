@@ -957,8 +957,8 @@ dry_run: false
 #                              #     server_auth_token: file:/run/secrets/holdfast-token
 # server_read_token: ""        # A SECRET REFERENCE to the bearer token the READ endpoints
 #                              #   (/api/summary, /api/queue, /api/history, /api/events,
-#                              #   /api/health) require. EMPTY IS THE DEFAULT AND MEANS THE
-#                              #   READ SURFACE IS OPEN: those five answer any caller, and they carry the
+#                              #   /api/health, /api/nodes) require. EMPTY IS THE DEFAULT AND MEANS THE
+#                              #   READ SURFACE IS OPEN: those six answer any caller, and they carry the
 #                              #   full path of every file holdfast has seen, so on a
 #                              #   non-loopback server_addr that is your whole library
 #                              #   served without a credential. Set it and they need

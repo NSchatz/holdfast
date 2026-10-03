@@ -35,6 +35,7 @@ type countingStore struct {
 	aggregates int
 	held       int
 	reclaimed  int
+	rootTotals int
 
 	// aggErr, when set, is the error EVERY aggregate reports on its own figure - the
 	// store's own per-figure failure discipline, which is how a refresh fails without
@@ -58,6 +59,14 @@ func (c *countingStore) List(context.Context, []store.Status, int) ([]store.Job,
 	return nil, nil
 }
 
+// ListPage is the history endpoint's paged read: a capped list read like List, counted with it.
+func (c *countingStore) ListPage(context.Context, []store.Status, *store.PagePosition, int) ([]store.Job, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.list++
+	return nil, false, nil
+}
+
 func (c *countingStore) CountRows(_ context.Context, _ []store.Status) store.RowTotal {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -73,6 +82,23 @@ func (c *countingStore) HeldByUndoWindow(context.Context) (int64, error) {
 	defer c.mu.Unlock()
 	c.held++
 	return 0, nil
+}
+
+// HeldBySource and RootTotals are the two sizing reads GET /api/summary issues (S0169). The
+// first is the held read split by source, so it is counted with it; the second is counted
+// on its own, outside the frame's whole-ledger set, because no frame issues it.
+func (c *countingStore) HeldBySource(context.Context) ([]store.HeldSource, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.held++
+	return nil, nil
+}
+
+func (c *countingStore) RootTotals(context.Context) ([]store.RootTotal, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.rootTotals++
+	return nil, nil
 }
 
 func (c *countingStore) ReclaimedTotal(context.Context) (int64, error) {
@@ -117,7 +143,7 @@ func (c *countingStore) Aggregates(context.Context) store.Aggregates {
 func (c *countingStore) reads() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.summary + c.list + c.countRows + c.aggregates + c.held
+	return c.summary + c.list + c.countRows + c.aggregates + c.held + c.rootTotals
 }
 
 // wholeLedgerReads is the cost the refresh interval bounds: the six aggregates (one
@@ -142,6 +168,7 @@ func (c *countingStore) reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.summary, c.list, c.countRows, c.aggregates, c.held, c.reclaimed = 0, 0, 0, 0, 0, 0
+	c.rootTotals = 0
 }
 
 // countingHub builds a real Hub over the counting double, with the baseline read the

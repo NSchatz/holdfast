@@ -375,6 +375,9 @@ func (h *Hub) serveAcquire(w http.ResponseWriter, r *http.Request) {
 		h.unavailable(w, errNotReady, "the server is not leasing work yet")
 		return
 	}
+	// The node asked for work in a mode this build serves, at this build's version: what it
+	// stated is what the reporting view says of it, whatever this poll is answered with.
+	h.sawLocked(req.Node, req.Mode, req.Encoders)
 	if c := h.coolingLocked(req.Node); c != nil {
 		rep := h.coolingReplyLocked(c)
 		h.mu.Unlock()

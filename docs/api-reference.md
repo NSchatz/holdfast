@@ -11,11 +11,12 @@ per-field reference `README.md` points at rather than restates.
 |---|---|---|
 | `GET /` | - | a plain-text page naming the endpoints and carrying the AGPL section 13 source offer. Never gated: it holds no library datum. A request whose `Accept` header names `text/html` is answered, on a build that embeds the web UI, with the web UI's page instead, carrying the same offer ([design](design/web-ui.md#root)). The web UI shows the summary, queue, history, health and node reads and drives pause, resume, the two scans and the exclusions through the endpoints in this table, with the token it is given sent as `Authorization: Bearer`; it calls nothing else, so this API remains the full interface ([views](design/web-ui.md#views), [controls](design/web-ui.md#controls)) |
 | `GET /assets/*` | - | the static files the web UI's page names (its script and stylesheet), by exact name; `404` for anything else and on a build that embeds no UI. Never gated: they hold no library datum |
-| `GET /api/summary` | read | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** (see below). It does not carry `bytes_held_by_undo_window`: that figure rides the SSE snapshot and the `/metrics` gauge only |
+| `GET /api/summary` | read | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** + `bytes_held_by_undo_window` (the figure the SSE snapshot and the `/metrics` gauge report) + the **per-root sizing figures** under `roots` and `roots_unattributed` (see *Sizing a run* below). With `dry_run: false` the per-status counts report `would-transcode` rows inside `pending` |
 | `GET /api/queue` | read | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
-| `GET /api/history?limit=N` | read | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
+| `GET /api/history?limit=N&status=S&cursor=C` | read | terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, newest first, one capped page at a time, optionally filtered by status, with `history_total` and `next_cursor` - see *`GET /api/history` - filtering and paging* |
 | `GET /api/events` | read | SSE: a fresh snapshot on every state change |
 | `GET /api/health` | read | the library health sweep: its state, the sweep under way and the last one that finished, each with its counts and the files it found corrupt or unreadable - see *`GET /api/health`* below. Report only: no route acts on a finding |
+| `GET /api/nodes` | read | the worker nodes this server knows of and the leases it has granted them, newest first, capped, with `leases_total` - see *`GET /api/nodes`* below. A read only: it serves no lease id and acts on no lease. The node token does not open it |
 | `GET /api/schema` | - | a machine-readable document of this surface, GENERATED from the router and the response types this build actually serves. Never gated: it carries endpoint paths, methods, status codes, media types, field names and field types, and no value of any kind - see below |
 | `GET /metrics` | - | Prometheus metrics (when `metrics_enable`, default on). Never gated: it names no file |
 | `POST /api/rescan` | control | start a library scan (409 if paused / scanning / outside the run window) |
@@ -124,10 +125,13 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | `deinterlaced` | any job that reached the encoder | whether the replacement was produced by **deinterlacing** the source. `true` or `false` is a measurement this build took; `null` is NOT RECORDED - a row written before the column existed, or a job that never reached an encode. The two are different facts about a source that has since been deleted, so `null` is never reported as not-deinterlaced |
 | `deinterlace_filter` | a job that deinterlaced | the filter and its parameters, whole (`yadif=mode=send_frame:parity=auto:deint=all`) - the same filter the perceptual gate produced its reference with, so the score beside it is a measurement of THIS encode. `null` on a job that deinterlaced nothing, which `deinterlaced: false` already states |
 | `source_codec` | would-transcode | the video codec the SOURCE was in when a dry run decided it - `null` when it was never read |
+| `source_codec` | skipped | the video codec the SOURCE is in, as the probe snapshot the skip was decided off named it - under a real run and a dry run alike. `null` when no snapshot named one: a guard that fired in front of the probe (`restored-original` always; `hardlinked`, `operator-excluded` and `symlinked-source` under a root whose configuration needs no source height, where nothing had probed the file yet), a file with no readable video stream, or a row written before skips recorded it. No probe is ever spent to fill it, and a row already written is never backfilled |
+| `source_codec` | encoding, verifying | the codec the guards judged when they admitted this attempt to the encoder (see [An in-flight job](#an-in-flight-job---how-far-it-has-got)). A `done` and a `failed` row record none |
 | `source_bytes`, `output_bytes` | done | the sizes either side of the swap |
 | `source_bytes` | would-transcode | the size of the file that was decided. `output_bytes` is `null`: nothing encoded it, so there is no output to have a size |
+| `source_bytes` | encoding, verifying | the size of the source this attempt was decided on, from the same read its row is keyed by. `output_bytes` is `null` until the job is done |
 | `encode_ms` | done, and a failure after the encode ran | wall-clock encode time |
-| `source_width`, `source_height` | any row a probe reached | the SOURCE's pixel dimensions. A library root can band its thresholds by source height (see [docs/profiles.md](profiles.md#resolution-rules)), so this is what says which band the file was judged in. `null` when nothing measured it: a guard that fired in front of the probe, or a row written before these columns existed |
+| `source_width`, `source_height` | any row a probe reached | the SOURCE's pixel dimensions. A library root can band its thresholds by source height (see [docs/profiles.md](profiles.md#resolution-rules)), so this is what says which band the file was judged in. `null` when nothing measured it: a guard that fired in front of the probe, or a row written before these columns existed. A `hardlinked`, `operator-excluded` or `symlinked-source` skip carries them where its root's configuration had already probed the file (a `max_height` ceiling, or rules that band on source height) and `null` elsewhere. An **encoding** or **verifying** row carries them too, from the decision that admitted it |
 | `output_width`, `output_height` | any job whose encoder produced a file | the OUTPUT's pixel dimensions, measured on the file the encoder wrote and recorded whether the gates then accepted it or rejected it. A job under no `max_height` ceiling changes nothing about the picture's size, so they are the source's own dimensions on such a job - which is what makes a row where they are not a fact worth having. `null` when no output was produced |
 | `downscaled` | any job that reached the encoder | whether the replacement was produced by **scaling the picture down** to a configured `max_height`. `true` or `false` is a measurement this build took; `null` is NOT RECORDED - a row written before the column existed, or a job that never reached an encode. The two are different facts about a source that has since been deleted, so a `null` is never reported as a job that scaled nothing |
 | `downscale_scaler` | a job that scaled | the resampler that did it (`lanczos`). Two resamplers produce two different pictures from one source, so "scaled" with none named is not a provenance claim. The dimensions it produced are `output_width`/`output_height`. `null` on a job that scaled nothing, which `downscaled: false` already states |
@@ -135,8 +139,9 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | `guard_attributes`, `guard_time_resolution` | any job that reached the swap | which source attributes the source-mutation guard compared (`size,mtime`) and the resolution of the timestamp it compared (`1s`) - the granularity that check actually achieved |
 | `guard_residual_window` | as above | which of the two documented residual windows applies to the storage the guard ran against: `residual-window-local` or `residual-window-network`. A **class label**, never a duration - see [docs/filesystem.md](docs/filesystem.md#residual-window-local) |
 | `swap_cause` | a swap failure with a distinct cause | today only `cross-filesystem` - the temp and the target were not on the same mounted filesystem. Absent for every other failure |
-| `library_root` | any row this build decided | the **cleaned path of the library root** whose profile decided the file. `null` when it was not recorded: a row written before per-library profiles existed, or one no profile decided (a `restored-original` skip is an operator's act, not a gate's) |
+| `library_root` | any row this build decided, and an encoding or verifying row | the **cleaned path of the library root** whose profile decided the file. `null` when it was not recorded: a row written before per-library profiles existed, one no profile decided (a `restored-original` skip is an operator's act, not a gate's), or a `probing` row, whose attempt has not decided yet |
 | `profile_digest` | as above | a stable identifier for that root's **resolved** overridable knobs. `null` on the same rows `library_root` is null on |
+| `priority` | every row, on `/api/queue`, `/api/history`, the SSE snapshot and `/api/search` | the file's **queue priority as the configuration states it now**: its deciding rule's, else its encode profile's, else its library root's, else `0` ([design](design/queue-order.md#priority)). It is not read from the row - a priority is recorded on no row - but worked out when the row is served, from the path and the `source_height` the row carries; serving it reads no file. `null` when it is not known: the path lies under no configured library root, or the root's rules band on the source height and name a priority while the row records no `source_height` (a queued file nothing has probed yet). `0` is a real priority and is never used for "not known". **Display only**: no request sets it, it orders nothing in this response, and `holdfast export` always writes it as `null`, because the export reads a ledger and no configuration |
 | `dropped_streams` | any job that reached the encoder | the source streams this job **selected away**, each as `{index, type, language}` - the index it sat at in the container, its ffprobe `codec_type`, and the language tag as the SOURCE spelled it (`null` when it carried none). `[]` means the job applied a selection and dropped **nothing**; `null` means **not recorded** - a row written before this existed, or one that never reached a selection. The two are different facts and the dropped bytes are not recoverable from the replacement, so this row is the only record there is. See [docs/profiles.md](profiles.md#stream-selection) |
 | `audio_tracks` | any job whose configuration transforms audio and that reached the encoder | what the job did to each audio track (see [docs/design/audio.md](design/audio.md)), each as `{source_index, output_index, action, reason, codec, layout, sample_rate, bitrate_kbps, loudness, measured_lufs, achieved_lufs}`. `action` is `copied`, `reencoded`, `kept`, `added`, `downmix` or `downmix-skipped` (no track added; `output_index` is then `null`); `reason` says why a track was copied or a downmix not added; `codec` to `bitrate_kbps` are `null` on a copied track; `loudness` is `linear` or `dynamic` as the encoder reported, `not-recorded` where no report came back, and `null` where the track was not normalised. `null` for the whole field means **not recorded**: every job whose configuration sets no audio key, and every row written before this existed |
 | `subtitle_sidecars` | a `done` job under `subtitle_sidecars: text` | per carried subtitle stream, `{index, codec, language, forced, path, skipped, detail, events, fonts_lost}`: `path` is the sidecar this job published, or `null` with `skipped` naming why none was (a token such as `bitmap-subtitle`, `mov-text-not-converted`, `sidecar-exists-never-overwritten` or `sidecar-event-count-mismatch`, with `detail` carrying the error of a failure); `events` is the event count the parse-back gate compared; `fonts_lost` marks an ASS sidecar of a source with font attachments. `[]` means the source carried no subtitle stream; `null` means **not recorded** - the key was off, or the row predates the field. See [docs/design/subtitles.md](design/subtitles.md#sidecars) |
@@ -363,6 +368,63 @@ server is not waiting on is **503** `not_ready` too. `node_max_transfers` counts
 and uploads together. Every **410** carries `Cache-Control: no-store`. No endpoint
 here restores, requeues, resolves or re-opens anything.
 
+### `GET /api/nodes` - the worker nodes and their leases
+
+<a id="nodes-read"></a>
+
+Which nodes this server knows of, what each is doing, and how each lease it granted stood. A **read**
+endpoint, gated exactly as `GET /api/queue` is: open unless `server_read_token` is set, and then the
+read token or the control token. It is not one of the lease endpoints and `node_token` does not open
+it: with a read token set the node token is answered `401`.
+
+```json
+{
+  "enabled": true,
+  "now": 1700000000,
+  "nodes": [
+    { "node": "n1", "mode": "mapped", "encoders": ["libx265"], "waiting": false,
+      "cooling_until": null, "leases_active": 1 }
+  ],
+  "leases": [
+    { "node": "n1", "path": "/library/films/a.mkv", "state": "granted", "epoch": 3,
+      "granted_at": 1700000000, "updated_at": 1700000010, "expires_at": 1700000070,
+      "ended_at": null, "reason": null, "source_bytes": 123456, "output_bytes": null }
+  ],
+  "leases_total": { "available": true, "unavailable": "", "covers": "every lease in the ledger",
+                    "cap": 200, "age_seconds": 0, "count": 12 }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `enabled` | whether this server takes worker nodes: `true` once the lease protocol is wired (a `serve` with `node_token` set). `false` answers `nodes: []`, `leases: []` and a `leases_total` of 0 without reading the ledger |
+| `now` | the server's clock, unix seconds, the basis for every time below |
+| `nodes` | one entry per node name the server knows of or a listed lease names, by name ascending. Always an array |
+| `nodes[].mode` | the mode of the node's most recent poll, `"mapped"` or `"http"`. `null` when this server process has seen no poll from it, as after a restart, when a node is known only by its lease |
+| `nodes[].encoders` | the encoders that poll reported. `null` on the same terms as `mode` |
+| `nodes[].waiting` | a poll of the node's is open right now |
+| `nodes[].cooling_until` | the instant until which the node is offered nothing because its leases kept ending without an output; `null` when it is not cooling off |
+| `nodes[].leases_active` | the node's leases in a live state (`granted` or `uploaded`) as this server process holds them |
+| `leases` | at most **200** leases, live and ended alike, newest `granted_at` first, then `path` ascending, then `epoch` descending. Always an array |
+| `leases[].state` | `granted`, `uploaded`, `completed`, `failed` or `expired` |
+| `leases[].epoch` | the lease's fencing number: one more than the last lease of the same path carried |
+| `leases[].expires_at` | when the lease runs out without a heartbeat |
+| `leases[].ended_at` | when the lease became terminal; `null` while it is live |
+| `leases[].reason` | why a `failed` or `expired` lease ended: the server's word (`expired`, `digest_mismatch`, `source_digest_mismatch`, `canceled`, `server_restart`, `not_adopted`, `poll_gone`) or, on a `failed` lease, the word its node stated. `null` on every other lease |
+| `leases[].source_bytes` | the source's size when the lease was granted |
+| `leases[].output_bytes` | the admitted upload's size; `null` until an upload is admitted, never `0` |
+| `leases_total` | the count of every lease in the ledger, in the shape `queue_total` has: `count` is `null` and `available` is `false` when it could not be read, and the leases still ship |
+
+**Never served:** a lease id, the path of a working file, any digest and any token. A lease id is what
+a heartbeat, an upload and a completion are authorised by, so a reader of this endpoint is given
+nothing it could act on a lease with. A node that states its own lease id as its failure reason has
+that reason served as `node_failed`.
+
+The endpoint grants, ends, adopts and re-opens nothing, and writes no row. If the listed leases
+cannot be read it answers `500`, as the other reads do. Terminal leases older than seven days are
+pruned, except the newest of each path ([design](design/nodes.md#leases)), so the listing is recent
+history and not a full one.
+
 ### The webhook intake - `POST /api/webhook/sonarr` and `POST /api/webhook/radarr`
 
 <a id="webhook-intake"></a>
@@ -581,13 +643,25 @@ concludes "nothing qualifies".
 Two properties are load-bearing and neither is negotiable:
 
 - **It counts decisions, never transcodes.** Nothing has encoded these files, so the row carries no output
-  size, no percentage reclaimed and no VMAF, so there is no projected saving to report anywhere. The
+  size, no percentage reclaimed and no VMAF, and no row carries a projected saving. The
   figure beside the candidate rows is the **total source bytes** they account for and nothing else: the
   size of what is under consideration, with the rows it left out for want of a recorded size counted and
-  reported beside it.
+  reported beside it. `GET /api/summary` reports those totals per library root, with a projection measured
+  on that root's own completed encodes where it has any (see *Sizing a run*).
 - **It is terminal, but re-claimable.** Unlike `done` and `skipped`, a recorded decision does not exclude
   the file from a later run: set `dry_run: false`, run again, and exactly the files that list named are
   the files that get transcoded. Two dry runs over an unchanged file still report **one** candidate.
+- **Under `dry_run: false` it is reported as `pending`.** A daemon serving with `dry_run: false` over a
+  ledger an earlier dry run wrote counts those rows inside `pending` on the three per-status surfaces - the
+  `summary` map of `GET /api/summary`, the same map on the SSE snapshot, and `holdfast_queue_depth{state}` -
+  and reports no `would-transcode` key or label value there. The row is work a run will claim, exactly as a
+  `pending` row is, and a dry run's conclusion sitting beside real states said nothing about what the engine
+  would do. The total is conserved: `pending` is the pending rows plus the `would-transcode` rows, and a
+  ledger with neither reports no `pending` key at all. **Only the report changes.** The ledger row keeps its
+  `would-transcode` status and its recorded decision; `/api/queue`, `/api/history`, `holdfast export` and the
+  `outcomes` aggregate still show it as the row it is; and a run that claims the file passes it through
+  every skip guard again before any encode, so a file a guard now refuses ends `skipped` and is not encoded.
+  Under `dry_run: true` all three surfaces report `would-transcode` as its own state.
 
 **Every terminal row carries all of this per file** - size before → after and percent reclaimed, the
 encoder, the encode duration, and the VMAF pair with its model, its pooling and its luma-only blind spot -
@@ -601,6 +675,26 @@ A terminal row says what happened; an **active** row says what is happening. Eve
 snapshot carries `now`, the server's clock when the frame was built - together those are how a client
 computes **how long a file has been in the state it is in**, from the timestamps in each frame rather
 than by counting up locally.
+
+An **encoding** or **verifying** row carries the **decision facts** of the attempt in flight - how big
+the running job is, what it is and which drive it is on:
+
+| Field | What it is |
+|---|---|
+| `source_bytes` | the size of the source, from the read the job's row is keyed by |
+| `source_codec` | the codec the source-side guards judged |
+| `source_width`, `source_height` | the dimensions the guards' probe established, `null` where it established none |
+| `library_root`, `profile_digest` | the root whose profile admitted the file, and that profile's digest |
+
+They are written once, when the source-side guards admit the file to the encoder, from values that
+decision already held, and they are read from the ledger: no file is probed or opened to serve them, so
+they are served the same whether or not the file is still at its path. They are the facts of THIS attempt.
+A claim clears whatever an earlier attempt or a dry-run decision recorded, so a **probing** row carries
+none of them - its attempt has not decided yet - and neither does a `pending` row that has never been
+claimed. Should the ledger refuse the write, the job runs exactly as it would have and the row shows them
+as `null` rather than as anything made up. The terminal write then defines the row's whole proof as it
+always has. An active row's `source_bytes` is never counted into `bytes_reclaimed_lifetime` or the
+`size_ratio` aggregate: only `done` rows contribute a size.
 
 An **encoding** row additionally carries what the encoder itself reports, read from ffmpeg's documented
 `-progress` stream rather than estimated from elapsed time:
@@ -670,6 +764,135 @@ Each one carries the same envelope, and every part of it is load-bearing:
 Every aggregate ships beside the set it covers and the count of rows it had to leave out, so a client
 never has to guess what a figure was taken over.
 
+### Sizing a run - the per-root figures on `GET /api/summary`
+
+"How big is this job, and will it fit" is answered by one `GET /api/summary`, with no access to `jobs.db`.
+Beside the fields above the summary carries the held figure and a block per configured library root:
+
+```json
+"bytes_held_by_undo_window": 53687091200,
+"roots": [
+  {
+    "root": "/mnt/media/tv",
+    "candidate_files": 7421, "candidate_excluded": 32, "candidate_bytes": 18141941858304,
+    "projection_basis_files": 310, "projected_savings_bytes": 11429423370731,
+    "bytes_held_by_undo_window": 53687091200,
+    "free_bytes": 212600881152
+  }
+],
+"roots_unattributed": {
+  "candidate_files": 0, "candidate_excluded": 0, "candidate_bytes": 0, "bytes_held_by_undo_window": 0
+}
+```
+
+| Field | What it is |
+|---|---|
+| `bytes_held_by_undo_window` (top level) | the bytes the undo window is still holding: the sum of the retained originals not restored. The same figure the SSE snapshot and the `holdfast_bytes_held_by_undo_window` gauge report |
+| `roots` | one object per configured library root, in configuration order |
+| `root` | the root's cleaned path, the spelling a job row records as `library_root` |
+| `candidate_files` | `would-transcode` rows recorded under this root that carry a source size |
+| `candidate_bytes` | the sum of those source sizes: what a real run over this root is being asked to encode |
+| `candidate_excluded` | `would-transcode` rows under this root that recorded no source size. They are counted here and summed nowhere: an absent size is not a size of zero |
+| `projection_basis_files` | `done` rows under this root that recorded both sizes: what the projection is measured on |
+| `projected_savings_bytes` | `candidate_bytes` scaled by what this root's own completed encodes saved: floor(`candidate_bytes` x S / B), where over the basis rows S is the sum of source minus output and B the sum of source. It is weighted by bytes, not a mean of per-file ratios. `null` when the basis is 0 rows: a projection from nothing would be an invention. It covers the rows the ledger still holds, so rows removed by `history_retention_rows` are not in the basis |
+| `bytes_held_by_undo_window` (per root) | the held figure restricted to retentions whose source path lies under this root |
+| `free_bytes` | bytes available to holdfast on the filesystem holding the root: the figure the engine's own pre-encode space check reads. It is per filesystem, so two roots on one filesystem report the same figure and it is **never summed** |
+| `roots_unattributed` | `candidate_files`, `candidate_excluded`, `candidate_bytes` and `bytes_held_by_undo_window` for rows and retentions no configured root accounts for: a row that recorded no library root, and a root since removed from the configuration. It has no projection and no free space |
+
+- **Every figure is an integer or `null`, and `null` is never written as `0`.** `null` says the figure could
+  not be read; a true zero (no candidates, nothing retained) is `0`. The three reads behind the block fail
+  independently: an unreadable ledger nulls the candidate and projection figures, an unreadable retention
+  table nulls every `bytes_held_by_undo_window`, and a root whose filesystem cannot be inspected - or does
+  not answer within 2 seconds, as a hung network mount does not - has a `null` `free_bytes` of its own
+  while every other root keeps its figure. The response is still `200` and every other field still ships.
+  Why: [docs/design/ledger-totals.md](design/ledger-totals.md#null-is-not-zero).
+- **The held figures add up.** The per-root `bytes_held_by_undo_window` values plus the unattributed one
+  equal the top-level figure, which is the gauge's.
+- **Candidates exist only where a dry run recorded them.** A root no dry run has looked at reports `0`
+  candidates, which says nothing was recorded and not that nothing qualifies.
+- **The candidate and projection figures are whole-ledger work**, so like the aggregates they are read at
+  most once every 30 seconds however often the summary is polled. The held and free figures are read on
+  every request.
+- **It is a read.** It writes no row, and it does not open, move, release or re-date a retained original.
+- The SSE snapshot carries the top-level `bytes_held_by_undo_window` and not the per-root block: a frame is
+  published on every state change, and a filesystem read per root per frame is a cost no subscriber asked
+  for.
+
+### `GET /api/history` - filtering and paging
+
+One response carries at most **200** rows, and the whole ledger is readable through it, one page at a
+time. Three query parameters, all optional:
+
+| Parameter | Meaning |
+|---|---|
+| `limit` | rows per page, 1 to 200. Anything else (0, a negative, more than 200, not a number) keeps 200 |
+| `status` | serve only rows in these statuses. Terminal statuses only: `done`, `skipped`, `failed`, `would-transcode`, `indeterminate`, `applied-despite-error`. Repeat the parameter, separate values with commas, or both; the filter is their union, and `status=done,failed`, `status=failed&status=done` and `status=done&status=failed` are one request |
+| `cursor` | the `next_cursor` of the previous page, exactly as it was served. Opaque: do not build one, and do not read one |
+
+The 200 body:
+
+```json
+{
+  "history": [ ... ],
+  "history_total": { "available": true, "unavailable": "", "covers": "every row in the ledger with status done, failed",
+                     "cap": 200, "age_seconds": 0, "count": 41237 },
+  "next_cursor": "eyJ2IjoxLCJ1Ijox..."
+}
+```
+
+- **Order.** Newest transition first (`updated_at` descending), then `path` ascending, then the row's
+  internal key. The order is total: no two rows compare equal, so a page boundary always falls between
+  two rows.
+- **`next_cursor`** is a string while at least one more matching row follows the page, and JSON `null`
+  on the last page. The key is always present. A last page that is exactly full still carries `null`:
+  no cursor ever leads to an empty page. To read everything, send the request, then send it again with
+  `cursor` set to each `next_cursor` until one is `null`, keeping `status` the same throughout.
+- **`history_total`** is the count of matching rows in the whole ledger - under a filter, the rows in
+  the requested statuses; `covers` names them. It is never the number of rows returned, and `cap` is
+  the limit this response applied. If it cannot be read the page and its cursor still ship, with
+  `available: false` and `count: null`.
+- **`history`** is always an array. A valid filter that matches nothing answers 200 with `[]`,
+  `next_cursor: null` and a `count` of 0.
+
+**What a traversal guarantees.** A row that exists, stays in the requested statuses and is not
+re-transitioned from the first page's read to the last page's is served exactly once. No row is served
+twice when the changes made during the traversal are stamped in a later second than every row already
+served. A cursor is a position, not a row: if the row it was issued from has since been deleted, the
+next page is the rows that follow that position.
+
+**What it does not.** `updated_at` is in whole seconds. A row that is re-transitioned in the same
+second as the position a cursor stands at, and that sorts after it, can be served a second time in its
+new state. A row not yet served that transitions again moves to the newest end and is not in this
+traversal: it is at the top of the next one. A row the ledger retention deletes during a traversal is
+not served. A consumer that needs every row as it stood at one instant should use `holdfast export`.
+
+**Refusals.** A `status` or `cursor` this endpoint cannot accept is a `400` with a JSON body, and no
+rows. It is never read as "no filter" and never answered with an empty page: an empty page for a
+mistyped status reads as "no such rows". With `server_read_token` set, a request without a valid token
+is a `401` before either parameter is looked at.
+
+```json
+{
+  "rule": "invalid-query",
+  "error": "nothing was read: the request's status and cursor could not be accepted, ...",
+  "retryable": false,
+  "parameters": [
+    { "parameter": "status", "rule": "status-not-terminal", "error": "status takes the terminal statuses only (...)" },
+    { "parameter": "cursor", "rule": "cursor-undecodable", "error": "cursor is not a token this server issued: ..." }
+  ]
+}
+```
+
+Every parameter that was wrong is named in the one response, once each, `status` before `cursor`.
+`retryable` is always `false`. Branch on the tokens, never on the words:
+
+| Token | Where | Meaning |
+|---|---|---|
+| `invalid-query` | top-level `rule` | a query parameter was refused; `parameters` says which |
+| `status-not-terminal` | `status` | a value is not one of the six terminal statuses: an unknown word, a status the queue serves (`pending`, `probing`, `encoding`, `verifying`), or an empty element (`status=`, `status=done,`). Values are exact: no other case, no surrounding space |
+| `cursor-undecodable` | `cursor` | not a token this server issued: empty, truncated, altered beyond reading, or given more than once |
+| `cursor-filter-mismatch` | `cursor` | a readable token presented with a status set other than the one it was issued under, including a token from an unfiltered request presented with a filter and the reverse. The same set in another order or spelling is accepted. Reported only when `status` itself was accepted |
+
 ### The total behind a cap
 
 `GET /api/queue` returns at most **500** rows and `GET /api/history` at most **200**. A truncated view that
@@ -681,7 +904,7 @@ in the `jobs` table**:
 | Response | Field |
 |---|---|
 | `GET /api/queue` | `queue_total` |
-| `GET /api/history?limit=N` | `history_total` |
+| `GET /api/history` | `history_total` (over the requested statuses when `status` is given) |
 | the SSE snapshot | both |
 
 ```json
@@ -924,7 +1147,7 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   | `holdfast_vmaf_score` | pooled harmonic-mean VMAF of accepted outputs | the AVERAGE fidelity being accepted. A fall toward `min_vmaf` says the encodes are getting worse and the floor is about to start rejecting them |
   | `holdfast_vmaf_min` | the WORST (sub)sampled frame's VMAF on accepted outputs | whether encodes are locally broken. The mean hides local damage, so a falling worst frame under a steady mean is the signal nothing else carries. Approaching `vmaf_min_pool` (60 by default) means files are about to be rejected |
   | `holdfast_vmaf_chroma` | the worst frame's chroma PSNR, **in dB** (not a 0-100 VMAF) | whether the COLOUR survived. The VMAF model is luma-only, so this is the only series that sees a flattened or desaturated encode. Around 40 dB is healthy; a fall toward `vmaf_min_chroma` (30 dB by default) is colour damage |
-  | `holdfast_queue_depth{state}` | jobs in each status, read from the store at scrape time | live queue depth and ledger growth. A `pending` that only climbs means work is arriving faster than it is being done |
+  | `holdfast_queue_depth{state}` | jobs in each status, read from the store at scrape time. With `dry_run: false` there is no `would-transcode` state: those rows are counted in `pending`, as they are in the summary | live queue depth and ledger growth. A `pending` that only climbs means work is arriving faster than it is being done |
   | `holdfast_bytes_held_by_undo_window` | bytes the undo window is still HOLDING, read at scrape time | why free space has not gone up. A retained original is a second link to the source's bytes, so reclaimed space is not returned to the filesystem until the window releases it. Falls as originals age out |
   | `holdfast_health_sweep_files_checked_total{result}` | files the library health sweep fully decoded and recorded, by result (`ok`, `corrupt`, `unreadable`; each pre-created at `0`) | the sweep's progress, and its findings as they arrive. A rise in `corrupt` is damage on disk the encode pipeline never looked for. Flat while a sweep is due means it is waiting on the run window, the load cap or a pause |
   | `holdfast_health_sweep_corrupt_files` | files the newest FINISHED health sweep found corrupt, read at scrape time | the damage the library holds as of that sweep. Absent until a sweep has finished: nobody having looked is not zero. Alert on any rise |
@@ -936,9 +1159,12 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   happened**: under `dry_run: true` holdfast applies every guard and encodes, swaps and deletes nothing, so
   that series is "how many files a real run would transcode" and not "how many it did". Every one of those
   series is pre-created, so each reads `0` before its first event and an alert can be written against the
-  candidate count before the first dry run. The same value appears as a `holdfast_queue_depth{state}`
-  series, where it is counted as itself and **not** inside `probing`: that state means claimed and not yet
-  decided.
+  candidate count before the first dry run. Under `dry_run: true` the same value appears as a
+  `holdfast_queue_depth{state}` series, where it is counted as itself and **not** inside `probing`: that
+  state means claimed and not yet decided. Under `dry_run: false` the gauge has no `would-transcode` state
+  and counts those rows inside `pending`, because a run will claim them; the ledger row keeps its status,
+  and `holdfast_files_total{outcome="would-transcode"}` is unchanged - it counts the decisions this process
+  took, so on a live engine it does not move.
 
   The `guard` label set is the skip vocabulary enumerated under [the recorded outcome](#the-recorded-outcome---the-proof-a-swap-was-safe),
   plus `unclassified` for a reason this build does not recognise. The `gate` label set is

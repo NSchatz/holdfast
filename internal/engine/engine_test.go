@@ -3248,9 +3248,9 @@ func (w *writeCountingStore) ClearSkip(ctx context.Context, path, fingerprint, r
 }
 
 func (w *writeCountingStore) RecordSkip(ctx context.Context, path, fingerprint, reason string,
-	by store.Decision, profile string) (bool, error) {
+	by store.Decision, profile string, src store.SourceFacts) (bool, error) {
 	w.note(path, "RecordSkip:"+reason)
-	return w.Store.RecordSkip(ctx, path, fingerprint, reason, by, profile)
+	return w.Store.RecordSkip(ctx, path, fingerprint, reason, by, profile, src)
 }
 
 func (w *writeCountingStore) Finish(ctx context.Context, path, fingerprint string, s store.Status,
@@ -4450,5 +4450,157 @@ func TestSourceDamaged_AC15_RequeueReOffersItsRows(t *testing.T) {
 	oneshot(t, eng)
 	if got := claims.taken(); len(got) != 1 || got[0] != src {
 		t.Errorf("after the requeue the next pass claimed %v, want [%s]", got, src)
+	}
+}
+
+// TestS0172_AC8_ALiveClaimOfAWouldTranscodeRowStillPassesEveryGuard grades [AC-8] of S0172.
+//
+// A live engine now REPORTS a would-transcode row as pending work. This is the proof that
+// the report promoted nothing: the row a dry run recorded is not an approved encode. When a
+// live run claims that file and a skip guard now refuses it - because the configuration
+// moved, or because the library did - the row ends `skipped` naming that guard, the encoder
+// is never reached, and the file is byte-identical.
+func TestS0172_AC8_ALiveClaimOfAWouldTranscodeRowStillPassesEveryGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		move  func(t *testing.T, cfg *config.Config, candidate string)
+		guard string
+	}{
+		{
+			name: "the configuration moved: a bitrate floor above the file",
+			move: func(_ *testing.T, cfg *config.Config, _ string) {
+				cfg.MinBitrateKbps = 1_000_000
+			},
+			guard: SkipLowBitrate,
+		},
+		{
+			name: "the library moved: a file now sits where the replacement would be written",
+			move: func(t *testing.T, _ *config.Config, candidate string) {
+				ffmpeg, _ := tools(t)
+				mkHevc(t, ffmpeg, strings.TrimSuffix(candidate, ".mkv")+".mp4", "8M")
+			},
+			guard: SkipTargetExists,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ffmpeg, ffprobe := tools(t)
+			ctx := context.Background()
+			root := t.TempDir()
+			candidate := filepath.Join(root, "candidate.mkv")
+			mkH264(t, ffmpeg, candidate, "8M")
+
+			cfg := baseCfg(root)
+			cfg.ContainerExt = "mp4"
+			cfg.DryRun = true
+			ts := newTestStore(t, root)
+			if err := newDryEngine(t, cfg, ts, discardLogger()).RunOneshot(ctx); err != nil {
+				t.Fatalf("dry RunOneshot: %v", err)
+			}
+			recorded := onlyRow(t, ts)
+			if recorded.Status != store.WouldTranscode || recorded.Path != candidate {
+				t.Fatalf("the dry run recorded %q for %s, not a would-transcode row, so the live half "+
+					"would prove nothing", recorded.Status, recorded.Path)
+			}
+			before := fileDigestOf(t, candidate)
+
+			liveCfg := cfg
+			liveCfg.DryRun = false
+			tc.move(t, &liveCfg, candidate)
+			fingerprint := probe.Fingerprint(candidate)
+			if fingerprint != recorded.Fingerprint {
+				t.Fatalf("the fixture changed the file's fingerprint (%s -> %s): the live run would be "+
+					"looking at a new row, not the one the dry run recorded", recorded.Fingerprint, fingerprint)
+			}
+
+			var encodes atomic.Int64
+			enc := EncoderFunc(func(_ context.Context, in, out string, _ *probe.VideoProps) error {
+				encodes.Add(1)
+				return fmt.Errorf("the encoder was reached for %s -> %s", in, out)
+			})
+			live := New(liveCfg, probe.New(ffmpeg, ffprobe), enc, ts, discardLogger())
+			if err := live.RunOneshot(ctx); err != nil {
+				t.Fatalf("live RunOneshot: %v", err)
+			}
+
+			rows, err := ts.List(ctx, nil, 0)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			var row *store.Job
+			for i := range rows {
+				if rows[i].Path == candidate && rows[i].Fingerprint == fingerprint {
+					row = &rows[i]
+				}
+			}
+			if row == nil {
+				t.Fatalf("the row the dry run recorded is gone after the live run: %+v", rows)
+			}
+			if row.Status != store.Skipped || row.Outcome.Reason != tc.guard {
+				t.Errorf("the row ended %q with reason %q, want skipped naming %q: a dry run's decision "+
+					"was promoted past a guard that now refuses the file", row.Status, row.Outcome.Reason, tc.guard)
+			}
+			if n := encodes.Load(); n != 0 {
+				t.Errorf("the encoder was reached %d time(s) for a file a guard refuses", n)
+			}
+			if after := fileDigestOf(t, candidate); after != before {
+				t.Errorf("the file is not byte-identical after the live run: sha-256 %s, was %s", after, before)
+			}
+		})
+	}
+}
+
+// TestS0172_AC8_AGuardThatFiresBeforeTheClaimEncodesNothingEither grades the other route
+// to [AC-8] of S0172's point: a guard that refuses a file BEFORE the claim. The hardlink
+// guard never claims the row, and by RecordSkip's own rule it does not overwrite a row
+// that already carries a terminal outcome - so the row may go on reading would-transcode
+// in the ledger. What must hold either way is that nothing was promoted: no encode ran and
+// the file is byte-identical.
+func TestS0172_AC8_AGuardThatFiresBeforeTheClaimEncodesNothingEither(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate.mkv")
+	mkH264(t, ffmpeg, candidate, "8M")
+
+	cfg := baseCfg(root)
+	cfg.ContainerExt = "source"
+	cfg.DryRun = true
+	ts := newTestStore(t, root)
+	if err := newDryEngine(t, cfg, ts, discardLogger()).RunOneshot(ctx); err != nil {
+		t.Fatalf("dry RunOneshot: %v", err)
+	}
+	if recorded := onlyRow(t, ts); recorded.Status != store.WouldTranscode {
+		t.Fatalf("the dry run recorded %q, not a would-transcode row", recorded.Status)
+	}
+	before := fileDigestOf(t, candidate)
+
+	// The file gains a second link outside the library: an import that is now also a seed.
+	if err := os.Link(candidate, filepath.Join(t.TempDir(), "second-link.mkv")); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	liveCfg := cfg
+	liveCfg.DryRun = false
+	var encodes atomic.Int64
+	enc := EncoderFunc(func(_ context.Context, in, out string, _ *probe.VideoProps) error {
+		encodes.Add(1)
+		return fmt.Errorf("the encoder was reached for %s -> %s", in, out)
+	})
+	if err := New(liveCfg, probe.New(ffmpeg, ffprobe), enc, ts, discardLogger()).RunOneshot(ctx); err != nil {
+		t.Fatalf("live RunOneshot: %v", err)
+	}
+
+	row := onlyRow(t, ts)
+	switch {
+	case row.Status == store.WouldTranscode:
+	case row.Status == store.Skipped && row.Outcome.Reason == SkipHardlinked:
+	default:
+		t.Errorf("the row ended %q with reason %q: a hardlinked file's dry-run decision was promoted",
+			row.Status, row.Outcome.Reason)
+	}
+	if n := encodes.Load(); n != 0 {
+		t.Errorf("the encoder was reached %d time(s) for a hardlinked file", n)
+	}
+	if after := fileDigestOf(t, candidate); after != before {
+		t.Errorf("the file is not byte-identical after the live run: sha-256 %s, was %s", after, before)
 	}
 }

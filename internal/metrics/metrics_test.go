@@ -1,7 +1,9 @@
 package metrics
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"go/ast"
 	"go/build"
@@ -11,6 +13,7 @@ import (
 	"go/token"
 	"go/types"
 	"io"
+	"log/slog"
 	"net/http/httptest"
 	"path/filepath"
 	"regexp"
@@ -638,5 +641,244 @@ func TestSkipsTotal_UsesOnlyTheClosedVocabulary(t *testing.T) {
 			t.Errorf("holdfast_skips_total exposes no series for %q, which is in the closed "+
 				"vocabulary.\nexposed: %v", tok, sortedKeys(got))
 		}
+	}
+}
+
+// --- would-transcode under a live engine (S0172) ------------------------------
+//
+// "Live" is a process serving with `dry_run: false`, which `holdfast serve` tells the
+// metric set through SetLiveEngine; "dry" is `dry_run: true`, and is also what a metric
+// set nobody told reports. N is the ledger's would-transcode rows and P its pending rows.
+
+var s0172Depth = regexp.MustCompile(`(?m)^holdfast_queue_depth\{state="([^"]*)"\} (\S+)$`)
+
+// depthSamples is every holdfast_queue_depth sample in an exposition, by state.
+func depthSamples(t *testing.T, body string) map[string]int {
+	t.Helper()
+	out := map[string]int{}
+	for _, m := range s0172Depth.FindAllStringSubmatch(body, -1) {
+		v, err := strconv.ParseFloat(m[2], 64)
+		if err != nil {
+			t.Fatalf("holdfast_queue_depth{state=%q} is not a number: %q", m[1], m[2])
+		}
+		if _, dup := out[m[1]]; dup {
+			t.Fatalf("holdfast_queue_depth{state=%q} is exposed twice", m[1])
+		}
+		out[m[1]] = int(v)
+	}
+	return out
+}
+
+// s0172Ledger seeds pending rows, would-transcode rows and one row each of encoding, done,
+// skipped and failed through the store's own write path.
+func s0172Ledger(t *testing.T, pending, would int) *store.SQLite {
+	t.Helper()
+	st := openStore(t)
+	ctx := context.Background()
+	claim := func(p string) {
+		t.Helper()
+		if ok, err := st.Claim(ctx, p, "1:1", "w0", 3, store.DecisionInputs{}); err != nil || !ok {
+			t.Fatalf("Claim(%s): ok=%v err=%v", p, ok, err)
+		}
+	}
+	// Pending first: RecoverStale returns every claimed row to pending.
+	for i := 0; i < pending; i++ {
+		claim("/lib/pending" + strconv.Itoa(i) + ".mkv")
+	}
+	if _, err := st.RecoverStale(ctx); err != nil {
+		t.Fatalf("RecoverStale: %v", err)
+	}
+	for i := 0; i < would; i++ {
+		p := "/lib/candidate" + strconv.Itoa(i) + ".mkv"
+		claim(p)
+		if err := st.Finish(ctx, p, "1:1", store.WouldTranscode, &store.Outcome{SourceCodec: "h264"}, 3); err != nil {
+			t.Fatalf("Finish(%s): %v", p, err)
+		}
+	}
+	for _, status := range []store.Status{store.Done, store.Skipped, store.Failed} {
+		p := "/lib/" + string(status) + ".mkv"
+		claim(p)
+		if err := st.Finish(ctx, p, "1:1", status, nil, 3); err != nil {
+			t.Fatalf("Finish(%s): %v", p, err)
+		}
+	}
+	claim("/lib/encoding.mkv")
+	if err := st.Advance(ctx, "/lib/encoding.mkv", "1:1", store.Encoding); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// TestS0172_AC3_LiveGaugeCountsWouldTranscodeInsidePending grades [AC-3]: under a live
+// engine there is no holdfast_queue_depth sample with state="would-transcode", the
+// pending sample is P + N, and every other state's sample is unchanged.
+func TestS0172_AC3_LiveGaugeCountsWouldTranscodeInsidePending(t *testing.T) {
+	const p, n = 2, 3
+	st := s0172Ledger(t, p, n)
+	m := New(st, nil)
+	m.SetLiveEngine(true)
+
+	body := scrape(t, m)
+	got := depthSamples(t, body)
+
+	if strings.Contains(body, `holdfast_queue_depth{state="would-transcode"}`) {
+		t.Errorf("a live engine exposes a would-transcode queue-depth sample:\n%v", got)
+	}
+	want := map[string]int{"pending": p + n, "encoding": 1, "done": 1, "skipped": 1, "failed": 1}
+	if len(got) != len(want) {
+		t.Errorf("queue depth = %v, want %v", got, want)
+	}
+	for state, v := range want {
+		if got[state] != v {
+			t.Errorf("holdfast_queue_depth{state=%q} = %d, want %d", state, got[state], v)
+		}
+	}
+
+	// holdfast_files_total is out of scope and keeps its pre-created series: it counts the
+	// decisions THIS process took, and the alerting contract on it does not move.
+	if !strings.Contains(body, `holdfast_files_total{outcome="would-transcode"} 0`) {
+		t.Errorf("the live reading removed holdfast_files_total's would-transcode series")
+	}
+}
+
+// TestS0172_AC5_DryGaugeReportsWouldTranscodeAsItself grades [AC-5]: under a dry engine -
+// and for a metric set nobody told either way, which is every caller but `serve` -
+// would-transcode is its own state with value N and pending is P, not P + N. The same
+// holds of the shared rule both surfaces report under.
+func TestS0172_AC5_DryGaugeReportsWouldTranscodeAsItself(t *testing.T) {
+	const p, n = 2, 3
+	st := s0172Ledger(t, p, n)
+	want := map[string]int{"pending": p, "would-transcode": n, "encoding": 1, "done": 1, "skipped": 1, "failed": 1}
+
+	told := New(st, nil)
+	told.SetLiveEngine(false)
+	// And one that was live and is told otherwise: the setting is the reading, not a latch.
+	flipped := New(st, nil)
+	flipped.SetLiveEngine(true)
+	flipped.SetLiveEngine(false)
+
+	for name, m := range map[string]*Metrics{"never told": New(st, nil), "told dry": told, "set back to dry": flipped} {
+		got := depthSamples(t, scrape(t, m))
+		if got["would-transcode"] != n || got["pending"] != p {
+			t.Errorf("%s: would-transcode = %d and pending = %d, want %d and %d",
+				name, got["would-transcode"], got["pending"], n, p)
+		}
+		if len(got) != len(want) {
+			t.Errorf("%s: queue depth = %v, want %v", name, got, want)
+		}
+		for state, v := range want {
+			if got[state] != v {
+				t.Errorf("%s: holdfast_queue_depth{state=%q} = %d, want %d", name, state, got[state], v)
+			}
+		}
+	}
+
+	// The summary map of GET /api/summary is this same rule over this same read.
+	sum, err := st.Summary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reported := store.ReportedCounts(sum, false)
+	if reported[store.WouldTranscode] != n || reported[store.Pending] != p || len(reported) != len(want) {
+		t.Errorf("the dry rule reports %v, want would-transcode %d beside pending %d", reported, n, p)
+	}
+}
+
+// TestS0172_AC9_AnUnreadableLedgerEmitsNoQueueDepthSample grades [AC-9]: live or dry, a
+// scrape whose ledger read fails carries no holdfast_queue_depth sample at all - neither a
+// partial pending nor a would-transcode - while every other series is still served, and
+// one warn record names the dependency, the read and what happens next.
+func TestS0172_AC9_AnUnreadableLedgerEmitsNoQueueDepthSample(t *testing.T) {
+	for _, live := range []bool{true, false} {
+		var logs bytes.Buffer
+		log := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		seam := &readSeam{summaryErr: errors.New("database is locked"), held: 4096}
+		m := New(seam, log)
+		m.SetLiveEngine(live)
+
+		body := scrape(t, m)
+
+		if strings.Contains(body, "holdfast_queue_depth{") {
+			t.Errorf("live=%v: a scrape over an unreadable ledger carries a queue-depth sample:\n%v",
+				live, depthSamples(t, body))
+		}
+		for _, served := range []string{
+			"holdfast_bytes_held_by_undo_window 4096",
+			`holdfast_files_total{outcome="done"} 0`,
+			`holdfast_files_total{outcome="would-transcode"} 0`,
+		} {
+			if !strings.Contains(body, served) {
+				t.Errorf("live=%v: the failed read cost another series: %q is gone", live, served)
+			}
+		}
+
+		var warns []map[string]any
+		for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+			var rec map[string]any
+			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				t.Fatalf("log line is not JSON: %q", line)
+			}
+			if rec["level"] == "WARN" {
+				warns = append(warns, rec)
+			}
+		}
+		if len(warns) != 1 {
+			t.Fatalf("live=%v: %d warn records, want exactly 1: %v", live, len(warns), warns)
+		}
+		w := warns[0]
+		msg, _ := w["msg"].(string)
+		if w["dependency"] != "job store" || w["read"] != "Summary" ||
+			!strings.Contains(msg, "omitted from this scrape") || !strings.Contains(msg, "the next scrape reads again") ||
+			!strings.Contains(w["err"].(string), "database is locked") {
+			t.Errorf("live=%v: the warn record does not name the dependency, the read and the next action: %v", live, w)
+		}
+
+		// The read recovers: the next scrape carries the gauge again, under the same reading.
+		seam.summaryErr = nil
+		if got := depthSamples(t, scrape(t, m)); got["encoding"] != 2 || len(got) != 1 {
+			t.Errorf("live=%v: after the read recovered the gauge reads %v, want encoding 2", live, got)
+		}
+	}
+}
+
+// TestS0172_AC10_LiveWithNoWouldTranscodeRowsReportsTheLedgerAsItIs grades [AC-10]: with
+// no would-transcode row a live engine reports exactly the ledger's own counts, and with
+// P = 0 and N = 0 no pending sample is fabricated.
+func TestS0172_AC10_LiveWithNoWouldTranscodeRowsReportsTheLedgerAsItIs(t *testing.T) {
+	// P = 0, N = 0: no pending sample, and none of would-transcode.
+	none := New(s0172Ledger(t, 0, 0), nil)
+	none.SetLiveEngine(true)
+	got := depthSamples(t, scrape(t, none))
+	if want := map[string]int{"encoding": 1, "done": 1, "skipped": 1, "failed": 1}; len(got) != len(want) ||
+		got["encoding"] != 1 || got["done"] != 1 || got["skipped"] != 1 || got["failed"] != 1 {
+		t.Errorf("queue depth = %v, want %v", got, want)
+	}
+	if v, ok := got["pending"]; ok {
+		t.Errorf("a pending sample (%d) was fabricated over a ledger with no pending and no would-transcode row", v)
+	}
+
+	// P > 0, N = 0: pending is P, untouched.
+	some := New(s0172Ledger(t, 4, 0), nil)
+	some.SetLiveEngine(true)
+	got = depthSamples(t, scrape(t, some))
+	if got["pending"] != 4 || len(got) != 5 {
+		t.Errorf("queue depth = %v, want pending 4 beside the four other states", got)
+	}
+	if _, ok := got["would-transcode"]; ok {
+		t.Errorf("a would-transcode sample over a ledger with none: %v", got)
+	}
+
+	// P = 0, N > 0: pending appears, carrying exactly N.
+	only := New(s0172Ledger(t, 0, 3), nil)
+	only.SetLiveEngine(true)
+	if got = depthSamples(t, scrape(t, only)); got["pending"] != 3 || len(got) != 5 {
+		t.Errorf("queue depth = %v, want pending 3 beside the four other states", got)
+	}
+
+	// An empty ledger reports nothing at all.
+	empty := New(openStore(t), nil)
+	empty.SetLiveEngine(true)
+	if got = depthSamples(t, scrape(t, empty)); len(got) != 0 {
+		t.Errorf("queue depth over an empty ledger = %v, want no sample", got)
 	}
 }

@@ -714,7 +714,7 @@ func (u *UndoWindow) recordRestoreInJobs(ctx context.Context, r store.Retained) 
 	// The writer CAN carry both now (that is the fix the hardlink guard needed, where a
 	// profile really did decide the row and the event the guard emits says so). What each
 	// call site passes is what is true of its own row.
-	if _, err := u.Store.RecordSkip(ctx, r.SourcePath, key, SkipRestoredOriginal, store.Decision{}, ""); err != nil {
+	if _, err := u.Store.RecordSkip(ctx, r.SourcePath, key, SkipRestoredOriginal, store.Decision{}, "", store.SourceFacts{}); err != nil {
 		u.Log.Warn("could not record the restore in the job ledger", "path", r.SourcePath, "err", err)
 	}
 }

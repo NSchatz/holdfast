@@ -114,7 +114,7 @@ func (s *Server) handleLedgerSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	out := searchResponse{
 		Term:    term,
-		Results: toDTOs(rows),
+		Results: s.hub.rowDTOs(rows),
 		Total: rowTotalDTO{
 			Available: total.Err == nil,
 			Covers:    total.Coverage.Set,

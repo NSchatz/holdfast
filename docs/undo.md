@@ -58,6 +58,13 @@ never added together:
 A reclaimed figure that quietly included held space would tell you a disk is free when
 it is not.
 
+`GET /api/summary` answers the arithmetic above per library root. Each entry of its `roots`
+block carries that root's `bytes_held_by_undo_window` beside `free_bytes`, the room left on
+the filesystem holding the root, and `candidate_bytes`, what a run is about to replace. On
+a near-full drive those three are the question: a swap frees nothing until the window
+closes, so what a run needs is room for its encodes while every original it has already
+replaced is still held. A figure that could not be read is `null`, never `0`.
+
 ## How it behaves
 
 **A source it cannot retain is skipped, not swapped.** The window's whole promise is

@@ -381,11 +381,18 @@ func declaredResponses() (map[string][]Response, error) {
 
 		"GET /api/history": append([]Response{
 			jsonOK(http.StatusOK, historyResponse{}),
+			// A `status` or a `cursor` the endpoint could not accept (history_paging.go).
+			jsonOK(http.StatusBadRequest, queryRefusal{}),
 			text(http.StatusInternalServerError),
 		}, readGate...),
 
 		"GET /api/health": append([]Response{
 			jsonOK(http.StatusOK, health.Report{}),
+			text(http.StatusInternalServerError),
+		}, readGate...),
+
+		"GET " + NodesReadPath: append([]Response{
+			jsonOK(http.StatusOK, nodesResponse{}),
 			text(http.StatusInternalServerError),
 		}, readGate...),
 

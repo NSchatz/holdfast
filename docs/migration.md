@@ -90,6 +90,12 @@ what it *would* do. Read the skip reasons: that is where the two behaviour chang
 holdfast run --config config.yaml
 ```
 
+Then size the job from the API, not from the database. Start the daemon with `dry_run` still `true`
+(`docker compose up -d`) and read `GET /api/summary`: its `roots` block gives, per library root,
+`candidate_bytes` (what a real run would be asked to encode), `projected_savings_bytes` where that root
+already has completed encodes to measure on, `bytes_held_by_undo_window` and `free_bytes`. That is the
+whole of "how big is this, and will it fit" - there is nothing to copy off the host and query.
+
 **4. Go.** Set `dry_run: false` again, then:
 
 ```bash
@@ -204,7 +210,10 @@ is in [docs/docker.md](docker.md#worker-nodes).
 3. **Write a `config.yaml`** (start from `config.example.yaml`). The defaults are the safe ones.
 4. **Rehearse with `dry_run: true`** and read the skip reasons. A library Tdarr has been through
    will report a lot of "already HEVC" skips — that is the correct answer, arrived at by looking
-   at the files rather than by trusting a database.
+   at the files rather than by trusting a database. Size the job from `GET /api/summary` while the
+   daemon is still serving with `dry_run: true`: its `roots` block reports, per library root,
+   `candidate_bytes`, `projected_savings_bytes`, `bytes_held_by_undo_window` and `free_bytes`, so
+   there is no need to copy `jobs.db` off the host and query it.
 5. Bring it up: `docker compose up -d`, and watch `/api/summary` and `/api/events`.
 
 ### What "safe" costs you
