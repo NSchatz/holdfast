@@ -93,7 +93,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g14-b
 | # | Item | State |
 |---|---|---|
 | 4.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `7bcfbcd`): `func Test` 2033 -> 2145, no package fell (`cmd/holdfast` 280 -> 282, `internal/engine` 598 -> 615, `internal/metrics` 21 -> 25, `internal/node` 73 -> 83, `internal/server` 137 -> 196, `internal/store` 163 -> 183, every other package unchanged); `git diff --numstat dfaca59 origin/main -- docs/design/swap.md docs/design/quality-gate.md` empty (66 and 80 lines); `*_test.go` +7618 -27, the 27 deleted lines in D12; zero `co-authored-by` in `git log dfaca59..origin/main --format=%B` |
-| 4.2 | Adversarial review of the report | TODO |
+| 4.2 | Adversarial review of the report | DONE: a fresh subagent (2026-10-03) checked lines A to G against `d688105` and GitHub in its own clone: it re-ran the UI's lint, typecheck and tests (241 of 241) and targeted Go tests of all five specs; killed four product mutants (the S0172 fold, the cursor's status set, a null `free_bytes`, a skip's source codec) and three UI mutants (the token in `sessionStorage`, a followed redirect, controls enabled without an accepted read), each by named tests; walked a real `serve` (the new reads, the history 400, pause 401 without the token and 200 with it, `restore` and `requeue` paths 404); recounted `func Test` per package and read all 27 deleted test lines; checked the three PRs' states, heads, checks and gate tails: "VERDICT: none false (lines A to G)". Its corrections are in D15 |
 
 ## Decisions taken
 
@@ -130,7 +130,8 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g14-b
   the cache interval (the read now outlives its request).
 - D7 (2026-10-03): the builders found that `.gremlins.yaml` excludes `internal/engine`,
   `internal/store`, `internal/server`, `internal/metrics` and `cmd/holdfast`, so of this track's
-  code only `internal/node` and `internal/config` are in the mutation domain. No exclusion is
+  code only `internal/node` is in the mutation domain (`internal/config` is in it too and was
+  not changed, D15). No exclusion is
   added or removed (§4, T34). For the owner's eye, not built on: a `would-transcode` row whose
   file later gains a second hard link is skipped before the claim and its row is not rewritten,
   so under a live engine it keeps being counted in `pending` (S0172's builder; the row and the
@@ -187,6 +188,25 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g14-b
 - D14 (2026-10-03): #170 (`owner/public-ci`) and its worktree are another session's, opened
   during this goal; #156 and the Dependabot PRs #108 to #110 and #162 to #164 are not this
   goal's either. None was touched (§0.13).
+- D15 (2026-10-03): the report review's corrections, as recorded. The draft said `main`'s CI on
+  `7bcfbcd` was in progress: that run was cancelled, superseded by the ledger push that followed
+  the merge, as the runs on `eb2dd01` and `59a73f3` were; the run on `d688105`, whose tree
+  holds all three merges, is green (`build` and `package`, run 37162014945). The draft named
+  `internal/config` as changed inside the mutation domain: only `internal/node` changed there.
+  The criteria graded by a command and not a test are S0167 AC-9, S0169 AC-7, AC-15 and AC-17,
+  S0170 AC-14 and AC-15, S0171 AC-9 and AC-10, and S0172 AC-11; every other criterion has a
+  named test. #167 and #169 were gated on the branch merged up to `59a73f3` and `eb2dd01`, with
+  `main` one ledger-only commit ahead at merge (§0.3), under `goals lock goals-heavy -- goals
+  lock holdfast-heavy` where the goal file says `flock -o` (D10). LOW, left for goal 15's
+  documentation pass: `docs/docker.md` says that with a read token set the web UI shows nothing
+  until a token is typed; the shell still shows the version and the endpoint count from the
+  ungated `/api/schema`, and each view a 401 alert; no library datum is shown.
+- D16 (2026-10-03): after the three merges another session of the owner's (maker-main) relayed
+  an owner decision: holdfast's gate is PR CI alone and nothing gates on this host (the goals
+  program's spec 1.1.7; the amendment is PR #170, not this goal's, queued for the drain after
+  this goal). It arrived when every PR of this goal had merged under both gates, so it changed
+  nothing merged; from its arrival this goal ran no local gate, tier, whole suite or mutation
+  run.
 - D5 (2026-10-03): the baseline's `internal/engine` took 2984.4 s, 82.9% of `TEST_TIMEOUT`, against
   1983.0 s in goal 13's last gate on the same tree. The difference is load: the four builders ran
   package tests beside it. §4 says to raise `TEST_TIMEOUT` once the engine passes 80%, in its own
@@ -204,11 +224,17 @@ service). The open holdfast items are still queue #50 to #56, #202 to #204 and #
 
 ## Resume here
 
-Merged: #168 (`59a73f3`), #167 (`eb2dd01`), #169 (`7bcfbcd`). No branch, worktree or PR of this
-goal is open. Left: `main`'s CI on `7bcfbcd`, the fresh adversarial review of the GOAL REPORT (row
-4.2), the COMPLETE line, `goals check`, the report.
+Nothing is left. Merged: #168 (`59a73f3`), #167 (`eb2dd01`), #169 (`7bcfbcd`); `main`'s CI is green
+on `d688105`; no branch, worktree or PR of this goal is open; request #229 is DONE; the owner's
+queue has no new item. Goal 15 starts from `origin/main` and finds: the views and controls in
+`web/src/views/`, their record in `docs/design/web-ui.md` (`#views`, `#controls`, `#token`), the
+API facts in `docs/api-reference.md`, D15's note on `docs/docker.md`, D7's note on a
+`would-transcode` row behind the hardlink guard, D10's note that a full suite cannot put its
+`TMPDIR` on a tmpfs, and D16 (PR #170: CI is the whole gate).
 
 ## Supervisor actions
 
 - 2026-10-03T20:48:24Z relaunched dead session 8d62d37d-3da2-4a4f-b9e4-3d2f6483ab9a in window holdfast-g14 with --resume (try 1 of 2)
 - 2026-10-03T20:49:33Z re-issued the goal in the relaunched session
+
+COMPLETE (goal 14): 2026-10-03
