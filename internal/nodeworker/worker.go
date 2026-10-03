@@ -79,6 +79,11 @@ const (
 	// output the work directory has no room for.
 	ReasonSourceDownloadFailed = "source_download_failed"
 	ReasonWorkDirFull          = "work_dir_full"
+	// ReasonSourceWithdrawn is an http-mode lease whose source the SERVER no longer offers:
+	// it restarted since the grant and no longer knows the lease's mode, or the file is not
+	// the one the lease was granted on. It is nobody's fault on the node, and the server
+	// does not count it toward the node's cool-off (node.ReasonSourceWithdrawn).
+	ReasonSourceWithdrawn = node.ReasonSourceWithdrawn
 )
 
 // ErrInsecureServer is a worker_server the worker will not send its credential to.
@@ -193,6 +198,11 @@ type Options struct {
 type Worker struct {
 	o    Options
 	base string
+
+	// roomMu guards reserved: the bytes this worker's http-mode leases in flight have
+	// reserved in the work directory (reserveRoom).
+	roomMu   sync.Mutex
+	reserved uint64
 }
 
 // New checks the options and builds a Worker. It refuses a server the credential must not be
@@ -645,6 +655,16 @@ func (w *Worker) runLease(ctx context.Context, l *node.AcquireResponse) (ok bool
 	// it is written: srcSum is then the sha-256 of exactly the bytes that arrived.
 	var srcSum []byte
 	if streamed {
+		// Room for the source and its output, checked and reserved in one step across every
+		// slot of this worker, and held until the lease ends.
+		release, need, ok := w.reserveRoom(l)
+		defer release()
+		if !ok {
+			log.Warn("worker: worker_work_dir has no room for the leased source and its output beside this worker's "+
+				"other leases, so nothing is downloaded", "work_dir", w.o.WorkDir, "bytes_needed", need)
+			w.fail(l, ReasonWorkDirFull)
+			return false
+		}
 		src = filepath.Join(w.o.WorkDir, sourceName(l.LeaseID, l.Epoch, l.Path))
 		defer func() { _ = os.Remove(src) }()
 		sum, reason := w.fetchSource(lctx, l, src, &gone)

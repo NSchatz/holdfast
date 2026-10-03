@@ -485,6 +485,9 @@ var nodeCouldNotRun = map[string]bool{
 	"unmapped_source": true, "source_mismatch": true, "source_unreadable": true,
 	"unsupported_encoder": true, "refused_plan": true, "worker_stopping": true,
 	"source_download_failed": true, "work_dir_full": true,
+	// The server itself stopped offering the source (it restarted, or the file moved). The
+	// hub does not count this one toward the node's cool-off.
+	node.ReasonSourceWithdrawn: true,
 }
 
 // encodeOnNode leases the job (or takes its recovered lease back) and waits for the node's

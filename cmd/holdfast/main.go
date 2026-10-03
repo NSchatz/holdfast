@@ -38,6 +38,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/hwdevice"
 	"github.com/NSchatz/holdfast/internal/logging"
 	"github.com/NSchatz/holdfast/internal/metrics"
+	"github.com/NSchatz/holdfast/internal/nodeworker"
 	"github.com/NSchatz/holdfast/internal/notify"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/schedule"
@@ -160,14 +161,6 @@ func loadConfigWith(fs *flag.FlagSet, args []string, stderr io.Writer,
 	return cfg, 0
 }
 
-// workerServerOrUnset is worker_server as `validate` prints it.
-func workerServerOrUnset(cfg *config.Config) string {
-	if s := strings.TrimSpace(cfg.WorkerServer); s != "" {
-		return s
-	}
-	return "its server (worker_server is not set)"
-}
-
 func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	// The configuration of a worker in http mode names no library root (it reads no
@@ -187,9 +180,20 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	if httpWorker(cfg) {
-		fmt.Fprintf(stdout, "config OK: a `holdfast worker` in http mode - it names no library root, downloads "+
+		// The same start-or-refuse decisions `holdfast worker` takes from this file, so
+		// "config OK" is never said of a file that command would refuse. The credential is
+		// not resolved, as `validate` resolves none.
+		pre, err := workerPreflight(cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "holdfast: invalid config: `holdfast worker` would refuse to start: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "config OK: a `holdfast worker` in http mode named %s - it names no library root, downloads "+
 			"each leased source from %s and uploads the output there. `run` and `serve` refuse this file\n",
-			workerServerOrUnset(cfg))
+			pre.name, pre.server)
+		if pre.cleartext {
+			fmt.Fprintf(stdout, "warning: %s\n", nodeworker.InsecureWarning)
+		}
 		return 0
 	}
 	// The configured working location, checked here for the same reason `run` and

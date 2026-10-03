@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -54,6 +55,66 @@ func cmdWorker(args []string, _, stderr io.Writer) int {
 		envOr("HOLDFAST_FFMPEG", "ffmpeg"), envOr("HOLDFAST_FFPROBE", "ffprobe"), nil)
 }
 
+// workerStart is what workerPreflight settled about a worker before anything is resolved or
+// probed.
+type workerStart struct {
+	server, mode, name string
+	// client is the HTTP client that trusts worker_tls_ca beside the system roots; nil when
+	// the key is unset. cleartext says worker_insecure_http is what let the address through.
+	client    *http.Client
+	cleartext bool
+}
+
+// workerPreflight is every start-or-refuse decision `holdfast worker` takes from its
+// configuration alone, before its credential is resolved and before ffmpeg is looked for:
+// the server's address, the transport, the mode, worker_tls_ca, the presence of node_token
+// and the node's name. `holdfast validate` runs the same function on an http worker's file,
+// so it never answers "config OK" for a file `worker` would refuse. Each refusal names the
+// key an operator has to set.
+func workerPreflight(cfg *config.Config) (workerStart, error) {
+	var w workerStart
+	w.server = strings.TrimSpace(cfg.WorkerServer)
+	if w.server == "" {
+		return w, errors.New("worker_server is not set: a worker needs the address of the server it leases from")
+	}
+	// The credential never crosses a network in cleartext unless the operator wrote
+	// worker_insecure_http: true (docs/design/nodes.md#transport), which nodeworker.New says
+	// at warn level at every start. Checked before the secret is even resolved.
+	cleartext, err := nodeworker.CheckTransport(w.server, cfg.WorkerInsecureHTTP)
+	if err != nil {
+		return w, err
+	}
+	w.cleartext = cleartext
+	w.mode = cfg.EffectiveWorkerMode()
+	if w.mode == config.WorkerModeHTTP && len(cfg.LibraryRoots) > 0 {
+		// config.ValidateWorker refuses this; a Config built another way is held to it too.
+		return w, errors.New("worker_mode is http and library_roots is set: a worker in http mode reads no library")
+	}
+	// worker_tls_ca: certificates trusted beside the system roots. An unreadable or empty
+	// bundle refuses here; nothing ever switches verification off.
+	if ca := strings.TrimSpace(cfg.WorkerTLSCA); ca != "" {
+		c, err := nodeworker.TrustingClient(ca)
+		if err != nil {
+			return w, err
+		}
+		w.client = c
+	}
+	if !cfg.NodesEnabled() {
+		return w, errors.New("node_token is not set: a worker needs the node credential, by reference " +
+			"(file:<path> or cmd:<argv>) - see docs/secrets.md")
+	}
+	w.name = cfg.WorkerName
+	if w.name == "" {
+		host, err := os.Hostname()
+		if err != nil || !config.ValidNodeName(host) {
+			return w, errors.New("worker_name is not set and this host's name is not one a node may give " +
+				"(1 to 64 characters from letters, digits, '.', '_' and '-'): set worker_name")
+		}
+		w.name = host
+	}
+	return w, nil
+}
+
 // runWorker checks what a worker needs, probes its encoders, and runs its loop until ctx
 // ends. Every refusal names the key an operator has to set. tune, nil in production, lets a
 // test shorten the loop's waits.
@@ -63,44 +124,11 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		fmt.Fprintf(stderr, "holdfast: refusing to start: "+format+"\n", a...)
 		return 1
 	}
-	srv := strings.TrimSpace(cfg.WorkerServer)
-	if srv == "" {
-		return refuse("worker_server is not set: a worker needs the address of the server it leases from")
-	}
-	// The credential never crosses a network in cleartext unless the operator wrote
-	// worker_insecure_http: true (docs/design/nodes.md#transport), which nodeworker.New says
-	// at warn level at every start. Checked before the secret is even resolved.
-	if _, err := nodeworker.CheckTransport(srv, cfg.WorkerInsecureHTTP); err != nil {
+	pre, err := workerPreflight(cfg)
+	if err != nil {
 		return refuse("%v", err)
 	}
-	mode := cfg.EffectiveWorkerMode()
-	if mode == config.WorkerModeHTTP && len(cfg.LibraryRoots) > 0 {
-		// config.ValidateWorker refuses this; a Config built another way is held to it too.
-		return refuse("worker_mode is http and library_roots is set: a worker in http mode reads no library")
-	}
-	// worker_tls_ca: certificates trusted beside the system roots. An unreadable or empty
-	// bundle refuses here; nothing ever switches verification off.
-	var client *http.Client
-	if ca := strings.TrimSpace(cfg.WorkerTLSCA); ca != "" {
-		c, err := nodeworker.TrustingClient(ca)
-		if err != nil {
-			return refuse("%v", err)
-		}
-		client = c
-	}
-	if !cfg.NodesEnabled() {
-		return refuse("node_token is not set: a worker needs the node credential, by reference " +
-			"(file:<path> or cmd:<argv>) - see docs/secrets.md")
-	}
-	name := cfg.WorkerName
-	if name == "" {
-		host, err := os.Hostname()
-		if err != nil || !config.ValidNodeName(host) {
-			return refuse("worker_name is not set and this host's name is not one a node may give " +
-				"(1 to 64 characters from letters, digits, '.', '_' and '-'): set worker_name")
-		}
-		name = host
-	}
+	srv, mode, name, client := pre.server, pre.mode, pre.name, pre.client
 	for _, bin := range []string{ffmpeg, ffprobe} {
 		if _, err := exec.LookPath(bin); err != nil {
 			fmt.Fprintf(stderr, "holdfast: required binary %q not found: %v\n", bin, err)

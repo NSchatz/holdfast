@@ -967,7 +967,8 @@ rather than passed through.
 `worker_mode` is `mapped` (the default: a worker configured before the key existed behaves as it
 did) or `http`. In http mode the worker has no mount: its file names **no** `library_roots` and
 no `worker_path_map`, and one that names either is refused by name; it downloads each leased
-source into `worker_work_dir`, which must have room for the source and its output.
+source into `worker_work_dir`, which must have room for the source and its output for every
+slot at once.
 `holdfast validate` accepts such a file; `run` and `serve` refuse it. `worker_insecure_http`
 defaults to `false`: plain `http://` to a server that is not loopback refuses to start. Written
 `true` it starts, and says at warn level at every start that the node credential - and in http

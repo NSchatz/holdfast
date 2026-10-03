@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/store"
@@ -45,6 +46,9 @@ const SourceMediaType = "application/octet-stream"
 // beside a declared length (HTTP/2), it is never load-bearing, and a node that receives
 // one that disagrees with what it read stops before it encodes.
 const ReprDigestTrailer = "Repr-Digest"
+
+// conditionalHeaders are the request headers a source request is served without.
+var conditionalHeaders = []string{"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "If-Range"}
 
 // sourceStream is the leased source as http.ServeContent reads it. It hashes the bytes that
 // are read in order from the first one, refreshes the connection's write deadline as the
@@ -177,8 +181,15 @@ func (h *Hub) serveSource(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.releaseTransfer()
 
-	f, err := os.Open(cur.Path)
+	// O_NOFOLLOW: the engine refuses a source that is a symlink (its symlinked-source
+	// guard), so a link found at the leased path was put there after the grant, and what it
+	// points at is not the leased file however its size and time read. It is never followed.
+	f, err := os.OpenFile(cur.Path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			writeError(w, http.StatusConflict, errSourceChanged, "a symbolic link stands where the lease was granted on a file")
+			return
+		}
 		if errors.Is(err, fs.ErrNotExist) {
 			writeError(w, http.StatusConflict, errSourceChanged, "the source is no longer where the lease was granted on it")
 			return
@@ -213,8 +224,13 @@ func (h *Hub) serveSource(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", SourceMediaType)
 	// A source is served to the holder of a live lease and to nobody else, ever again.
 	w.Header().Set("Cache-Control", "no-store")
-	// No name and no modification time: nothing is sniffed from an extension, and no
-	// conditional request is answered from a date.
+	// No conditional request is answered: http.ServeContent "handles If-Match,
+	// If-Unmodified-Since, If-None-Match, If-Modified-Since, and If-Range requests", and a
+	// 304 or a 412 is no answer this endpoint has. A source is sent, or refused typed.
+	for _, name := range conditionalHeaders {
+		r.Header.Del(name)
+	}
+	// No name and no modification time: nothing is sniffed from an extension.
 	http.ServeContent(w, r, "", time.Time{}, src)
 	// The response is written; the connection's next response is not held to this deadline.
 	_ = rc.SetWriteDeadline(time.Time{})

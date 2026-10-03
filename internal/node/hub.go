@@ -482,6 +482,11 @@ func (h *Hub) Report(node, reason string) {
 		delete(h.cooling, node)
 		return
 	}
+	if reason == ReasonSourceWithdrawn {
+		// The server withdrew the source; the node did nothing wrong. The run is neither
+		// lengthened nor cleared.
+		return
+	}
 	c := h.cooling[node]
 	if c == nil {
 		c = &coolState{}

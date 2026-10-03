@@ -90,6 +90,14 @@ func (h *httpRig) serveWhole(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(h.content)
 }
 
+// untilEnded waits until the lease has ended one way or the other: failed, or completed. A
+// fixture that expects a refusal therefore fails by name, at once, when the worker encodes
+// instead - it does not sit out the whole wait for a `fail` that will never come.
+func (h *httpRig) untilEnded(what string) {
+	h.t.Helper()
+	until(h.t, what, func() bool { return len(h.f.seen("fail")) >= 1 || len(h.f.seen("complete")) >= 1 })
+}
+
 func (h *httpRig) encodedSources() [][]byte {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -215,10 +223,10 @@ func TestWorkerFixture_HTTPMode_AnAnswerThatIsNotTheSourceIsNeverEncoded(t *test
 		"a 500": {func(_ *httpRig, w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 		}, false},
-		"a 409 source_changed": {func(_ *httpRig, w http.ResponseWriter, _ *http.Request) {
+		"a 409 that is not the server withdrawing the source": {func(_ *httpRig, w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
-			_, _ = io.WriteString(w, `{"error":"source_changed","detail":"said by the fake server"}`)
+			_, _ = io.WriteString(w, `{"error":"digest_conflict","detail":"said by the fake server"}`)
 		}, false},
 		"a redirect to the source elsewhere": {func(h *httpRig, w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("moved") != "" {
@@ -238,13 +246,13 @@ func TestWorkerFixture_HTTPMode_AnAnswerThatIsNotTheSourceIsNeverEncoded(t *test
 			h.f.source = func(w http.ResponseWriter, r *http.Request) { tc.serve(h, w, r) }
 			h.f.queue("acquire", jsonReply(200, h.lease()))
 			stop := h.run()
-			until(t, "the lease to be failed", func() bool { return len(h.f.seen("fail")) >= 1 })
+			h.untilEnded("the lease to be failed")
 			_ = stop()
+			if n := h.encodeCount(); n != 0 {
+				t.Fatalf("%d encode(s) ran on an answer that is not the source", n)
+			}
 			if got := h.f.failReasons(); len(got) != 1 || got[0] != ReasonSourceDownloadFailed {
 				t.Errorf("the lease was failed %v, want [%s]", got, ReasonSourceDownloadFailed)
-			}
-			if n := h.encodeCount(); n != 0 {
-				t.Errorf("%d encode(s) ran on an answer that is not the source", n)
 			}
 			if n := len(h.f.seen("output")) + len(h.f.seen("complete")); n != 0 {
 				t.Errorf("%d upload or completion call(s) followed an answer that is not the source", n)
@@ -286,13 +294,13 @@ func TestWorkerFixture_HTTPMode_ASourceWhoseReprDigestTrailerDisagreesIsNotEncod
 		h.f.source = trailered(h, digest([]byte("what the server really sent")))
 		h.f.queue("acquire", jsonReply(200, h.lease()))
 		stop := h.run()
-		until(t, "the lease to be failed", func() bool { return len(h.f.seen("fail")) >= 1 })
+		h.untilEnded("the lease to be failed")
 		_ = stop()
+		if n := h.encodeCount(); n != 0 {
+			t.Fatalf("%d encode(s) ran on bytes the server's own digest disowns", n)
+		}
 		if got := h.f.failReasons(); len(got) != 1 || got[0] != ReasonSourceDownloadFailed {
 			t.Errorf("the lease was failed %v, want [%s]", got, ReasonSourceDownloadFailed)
-		}
-		if n := h.encodeCount(); n != 0 {
-			t.Errorf("%d encode(s) ran on bytes the server's own digest disowns", n)
 		}
 		if n := len(h.f.seen("source")); n != MaxSourceAttempts {
 			t.Errorf("the source was asked for %d time(s), want %d: a change in transit may not repeat", n, MaxSourceAttempts)
@@ -359,19 +367,71 @@ func TestWorkerFixture_HTTPMode_A503IsAskedAgainAndA410EndsTheLeaseUnfailed(t *t
 			t.Errorf("%d encode(s) ran, want one of the source", len(got))
 		}
 	})
-	t.Run("a 503 every time", func(t *testing.T) {
+	t.Run("more 503s than the download bound, then the source", func(t *testing.T) {
+		// A busy server is not a failed download: with node_max_transfers below the number
+		// of http nodes this is the ordinary case, and a lease that failed on it would also
+		// push a good node toward its cool-off.
+		const busy = MaxSourceAttempts + 4
 		h := newHTTPRig(t)
-		h.f.source = func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }
+		var asked atomic.Int32
+		h.f.source = func(w http.ResponseWriter, r *http.Request) {
+			if asked.Add(1) <= busy {
+				w.Header().Set("Retry-After", "5")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"error":"transfers_full","detail":"said by the fake server"}`)
+				return
+			}
+			h.serveWhole(w, r)
+		}
 		h.f.queue("acquire", jsonReply(200, h.lease()))
 		stop := h.run()
-		until(t, "the lease to be failed", func() bool { return len(h.f.seen("fail")) >= 1 })
+		h.untilEnded("the lease to complete after the server stopped being busy")
 		_ = stop()
-		if n := len(h.f.seen("source")); n != MaxSourceAttempts {
-			t.Errorf("the source was asked for %d time(s), want the bound of %d", n, MaxSourceAttempts)
+		if got := h.f.failReasons(); len(got) != 0 {
+			t.Fatalf("the lease was failed %v after %d 503s: a busy server must be waited out, not counted against "+
+				"the %d download attempts", got, busy, MaxSourceAttempts)
 		}
-		if n := h.encodeCount(); n != 0 {
-			t.Errorf("%d encode(s) ran", n)
+		if n := asked.Load(); n != busy+1 {
+			t.Errorf("the source was asked for %d time(s), want %d", n, busy+1)
 		}
+		if got := h.encodedSources(); len(got) != 1 || !bytes.Equal(got[0], h.content) {
+			t.Errorf("%d encode(s) ran, want one of the source", len(got))
+		}
+		h.rig.mu.Lock()
+		waits := 0
+		for _, d := range h.rig.sleeps {
+			if d >= 5*time.Second && d != time.Second {
+				waits++
+			}
+		}
+		h.rig.mu.Unlock()
+		if waits < busy {
+			t.Errorf("%d of the %d waits were at least the server's Retry-After of 5 s: %v", waits, busy, h.rig.sleeps)
+		}
+	})
+	t.Run("a 503 for as long as the lease lives", func(t *testing.T) {
+		// What bounds the wait is the lease: its heartbeat answers 410 and the wait ends
+		// there, with nothing failed and nothing encoded.
+		h := newHTTPRig(t)
+		var asked atomic.Int32
+		h.f.source = func(w http.ResponseWriter, _ *http.Request) {
+			if asked.Add(1) == MaxSourceAttempts+2 {
+				h.f.queue("heartbeat", errReply(http.StatusGone, "lease_gone"))
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		h.f.queue("acquire", jsonReply(200, h.lease()))
+		stop := h.run()
+		until(t, "the worker to ask for work again", func() bool { return len(h.f.seen("acquire")) >= 2 })
+		_ = stop()
+		if n := asked.Load(); n < MaxSourceAttempts+2 {
+			t.Errorf("the source was asked for %d time(s); the wait gave up before the lease was gone", n)
+		}
+		if n := len(h.f.seen("fail")); n != 0 || h.encodeCount() != 0 {
+			t.Errorf("a lease that went while its source was busy was failed %d time(s) and encoded %d time(s)", n, h.encodeCount())
+		}
+		workDirEmpty(t, h.work)
 	})
 	t.Run("a 410", func(t *testing.T) {
 		h := newHTTPRig(t)
@@ -426,8 +486,8 @@ func TestWorkerFixture_HTTPMode_NoRoomInTheWorkDirectoryFailsTheLeaseBeforeAnyDo
 		"a failed lookup": {func(string) (uint64, error) { return 0, errors.New("statfs failed") }, true},
 		"no lookup wired": {nil, true},
 	} {
-		if got, ok := roomFor(c.free, h.work, &l); ok != c.ok || got != need {
-			t.Errorf("%s: roomFor = %d, %v, want %d, %v", name, got, ok, need, c.ok)
+		if ok := roomBeside(c.free, h.work, roomNeeded(&l), 0); ok != c.ok || roomNeeded(&l) != need {
+			t.Errorf("%s: roomBeside = %v needing %d, want %v needing %d", name, ok, roomNeeded(&l), c.ok, need)
 		}
 	}
 }
@@ -909,4 +969,158 @@ func selfSignedCertPEM(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// TestWorkerFixture_HTTPMode_ASourceTheServerWithdrewFailsTheLeaseWithItsOwnReason: a 409
+// source_not_offered (the server restarted and no longer knows the lease's mode) and a 409
+// source_changed (the file is not the leased one) are the SERVER withdrawing the source.
+// The lease is failed `source_withdrawn` - not `source_download_failed`, which the server
+// counts toward this node's cool-off - at the first answer, with nothing encoded.
+func TestWorkerFixture_HTTPMode_ASourceTheServerWithdrewFailsTheLeaseWithItsOwnReason(t *testing.T) {
+	if got := []string{ReasonSourceWithdrawn, node.ReasonSourceWithdrawn}; got[0] != "source_withdrawn" || got[1] != got[0] {
+		t.Fatalf("the worker's reason and the server's are %q, want source_withdrawn in both", got)
+	}
+	for _, reason := range []string{"source_not_offered", "source_changed"} {
+		t.Run(reason, func(t *testing.T) {
+			h := newHTTPRig(t)
+			h.f.source = func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_, _ = io.WriteString(w, `{"error":"`+reason+`","detail":"said by the fake server"}`)
+			}
+			h.f.queue("acquire", jsonReply(200, h.lease()))
+			stop := h.run()
+			h.untilEnded("the lease to be failed")
+			_ = stop()
+			if got := h.f.failReasons(); len(got) != 1 || got[0] != "source_withdrawn" {
+				t.Errorf("the lease was failed %v, want [source_withdrawn]", got)
+			}
+			if n := len(h.f.seen("source")); n != 1 {
+				t.Errorf("the withdrawn source was asked for %d time(s), want 1", n)
+			}
+			if h.encodeCount() != 0 {
+				t.Error("an encode ran")
+			}
+			workDirEmpty(t, h.work)
+		})
+	}
+}
+
+// TestWorkerFixture_HTTPMode_TwoSlotsNeverBothPassTheRoomCheckOnTheSameFreeBytes: the room
+// check and the reservation are one step across the worker's slots. With room for exactly
+// one lease's source and output and two leases granted at once, one is downloaded and the
+// other fails `work_dir_full` before it asks for a byte.
+func TestWorkerFixture_HTTPMode_TwoSlotsNeverBothPassTheRoomCheckOnTheSameFreeBytes(t *testing.T) {
+	h := newHTTPRig(t)
+	first, second := h.lease(), h.lease()
+	second.LeaseID = "fedcba9876543210fedcba9876543210"
+	need := uint64(first.SourceSize + first.MaxOutputBytes)
+	h.opts.Slots = 2
+	h.opts.FreeSpace = func(string) (uint64, error) { return need, nil }
+	// The one download that starts is held until the other lease has been decided, so both
+	// leases are in flight together whatever the scheduler does.
+	h.f.source = func(w http.ResponseWriter, r *http.Request) {
+		deadline := time.Now().Add(10 * time.Second)
+		for len(h.f.seen("fail")) == 0 && len(h.f.seen("source")) < 2 && time.Now().Before(deadline) && r.Context().Err() == nil {
+			time.Sleep(2 * time.Millisecond)
+		}
+		h.serveWhole(w, r)
+	}
+	h.f.queue("acquire", jsonReply(200, first), jsonReply(200, second))
+	stop := h.run()
+	until(t, "one lease to complete and the other to end", func() bool {
+		return len(h.f.seen("complete")) >= 1 && len(h.f.seen("fail"))+len(h.f.seen("complete")) >= 2
+	})
+	_ = stop()
+	if got := h.f.failReasons(); len(got) != 1 || got[0] != ReasonWorkDirFull {
+		t.Fatalf("the leases were failed %v, want exactly one work_dir_full: both slots passed the room check on the same %d free bytes",
+			got, need)
+	}
+	if n := len(h.f.seen("source")); n != 1 {
+		t.Errorf("%d source requests, want 1: the refused lease asks for no byte", n)
+	}
+	if n := len(h.encodedSources()); n != 1 {
+		t.Errorf("%d encode(s) ran, want 1", n)
+	}
+
+	// The account itself: a reservation is held until released, released once, and a failed
+	// lookup or no lookup refuses nothing while still reserving.
+	l := h.lease()
+	w := &Worker{o: Options{WorkDir: h.work, FreeSpace: func(string) (uint64, error) { return 2*need + 1, nil }}}
+	relA, got, ok := w.reserveRoom(&l)
+	if !ok || got != need || w.reserved != need {
+		t.Fatalf("the first reservation = %d, %v with %d reserved, want %d, true, %d", got, ok, w.reserved, need, need)
+	}
+	relB, _, ok := w.reserveRoom(&l)
+	if !ok || w.reserved != 2*need {
+		t.Fatalf("the second reservation = %v with %d reserved, want true and %d", ok, w.reserved, 2*need)
+	}
+	if rel, _, ok := w.reserveRoom(&l); ok || w.reserved != 2*need {
+		t.Errorf("a third reservation past the free bytes = %v with %d reserved, want it refused and nothing added", ok, w.reserved)
+	} else {
+		rel() // a refused reservation's release gives nothing back
+	}
+	if w.reserved != 2*need {
+		t.Errorf("releasing a refused reservation moved the account to %d", w.reserved)
+	}
+	relA()
+	relA()
+	if w.reserved != need {
+		t.Errorf("after one release (called twice) %d bytes are reserved, want %d", w.reserved, need)
+	}
+	if _, _, ok := w.reserveRoom(&l); !ok {
+		t.Error("a reservation after a release was refused")
+	}
+	relB()
+	for name, free := range map[string]func(string) (uint64, error){
+		"a failed lookup": func(string) (uint64, error) { return 0, errors.New("statfs failed") }, "no lookup": nil,
+	} {
+		w := &Worker{o: Options{WorkDir: h.work, FreeSpace: free}}
+		if _, _, ok := w.reserveRoom(&l); !ok || w.reserved != need {
+			t.Errorf("%s: reserveRoom = %v with %d reserved, want it accepted and %d reserved", name, ok, w.reserved, need)
+		}
+	}
+	for name, c := range map[string]struct {
+		free, reserved uint64
+		ok             bool
+	}{
+		"exactly the room beside a reservation": {need + 7, 7, true},
+		"one byte short beside a reservation":   {need + 6, 7, false},
+		"all of it reserved":                    {need, need, false},
+	} {
+		if ok := roomBeside(func(string) (uint64, error) { return c.free, nil }, h.work, need, c.reserved); ok != c.ok {
+			t.Errorf("%s: roomBeside = %v, want %v", name, ok, c.ok)
+		}
+	}
+}
+
+// TestWorkerFixture_HTTPMode_AWorkDirectoryThatFillsWhileTheSourceIsWrittenIsWorkDirFull:
+// ENOSPC from the write is the work directory being full, not a download that failed. The
+// download's path is made a link to /dev/full, which answers every write with ENOSPC.
+func TestWorkerFixture_HTTPMode_AWorkDirectoryThatFillsWhileTheSourceIsWrittenIsWorkDirFull(t *testing.T) {
+	if _, err := os.Stat("/dev/full"); err != nil {
+		t.Skipf("no /dev/full on this system: %v", err)
+	}
+	h := newHTTPRig(t)
+	l := h.lease()
+	if err := os.MkdirAll(h.work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/full", filepath.Join(h.work, sourceName(l.LeaseID, l.Epoch, l.Path))); err != nil {
+		t.Fatal(err)
+	}
+	h.f.queue("acquire", jsonReply(200, l))
+	stop := h.run()
+	h.untilEnded("the lease to be failed")
+	_ = stop()
+	if got := h.f.failReasons(); len(got) != 1 || got[0] != ReasonWorkDirFull {
+		t.Errorf("the lease was failed %v, want [%s]", got, ReasonWorkDirFull)
+	}
+	if n := len(h.f.seen("source")); n != 1 {
+		t.Errorf("the source was asked for %d time(s) after the work directory filled, want 1", n)
+	}
+	if h.encodeCount() != 0 {
+		t.Error("an encode ran")
+	}
+	workDirEmpty(t, h.work)
 }

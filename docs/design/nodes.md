@@ -180,16 +180,21 @@ when all of these hold:
 4. A transfer slot is free: otherwise `503 transfers_full` with `Retry-After`, and the lease
    stays live.
 5. The file, once opened, is a regular file of exactly the size and modification time the lease
-   was granted on: otherwise `409 source_changed`. The lease stays live - the node fails it as
-   one it could not run, and the server's own guards then decide about the file it finds.
+   was granted on: otherwise `409 source_changed`. It is opened without following a symbolic
+   link at the leased path (`O_NOFOLLOW`): the engine refuses a source that is itself a link,
+   so one found there was put there after the grant, and what it points at is not the leased
+   file however its size and time read. The lease stays live - the node fails it
+   `source_withdrawn`, and the server's own guards then decide about the file it finds.
 
 The body is sent by `http.ServeContent`, which "handles Range requests properly", under
 `Content-Type: application/octet-stream` set **before** the call: "If the response's Content-Type
 header is not set, ServeContent first tries to deduce the type from name's file extension and,
 if that fails, falls back to reading the first block of the content and passing it to
 DetectContentType". A sniffed head would be read twice, so the type is fixed, no name is given
-and no modification time (so no `Last-Modified`, and no conditional request answered from a
-date). The reader the server hands `ServeContent` hashes only bytes read in order from the first
+and no modification time (so no `Last-Modified`). `ServeContent` also "handles If-Match,
+If-Unmodified-Since, If-None-Match, If-Modified-Since, and If-Range requests", which would
+answer `304` or `412`; this endpoint has neither answer, so those five request headers are
+dropped before it is called and a conditional request is served like any other. The reader the server hands `ServeContent` hashes only bytes read in order from the first
 one, each once.
 
 **What the server streamed, it hashed.** One unranged `GET` that sent the whole source leaves
@@ -211,8 +216,9 @@ that granted the lease. Recovery after a restart is correct without them, and no
 was made for them: a recovered lease's mode is unknown, so its source is **not served** (rule
 3) rather than served on a guess; a node that already holds the whole source carries on, uploads
 and completes, and is held to the server's own hash; a node that was still downloading fails
-its lease as one it could not run, and the server encodes that job itself, charging the file
-nothing. The streamed digest is transport integrity for one process's stream and nothing else
+its lease `source_withdrawn`, and the server encodes that job itself, charging the file nothing
+and - because the withdrawal was the server's own doing - not counting it toward that node's
+cool-off. The streamed digest is transport integrity for one process's stream and nothing else
 relies on it.
 
 **A stalled download cannot hold a transfer slot.** The stream is written under a deadline set
@@ -357,7 +363,8 @@ fact about the file.
 
 - **The node could not run it**: the worker failed the lease `unmapped_source`,
   `source_mismatch`, `source_unreadable`, `unsupported_encoder`, `refused_plan`,
-  `worker_stopping`, or in http mode `source_download_failed` or `work_dir_full`; or the re-derived job after a restart is not the leased one; or the hub
+  `worker_stopping`, or in http mode `source_download_failed`, `work_dir_full` or
+  `source_withdrawn`; or the re-derived job after a restart is not the leased one; or the hub
   granted nothing. **Nothing is recorded against the file.** The server encodes the job itself,
   in the same attempt, inside a gate slot, exactly as it does a plan that is not leasable, and
   one record names the node and the reason.
@@ -377,7 +384,10 @@ is split off: a departure from the letter of the proposal's retry rule, recorded
 (either kind) with none succeeding between, that node is offered nothing for five minutes (both
 **ASSUMED**): its polls answer `503 node_cooling_off` with the time left as `Retry-After`, and
 one `warn` record names the node, the reasons and the cool-off. A lease whose output the server
-took clears the run. A poll that left before its grant counts for nothing.
+took clears the run. A poll that left before its grant counts for nothing, and neither does a
+lease the worker failed `source_withdrawn`: the server stopped offering that source itself (it
+restarted, or the file is no longer the leased one), which says nothing about the node, so it
+neither lengthens the node's run nor clears it.
 
 A cancelled pass, and a lease the server ended because it is stopping, record nothing against
 the file, exactly as an interrupted local encode does not.
@@ -421,7 +431,10 @@ the worker's own mount of the library. In http mode the worker reads no library,
 configuration carries no `library_roots` and no `worker_path_map` - no fake root is asked for -
 and one that names either beside `worker_mode: http` is refused by name, because a file that
 says both cannot mean both. `holdfast validate` accepts an http worker's file and says what it
-is; `run` and `serve` refuse it, having nothing to scan.
+is - after taking every start-or-refuse decision `holdfast worker` takes from the file alone
+(the address, the transport, `worker_tls_ca`, the presence of `node_token`, the name), so it
+never says "config OK" of a file the worker would refuse; `run` and `serve` refuse it, having
+nothing to scan.
 
 **It refuses a plain `http://` server whose host is not loopback**, unless
 `worker_insecure_http: true` is written ([the transport](#transport)).
@@ -444,17 +457,25 @@ Each of its slots then loops:
    and this is only the early refusal - the proof is the source digest the server compares. A
    command line outside the shape the server's plans have fails it `refused_plan`, unrun (below).
    In **http mode** there is no path to map: the worker first checks that the work directory
-   has room for the source and the largest output the lease admits (a failed lookup refuses
-   nothing; short of room the lease fails `work_dir_full`), then **downloads** the source into
+   has room for the source and the largest output the lease admits, **beside what its other
+   slots' leases in flight have reserved there**, and reserves it until the lease ends - check
+   and reservation are one step under one lock, so two slots never both pass on the same free
+   bytes (a failed lookup refuses nothing; short of room, or on a write that fails for want of
+   space, the lease fails `work_dir_full`). It then **downloads** the source into
    the work directory with one unranged `GET`, heartbeating all the while and hashing what
    arrives as it writes it. **The response is media only when it is a `200` that delivers
    exactly `source_size` bytes**: a `404` with a body, any other status, a `200` that declares
    another length, a body that ends early, one that runs long and one under a content coding
    are never encoded. A redirect is never followed. A download that broke off, or whose
-   `Repr-Digest` trailer disagrees, or that the server answered `503`, starts again from the
-   first byte - at most three times in all (**ASSUMED**), never resumed with `Range` - and one
-   that receives no byte for 60 s (**ASSUMED**) is cut; a `410` ends the lease there. What
-   cannot be cured fails the lease `source_download_failed`.
+   `Repr-Digest` trailer disagrees, starts again from the first byte - at most three times in
+   all (**ASSUMED**), never resumed with `Range` - and one that receives no byte for 60 s
+   (**ASSUMED**) is cut; a `410` ends the lease there. What cannot be cured fails the lease
+   `source_download_failed`. **A `503` is not a failed download and is not counted**: the
+   server has no transfer slot free (`node_max_transfers` is below the number of nodes
+   downloading, which is ordinary) or is not ready, so the worker asks again after the
+   server's `Retry-After`, jittered, heartbeating all the while, for as long as the lease
+   lives. A `409 source_not_offered` or `source_changed` is the server withdrawing the source:
+   the lease fails `source_withdrawn` at once.
 3. **Encode** into the work directory, heartbeating every `heartbeat_sec` with its progress. A
    `410` stops the encode at once and discards the output. In http mode the input is the
    downloaded file, and the command line is assembled by the same function as in mapped mode.

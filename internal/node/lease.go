@@ -46,6 +46,12 @@ const (
 	ReasonPollGone Reason = "poll_gone"
 )
 
+// ReasonSourceWithdrawn is the typed reason a WORKER fails an http-mode lease with when the
+// server itself stopped offering the lease's source (409 source_not_offered after a restart,
+// or 409 source_changed). It says nothing about the node, so Hub.Report does not count it
+// toward the node's cool-off, and nothing about the file, so the engine does not charge it.
+const ReasonSourceWithdrawn = "source_withdrawn"
+
 // The refusals a decision returns.
 var (
 	// ErrGone is a call on a lease that is not live at the epoch presented: it ended, its

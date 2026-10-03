@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/node"
@@ -49,35 +51,69 @@ type sourceRefusal struct {
 	why   string
 	again bool
 	wait  time.Duration
+	// busy is a 503: the server has no transfer slot, or is not ready. It is waited out and
+	// is not a failed download, so it is not counted against MaxSourceAttempts.
+	busy bool
+	// withdrawn is a 409 source_not_offered or source_changed: the SERVER no longer offers
+	// this lease's source. full is the work directory running out of room mid-write.
+	withdrawn, full bool
 }
 
 func (e *sourceRefusal) Error() string { return e.why }
 
-// roomFor reports whether the work directory can hold a lease's source and the largest
-// output it may produce. A failed lookup refuses nothing, as the server's own checks do not.
-func roomFor(freeSpace func(string) (uint64, error), dir string, l *node.AcquireResponse) (need uint64, ok bool) {
-	need = uint64(l.SourceSize) + uint64(l.MaxOutputBytes)
+// roomBeside reports whether the work directory can take need more bytes beside what this
+// worker's other leases in flight have reserved there. A failed lookup refuses nothing, as
+// the server's own checks do not, and so does a worker with no lookup wired.
+func roomBeside(freeSpace func(string) (uint64, error), dir string, need, reserved uint64) bool {
 	if freeSpace == nil {
-		return need, true
+		return true
 	}
 	free, err := freeSpace(dir)
-	return need, err != nil || free >= need
+	return err != nil || free >= reserved+need
+}
+
+// roomNeeded is what one lease may write into the work directory: its source and the
+// largest output it may produce.
+func roomNeeded(l *node.AcquireResponse) uint64 {
+	return uint64(l.SourceSize) + uint64(l.MaxOutputBytes)
+}
+
+// reserveRoom checks the work directory for one lease's source and output and, where there
+// is room, reserves it - in one step, under one lock, across every slot of this worker, so
+// two slots can never both pass the check on the same free bytes. The reservation is held
+// until release is called, at the lease's end. It is deliberately conservative: bytes a
+// lease in flight has already written are counted both as used and as reserved.
+func (w *Worker) reserveRoom(l *node.AcquireResponse) (release func(), need uint64, ok bool) {
+	need = roomNeeded(l)
+	w.roomMu.Lock()
+	defer w.roomMu.Unlock()
+	if !roomBeside(w.o.FreeSpace, w.o.WorkDir, need, w.reserved) {
+		return func() {}, need, false
+	}
+	w.reserved += need
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			w.roomMu.Lock()
+			w.reserved -= need
+			w.roomMu.Unlock()
+		})
+	}, need, true
 }
 
 // fetchSource downloads the lease's source into dst, restarting from zero on a failure a
-// later attempt could cure, at most MaxSourceAttempts times. It returns the sha-256 of the
-// bytes written, or the typed reason the lease is failed with. A 410 sets gone. When ctx
-// ends the reason it returns is not the one that matters: the caller reads gone and its own
-// context first.
+// later attempt could cure, at most MaxSourceAttempts times. A 503 is not such a failure:
+// the server is busy - no transfer slot, or not ready - so it is waited out on the server's
+// own Retry-After, jittered, for as long as the lease lives (the heartbeat's 410, or the
+// worker stopping, ends ctx), and it never counts against the bound. It returns the sha-256
+// of the bytes written, or the typed reason the lease is failed with. A 410 sets gone. When
+// ctx ends the reason it returns is not the one that matters: the caller reads gone and its
+// own context first.
 func (w *Worker) fetchSource(ctx context.Context, l *node.AcquireResponse, dst string, gone *atomic.Bool) ([]byte, string) {
 	log := w.o.Log.With("lease", l.LeaseID, "epoch", l.Epoch)
-	if need, ok := roomFor(w.o.FreeSpace, w.o.WorkDir, l); !ok {
-		log.Warn("worker: worker_work_dir has no room for the leased source and its output, so nothing is downloaded",
-			"work_dir", w.o.WorkDir, "bytes_needed", need)
-		return nil, ReasonWorkDirFull
-	}
 	b := &backoff{min: w.o.MinBackoff, max: w.o.MaxBackoff, jitter: w.o.Jitter}
-	for attempt := 1; attempt <= MaxSourceAttempts; attempt++ {
+	busy := &backoff{min: w.o.MinBackoff, max: w.o.MaxBackoff, jitter: w.o.Jitter}
+	for attempt := 1; attempt <= MaxSourceAttempts; {
 		sum, err := w.download(ctx, l, dst)
 		if err == nil {
 			return sum, ""
@@ -94,11 +130,26 @@ func (w *Worker) fetchSource(ctx context.Context, l *node.AcquireResponse, dst s
 		again, wait := true, time.Duration(0)
 		if errors.As(err, &refusal) {
 			again, wait = refusal.again, refusal.wait
+			switch {
+			case refusal.busy:
+				log.Info("worker: the server is busy; the source is asked for again", "wait_at_least", wait.String(), "why", refusal.why)
+				if w.o.Sleep(ctx, busy.next(wait)) != nil {
+					return nil, ReasonSourceDownloadFailed
+				}
+				continue
+			case refusal.withdrawn:
+				log.Warn("worker: the server no longer offers this lease's source; nothing is encoded", "why", refusal.why)
+				return nil, ReasonSourceWithdrawn
+			case refusal.full:
+				log.Warn("worker: worker_work_dir ran out of room while the source was written", "why", refusal.why)
+				return nil, ReasonWorkDirFull
+			}
 		}
 		log.Warn("worker: the source download failed; nothing of it is encoded", "attempt", attempt, "again", again, "err", err)
 		if !again || attempt == MaxSourceAttempts || w.o.Sleep(ctx, b.next(wait)) != nil {
 			break
 		}
+		attempt++
 	}
 	return nil, ReasonSourceDownloadFailed
 }
@@ -142,7 +193,11 @@ func (w *Worker) download(ctx context.Context, l *node.AcquireResponse, dst stri
 		case http.StatusGone:
 			return nil, errSourceGone
 		case http.StatusServiceUnavailable:
-			return nil, &sourceRefusal{why: "the server answered 503 " + e.Error, again: true, wait: retryAfter(resp)}
+			return nil, &sourceRefusal{why: "the server answered 503 " + e.Error, again: true, busy: true, wait: retryAfter(resp)}
+		case http.StatusConflict:
+			if e.Error == "source_not_offered" || e.Error == "source_changed" {
+				return nil, &sourceRefusal{why: "the server answered 409 " + e.Error, withdrawn: true}
+			}
 		}
 		// Whatever the body holds, an answer that is not 200 is not the source.
 		return nil, &sourceRefusal{why: fmt.Sprintf("the server answered %d %s with a %d-byte body, which is "+
@@ -172,7 +227,8 @@ func (w *Worker) download(ctx context.Context, l *node.AcquireResponse, dst stri
 			hash.Write(buf[:n])
 			if _, werr := f.Write(buf[:n]); werr != nil {
 				_ = f.Close()
-				return nil, &sourceRefusal{why: "writing the download in worker_work_dir: " + werr.Error()}
+				return nil, &sourceRefusal{why: "writing the download in worker_work_dir: " + werr.Error(),
+					full: errors.Is(werr, syscall.ENOSPC)}
 			}
 			got += int64(n)
 		}

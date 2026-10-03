@@ -871,3 +871,143 @@ func TestNodeSource_TheLeasedFileIsARegularFileOfTheLeasedSizeAndTime(t *testing
 		t.Error("a directory of the leased size and time is taken for the source")
 	}
 }
+
+// TestNodeFixture_ASymlinkSwappedInAtTheLeasedPathIsNeverFollowed: the engine refuses a
+// source that is a symbolic link, so a link at the leased path was put there after the
+// grant. It is refused as a changed source - not followed - even when what it points at has
+// exactly the leased size and modification time, and no byte of that file is sent.
+func TestNodeFixture_ASymlinkSwappedInAtTheLeasedPathIsNeverFollowed(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, nil)
+	content := patterned(3000)
+	job := f.jobOf("film", content)
+	a, call := f.grantHTTP("node-a", job)
+	fi, err := os.Stat(job.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A file OUTSIDE the library, of the leased size and modification time.
+	outside := filepath.Join(t.TempDir(), "not-the-library.bin")
+	secret := bytes.Repeat([]byte("PRIVATE!"), 375)
+	if err := os.WriteFile(outside, secret, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(outside, fi.ModTime(), fi.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(job.Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, job.Path); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(job.Path); err != nil || st.Size() != job.SourceSize || !st.ModTime().Equal(job.SourceModTime) {
+		t.Fatalf("the fixture's link does not read as the leased size and time (%v); it proves nothing", err)
+	}
+	r := f.source(a.LeaseID, "1", nil)
+	isTyped(t, "a symlink at the leased path", r, http.StatusConflict, "source_changed")
+	if bytes.Contains(r.body, []byte("PRIVATE!")) {
+		t.Fatal("bytes of the file the link points at were sent")
+	}
+	if !strings.Contains(string(r.body), "symbolic link") {
+		t.Errorf("the refusal does not say a symbolic link stands there: %s", r.body)
+	}
+	if got := f.streamed(a.LeaseID); got != "" || f.transfers() != 0 {
+		t.Errorf("the refused request recorded %q and holds %d transfer slot(s)", got, f.transfers())
+	}
+	if row := f.row(a.LeaseID); row.State != store.LeaseGranted || call.returned() {
+		t.Errorf("the refused request moved the lease to %s", row.State)
+	}
+	// A ranged request is refused the same way.
+	isTyped(t, "a ranged request for a symlink at the leased path",
+		f.source(a.LeaseID, "1", map[string]string{"Range": "bytes=0-9"}), http.StatusConflict, "source_changed")
+}
+
+// TestNodeFixture_AConditionalSourceRequestIsAnsweredWithTheWholeSource: http.ServeContent
+// honours If-None-Match, If-Match, If-Modified-Since, If-Unmodified-Since and If-Range, which
+// would answer 304 or 412 - answers this endpoint does not have. They are dropped before the
+// source is served: each such request is a 200 with the whole source, hashed like any other,
+// and an If-Range leaves a Range request an ordinary ranged one.
+func TestNodeFixture_AConditionalSourceRequestIsAnsweredWithTheWholeSource(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, nil)
+	content := patterned(3000)
+	job := f.jobOf("film", content)
+	a, _ := f.grantHTTP("node-a", job)
+	for name, header := range map[string]map[string]string{
+		"If-None-Match: *":                 {"If-None-Match": "*"},
+		`If-Match: "x"`:                    {"If-Match": `"x"`},
+		"If-Match: *":                      {"If-Match": "*"},
+		"If-Modified-Since in the future":  {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"},
+		"If-Unmodified-Since in the past":  {"If-Unmodified-Since": "Thu, 01 Jan 1970 00:00:01 GMT"},
+		"If-Range with no Range":           {"If-Range": `"x"`},
+		"every conditional header at once": {"If-None-Match": "*", "If-Match": `"x"`, "If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT", "If-Unmodified-Since": "Thu, 01 Jan 1970 00:00:01 GMT"},
+	} {
+		f.hub.mu.Lock()
+		f.hub.sources[a.LeaseID].streamed = ""
+		f.hub.mu.Unlock()
+		r := f.source(a.LeaseID, "1", header)
+		if r.status != http.StatusOK || !bytes.Equal(r.body, content) {
+			t.Errorf("%s answered %d with %d bytes, want 200 and the whole source", name, r.status, len(r.body))
+			continue
+		}
+		if got := f.streamed(a.LeaseID); got != digestOf(content) {
+			t.Errorf("%s: the whole source was sent and %q recorded for it", name, got)
+		}
+	}
+	// If-Range is dropped, so the Range beside it is served as a Range: a part, and no digest.
+	f.hub.mu.Lock()
+	f.hub.sources[a.LeaseID].streamed = ""
+	f.hub.mu.Unlock()
+	r := f.source(a.LeaseID, "1", map[string]string{"Range": "bytes=10-19", "If-Range": `"x"`})
+	if r.status != http.StatusPartialContent || !bytes.Equal(r.body, content[10:20]) {
+		t.Errorf("a Range with an If-Range answered %d with %d bytes, want 206 and bytes 10 to 19", r.status, len(r.body))
+	}
+	if got := f.streamed(a.LeaseID); got != "" {
+		t.Errorf("a ranged request recorded a streamed digest %q", got)
+	}
+}
+
+// TestNodeFixture_ASourceTheServerWithdrewNeverCoolsTheNodeOff: `source_withdrawn` is the
+// server's own doing - it restarted, or the file moved - so however many leases of one node
+// end on it, the node is still offered work; it neither lengthens the node's run of ended
+// leases nor clears it.
+func TestNodeFixture_ASourceTheServerWithdrewNeverCoolsTheNodeOff(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, nil)
+	cooling := func() bool {
+		f.hub.mu.Lock()
+		defer f.hub.mu.Unlock()
+		return f.hub.coolingLocked("node-a") != nil
+	}
+	streak := func() int {
+		f.hub.mu.Lock()
+		defer f.hub.mu.Unlock()
+		if c := f.hub.cooling["node-a"]; c != nil {
+			return c.streak
+		}
+		return 0
+	}
+	for i := 0; i < 3*DefaultCoolOffAfter; i++ {
+		f.hub.Report("node-a", ReasonSourceWithdrawn)
+	}
+	if cooling() || streak() != 0 {
+		t.Fatalf("a node whose leases ended source_withdrawn %d times is cooling off (%v) with a run of %d", 3*DefaultCoolOffAfter, cooling(), streak())
+	}
+	// It does not clear a run either: two real endings, a withdrawal, and the third real
+	// ending still cools the node off.
+	f.hub.Report("node-a", "source_download_failed")
+	f.hub.Report("node-a", "encode_failed")
+	f.hub.Report("node-a", ReasonSourceWithdrawn)
+	if cooling() || streak() != 2 {
+		t.Fatalf("after two real endings and a withdrawal the run is %d and cooling is %v, want 2 and false", streak(), cooling())
+	}
+	f.hub.Report("node-a", "source_download_failed")
+	if !cooling() {
+		t.Error("the third real ending did not cool the node off")
+	}
+	// And the reason is one a worker may fail a lease with.
+	if !failReason.MatchString(ReasonSourceWithdrawn) || ReasonSourceWithdrawn != "source_withdrawn" {
+		t.Errorf("ReasonSourceWithdrawn = %q", ReasonSourceWithdrawn)
+	}
+}

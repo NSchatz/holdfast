@@ -771,6 +771,51 @@ func TestWorker_TransportAndModeRefusalsAndTheInsecureOverride(t *testing.T) {
 				t.Errorf("%s on a file with no library root = %d %q, want the empty-roots refusal", cmd, code, errOut.String())
 			}
 		}
+		if !strings.Contains(out.String(), "https://holdfast.example.net") {
+			t.Errorf("validate does not name the server the worker leases from: %q", out.String())
+		}
+		// `validate` never says "config OK" of a file `holdfast worker` would refuse: each
+		// refusal the worker takes from its configuration alone is `validate`'s too.
+		for name, tc := range map[string]struct {
+			cfg   string
+			wants []string
+		}{
+			"no worker_server":         {rootless, []string{"worker_server is not set"}},
+			"plain http, not loopback": {rootless + "worker_server: http://192.0.2.10:8080\n", []string{"cleartext", "worker_insecure_http: true"}},
+			"no node_token": {"state_dir: " + filepath.Join(dir, "state") + "\nworker_mode: http\nworker_server: https://holdfast.example.net\n",
+				[]string{"node_token is not set"}},
+			"an unreadable worker_tls_ca": {rootless + "worker_server: https://holdfast.example.net\nworker_tls_ca: " + filepath.Join(dir, "missing-ca.pem") + "\n",
+				[]string{"worker_tls_ca", "could not be read"}},
+			"an empty worker_tls_ca": {rootless + "worker_server: https://holdfast.example.net\nworker_tls_ca: " + emptyCA + "\n",
+				[]string{"worker_tls_ca", "holds no PEM certificate"}},
+		} {
+			bad := filepath.Join(t.TempDir(), "bad.yaml")
+			writeFile(t, bad, tc.cfg, 0o600)
+			var out, errOut bytes.Buffer
+			code := dispatch([]string{"validate", "--config", bad}, &out, &errOut)
+			if code == 0 || strings.Contains(out.String(), "config OK") {
+				t.Errorf("%s: validate exited %d saying %q of a file `worker` refuses", name, code, out.String())
+			}
+			for _, want := range append(tc.wants, "`holdfast worker` would refuse to start") {
+				if !strings.Contains(errOut.String(), want) {
+					t.Errorf("%s: validate's refusal does not say %q: %s", name, want, errOut.String())
+				}
+			}
+			// And the worker command itself refuses the same file.
+			var wOut, wErr bytes.Buffer
+			if code := dispatch([]string{"worker", "--config", bad}, &wOut, &wErr); code != 1 || !strings.Contains(wErr.String(), tc.wants[0]) {
+				t.Errorf("%s: worker exited %d saying %q, want the same refusal", name, code, wErr.String())
+			}
+		}
+		// The override is accepted by both, and `validate` says what it costs.
+		insecure := filepath.Join(t.TempDir(), "insecure.yaml")
+		writeFile(t, insecure, rootless+"worker_server: http://192.0.2.10:8080\nworker_insecure_http: true\nworker_name: nodeA\n", 0o600)
+		out.Reset()
+		errOut.Reset()
+		if code := dispatch([]string{"validate", "--config", insecure}, &out, &errOut); code != 0 ||
+			!strings.Contains(out.String(), "config OK") || !strings.Contains(out.String(), "CLEARTEXT") || !strings.Contains(out.String(), "named nodeA") {
+			t.Errorf("validate on an http worker with worker_insecure_http = %d %q %q, want config OK with the cleartext warning", code, out.String(), errOut.String())
+		}
 		// And a file that names no root and is NOT an http worker's is not validated as one.
 		plain := filepath.Join(t.TempDir(), "plain.yaml")
 		writeFile(t, plain, "state_dir: "+filepath.Join(dir, "state")+"\n", 0o600)
