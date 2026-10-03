@@ -296,14 +296,15 @@ services:
       - HOLDFAST_SERVER_READ_TOKEN=file:/run/secrets/holdfast_read_token
 ```
 
-**It does not gate the root path.** holdfast ships no frontend, so `/` is a plain-text page
-naming the endpoints and carrying the Corresponding Source offer. (A web UI is to ship on this
-API - decided 2026-09-29 by the owner (T14, T18); until that release, `/` is this page for
-every client but a browser, which gets the UI's shell with the same offer, its static files
-under `/assets/`.) It is still served with no
-credential when a read token is set, and it holds no library datum for a credential to
-protect - every media path is behind `/api/queue`, `/api/history` and `/api/events`, which
-the key does gate. `serve` says so at startup rather than leaving you to find it, and
+**It does not gate the root path.** `/` is the web UI's page for a browser, with its static
+files under `/assets/`, and a plain-text page naming the endpoints for every other client; both
+carry the Corresponding Source offer. The page and its files are the same for every install
+and are still served with no credential when a read token is set: they hold no library datum
+for a credential to protect. Every figure and every media path the web UI shows it reads from
+`/api/summary`, `/api/queue`, `/api/history`, `/api/health` and `/api/nodes`, which the key
+does gate, so with a read token set the web UI shows nothing until a token is typed into it.
+It keeps that token in the page's memory only - no storage, no cookie, no URL - and a reload
+asks again ([docs/design/web-ui.md](design/web-ui.md#token)). `serve` says so at startup rather than leaving you to find it, and
 `validate` says what it can see of it: a token that is not set in the file or in its own
 environment may still be supplied where `serve` runs. `run` opens no listener and says nothing
 about one.

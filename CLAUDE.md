@@ -69,7 +69,7 @@ reasoning lives in the document, not in this file.
 - **A media server is told about a swap only after it has committed, once, by directory; and a file being played is held, which only ever delays** - [`docs/design/media-clients.md`](docs/design/media-clients.md#media-clients).
 - **A node's output is only ever a candidate: it lands in a working file the server named, on a live lease at the current epoch, with the declared length and digest, and the server's own gates and rename decide** - [`docs/design/nodes.md`](docs/design/nodes.md#leases).
 - **A worker speaks to its server over TLS or to loopback; plain HTTP to any other host is refused unless the operator wrote `worker_insecure_http: true`, which is logged at every start; and a node's source is streamed only on a live lease, with its sha-256 compared on the server before any gate** - [`docs/design/nodes.md`](docs/design/nodes.md#transport).
-- **The web UI is built by one pinned toolchain, embedded in the binary, and served at `/` only to a request that asks for HTML; every root response carries the source offer** - [`docs/design/web-ui.md`](docs/design/web-ui.md#embed).
+- **The web UI is built by one pinned toolchain, embedded in the binary, and served at `/` only to a request that asks for HTML; every root response carries the source offer; its token lives in a variable of the running page and nowhere else** - [`docs/design/web-ui.md`](docs/design/web-ui.md#embed), [`#token`](docs/design/web-ui.md#token).
 - **An arr's webhook is authenticated by a credential that can only queue; both Sonarr Download shapes and Radarr's are read; each file goes through the targeted scan; an unrecognised shape queues nothing** - [`docs/design/media-clients.md`](docs/design/media-clients.md#webhook-intake).
 
 ## Layout
@@ -113,9 +113,9 @@ reasoning lives in the document, not in this file.
   process really has: they size the libvmaf and libx265 threads and set the resident
   memory at which an encode is aborted.
 - `internal/schedule` - host-fair run windows.
-- `internal/server` - the HTTP surface, with the webhook intake and the node lease routes. No frontend yet:
-  the JSON API is the interface, and `/` is a plain-text page carrying the source offer (a web UI
-  was decided by the owner (T14, T18); its shell is embedded and its views are not built).
+- `internal/server` - the HTTP surface, with the webhook intake and the node lease routes. It serves the web UI
+  at `/` to a request for HTML; the UI shows and drives only what the JSON API offers, which remains the full
+  interface, and every other request to `/` gets the plain-text page carrying the source offer.
 - `internal/ui` + `web/` - the embedded web UI and its Svelte source; `scripts/ui.sh` runs its gate steps on the pinned Node and pnpm.
 - `internal/sourceoffer` - the AGPL section 13 Corresponding Source offer the root path carries.
 - `internal/node` - the worker-node lease protocol's server side: the lease state machine, the caps, the hashed source stream and the digest-checked upload.

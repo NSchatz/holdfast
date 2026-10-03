@@ -30,7 +30,7 @@ func setSourceURL(t *testing.T, v string) {
 	t.Cleanup(func() { sourceoffer.URL = old })
 }
 
-// newRootServer builds a Server around st. holdfast ships no frontend, so there is one
+// newRootServer builds a Server around st with no web UI wired, so there is one
 // root-serving branch and this is the whole of it: the plain-text page RootHandler
 // serves, mounted in the real router.
 func newRootServer(t *testing.T, token string, st store.Store) *Server {
@@ -94,8 +94,8 @@ func TestPlainTextOfferGrader_FailsAgainstEveryMutation(t *testing.T) {
 	}
 }
 
-// AC9: the root path, which is the only root path holdfast has now that it ships no
-// frontend, carries the source URL in effect, the licence name and the build identity.
+// AC9: the root path's plain-text page, the whole of the root where no web UI is
+// wired, carries the source URL in effect, the licence name and the build identity.
 // AC7: it is served to a request with no bearer token, whether or not the binary has
 // a control token configured at all.
 func TestAPIOnlyRoot_CarriesTheSourceOffer(t *testing.T) {
@@ -242,7 +242,7 @@ func TestSourceOffer_SurvivesEveryOpenReadEndpointFailing(t *testing.T) {
 	}
 }
 
-// The root page is the root page and nothing else: with no frontend there is no catch-all
+// The root page is the root page and nothing else: with no web UI wired there is no catch-all
 // under "/", so a stray asset request 404s rather than being answered with the root body.
 // A handler that served the same page for every path would make the offer assertions above
 // pass for paths that carry no offer obligation at all.

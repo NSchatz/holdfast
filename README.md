@@ -373,10 +373,13 @@ re-encoding; `holdfast requeue` is the LOCAL lever for the rest - **[docs/requeu
 ### Web API (`serve`)
 
 `holdfast serve` runs a REST API + [SSE](https://developer.mozilla.org/docs/Web/API/Server-sent_events)
-live stream. **holdfast currently ships no frontend: the HTTP JSON API is the interface**, and the root
-path serves a plain-text page naming the endpoints. (Reversed -
-decided 2026-09-29 by the owner (T14, T18): a web UI, a single-page application with its own Node
-build, is to ship on top of this API; until that release, this paragraph is what holdfast does.) It is
+live stream, and **the web UI is embedded in the binary and served at `/` to a browser**. It shows the
+summary and savings, the queue with each file's priority, the history with status filters and paging,
+the health sweep's results and the worker nodes, and it drives the controls the API already offers and
+no others: pause, resume, a library scan, a scan of named paths and the withheld paths, with a token
+held in the page's memory only. **The HTTP JSON API remains the full interface**: the web UI calls
+nothing a script cannot, and every request to the root path that does not ask for HTML gets the
+plain-text page naming the endpoints ([docs/design/web-ui.md](docs/design/web-ui.md#views)). It is
 a **read-and-control** surface on top of the config-as-code engine: the YAML file stays the source of
 truth and the SQLite store stays the source of job state. The API can only **read the store, start a
 scan, and pause/resume the feeding of new files** - it never touches a media file, so the data-safety
