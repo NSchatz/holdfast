@@ -300,7 +300,7 @@ func TestRequeueInputs_TheThreeRowsNothingReopensSurviveAnyConfigurationChange(t
 		&store.Outcome{Reason: "the swap did not complete cleanly"})
 	seedRowForRealFile(t, ts, applied, store.AppliedDespiteError,
 		&store.Outcome{Reason: "the rename took effect after the gate failed"})
-	if _, err := ts.RecordSkip(ctx, rescued, probe.Fingerprint(rescued), SkipRestoredOriginal, store.Decision{}, ""); err != nil {
+	if _, err := ts.RecordSkip(ctx, rescued, probe.Fingerprint(rescued), SkipRestoredOriginal, store.Decision{}, "", store.SourceFacts{}); err != nil {
 		t.Fatalf("RecordSkip(restored-original): %v", err)
 	}
 	// The fourth row is the anti-vacuity arm: an ordinary codec skip, recorded under the

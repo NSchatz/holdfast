@@ -114,7 +114,7 @@ func TestRecordSkip_TheProfileThatDecidedTheSkipIsOnTheRow(t *testing.T) {
 		{"/lib/converted.mkv", "4k-av1"},
 		{"/lib/plain.mkv", ""},
 	} {
-		changed, err := s.RecordSkip(ctx, tc.path, "fp", "hardlinked", Decision{}, tc.profile)
+		changed, err := s.RecordSkip(ctx, tc.path, "fp", "hardlinked", Decision{}, tc.profile, SourceFacts{})
 		if err != nil {
 			t.Fatalf("RecordSkip(%s): %v", tc.path, err)
 		}
@@ -125,7 +125,7 @@ func TestRecordSkip_TheProfileThatDecidedTheSkipIsOnTheRow(t *testing.T) {
 
 	// A second call over an already-skipped row is the no-op the caller relies on, and it
 	// must not rewrite the attribution either.
-	if changed, err := s.RecordSkip(ctx, "/lib/fresh.mkv", "fp", "hardlinked", Decision{}, "something-else"); err != nil {
+	if changed, err := s.RecordSkip(ctx, "/lib/fresh.mkv", "fp", "hardlinked", Decision{}, "something-else", SourceFacts{}); err != nil {
 		t.Fatalf("RecordSkip again: %v", err)
 	} else if changed {
 		t.Error("a second RecordSkip over an existing skip reported a change")

@@ -1358,23 +1358,30 @@ func (s *SQLite) DropRetained(ctx context.Context, sourcePath string) error {
 // THIS attempt exactly as the reason does. Clearing the encode profile would record
 // "nothing matched this file" on a row a profile decided, which is a false statement and
 // not an absence - for that column NULL and "" say the same thing.
-func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision, profile string) (bool, error) {
+//
+// The source's codec and dimensions are carried the same way and for the same reason:
+// they describe the SOURCE this guard was decided about, off the snapshot already taken for
+// it, and not an encode. Where no snapshot was taken they are NULL, on the insert and on
+// the conversion alike, so a converted row never keeps an earlier attempt's.
+func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision, profile string, src SourceFacts) (bool, error) {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason,
-			library_root, profile_digest, schema_version, profile)
-		 VALUES (?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?)
+			library_root, profile_digest, schema_version, profile,
+			source_codec, source_width, source_height)
+		 VALUES (?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(path, fingerprint) DO UPDATE SET
 			status = excluded.status, reason = excluded.reason, worker = NULL, updated_at = excluded.updated_at,
 			library_root = excluded.library_root, profile_digest = excluded.profile_digest,
 			schema_version = excluded.schema_version,
 			encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL, vmaf_stream = NULL,
-			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
+			source_codec = excluded.source_codec, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
 			target_path = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
 			swap_cause = NULL, decision_inputs = NULL, profile = excluded.profile,
 			dropped_streams = NULL, selection_not_applied = NULL, vmaf_skipped = NULL,
-			source_width = NULL, source_height = NULL, output_width = NULL, output_height = NULL,
+			source_width = excluded.source_width, source_height = excluded.source_height,
+			output_width = NULL, output_height = NULL,
 			deinterlaced = NULL, deinterlace_filter = NULL,
 			downscaled = NULL, downscale_scaler = NULL,
 			vmaf_scored_width = NULL, vmaf_scored_height = NULL,
@@ -1384,6 +1391,7 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason),
 		nullString(by.LibraryRoot), nullString(by.ProfileDigest), currentStamp(), nullString(profile),
+		nullString(src.Codec), nullPixels(src.Width), nullPixels(src.Height),
 		string(Pending))
 	if err != nil {
 		return false, fmt.Errorf("store: record skip: %w", err)
