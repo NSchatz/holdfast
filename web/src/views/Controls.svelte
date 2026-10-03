@@ -53,7 +53,10 @@
 
   const gate = $derived(exclusions.result);
   const refusedAt = $derived(gate?.kind === "refused" ? gate.status : null);
-  const available = $derived(token !== "" && refusedAt !== 401 && refusedAt !== 403);
+  // Only an answer says a token is accepted: the controls are enabled once the gate read
+  // made with this token has answered 2xx, and stay disabled while it is in flight, was
+  // refused, or got no answer.
+  const available = $derived(token !== "" && gate?.kind === "ok");
 
   const yesNo = (v: boolean | null) => (v === null ? UNAVAILABLE : v ? "yes" : "no");
 
@@ -75,6 +78,16 @@
   function toggled(result: ApiResult<ControlState>): Outcome {
     if (result.kind !== "ok") {
       return { good: false, lines: failure(result) };
+    }
+    // An answer that does not say is not a success, whatever its status.
+    if (result.value.paused === null) {
+      return {
+        good: false,
+        lines: [
+          "The server's answer did not state whether it is paused, so nothing is known to have changed.",
+          `Scanning ${yesNo(result.value.scanning)}.`,
+        ],
+      };
     }
     return {
       good: true,
@@ -285,15 +298,30 @@
         </p>
       </div>
     {:else if gate === undefined}
-      <p role="status">Asking the server whether it accepts the token for its controls.</p>
+      <p role="status">
+        Asking the server whether it accepts the token for its controls. They are disabled until it
+        answers.
+      </p>
     {:else if gate.kind === "ok"}
       <p role="status" class="ok">The server accepted the token for its controls.</p>
     {:else if gate.kind === "refused"}
-      <p role="alert" class="bad">
-        The server refused the read of {EXCLUSIONS_PATH}: {gate.status} {gate.message}
-      </p>
+      <div role="alert" class="bad">
+        <p>The server refused the read of {EXCLUSIONS_PATH}: {gate.status} {gate.message}</p>
+        <p>
+          The controls are disabled: that read is how the page learns the server accepts this token,
+          and it has not said so.
+        </p>
+        <p><button type="button" onclick={exclusions.refresh}>Ask again</button></p>
+      </div>
     {:else}
-      <p role="alert" class="bad">{EXCLUSIONS_PATH} could not be read: {gate.message}</p>
+      <div role="alert" class="bad">
+        <p>{EXCLUSIONS_PATH} could not be read: {gate.message}</p>
+        <p>
+          The controls are disabled: that read is how the page learns the server accepts this token,
+          and it got no answer.
+        </p>
+        <p><button type="button" onclick={exclusions.refresh}>Ask again</button></p>
+      </div>
     {/if}
   </div>
 

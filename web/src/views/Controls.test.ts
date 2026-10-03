@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { describe, expect, it } from "vitest";
 
-import { cellsOf, fakeFetch, json, plain, textOf, type Call, type Route } from "../test-helpers";
+import { cellsOf, deferred, fakeFetch, json, plain, textOf, type Call, type Route } from "../test-helpers";
 import Controls from "./Controls.svelte";
 
 const CONTROL = "ctl-token";
@@ -142,10 +142,12 @@ describe("controls", () => {
 
   it("controls: pause reports what the server said, not what was asked for", async () => {
     // A server that answers 200 and still reports itself not paused.
-    await shown(controlServer((call) => (call.path === "/api/pause" ? json({ scanning: false }) : plain("", 404))));
+    await shown(
+      controlServer((call) => (call.path === "/api/pause" ? json({ paused: false, scanning: false }) : plain("", 404))),
+    );
     await fireEvent.click(button("Pause"));
     expect((await screen.findByText(/^The server answered: paused/)).textContent).toBe(
-      "The server answered: paused unavailable, scanning no.",
+      "The server answered: paused no, scanning no.",
     );
   });
 
@@ -377,6 +379,141 @@ describe("controls", () => {
       expect(call.url).not.toContain(CONTROL);
       expect(call.body ?? "").not.toContain(CONTROL);
       expect(call.path.startsWith("/api/")).toBe(true);
+    }
+  });
+
+  it.each([
+    ["Pause", "/api/pause", {}],
+    ["Resume", "/api/resume", {}],
+    ["Pause", "/api/pause", { scanning: false }],
+    ["Resume", "/api/resume", { paused: "no", scanning: false }],
+  ])("controls: a %s answered 200 without a boolean `paused` is an alert, not a success", async (name, path, answer) => {
+    await shown(controlServer((call) => (call.path === path ? json(answer) : plain("", 404))));
+    await fireEvent.click(button(name));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("The server's answer did not state whether it is paused");
+    expect(alert.textContent).toContain("nothing is known to have changed");
+    expect(screen.queryByText(/^The server answered/)).toBeNull();
+    expect(alert.classList.contains("ok")).toBe(false);
+  });
+
+  it("controls: with a token held, every control stays disabled while the gate read is in flight", async () => {
+    const gate = deferred<Response>();
+    const server = fakeFetch(() => gate.promise);
+    render(Controls, { fetch: server.fetch, token: CONTROL });
+    const said = screen.getByTestId("control-gate");
+    expect(said.textContent).toContain("Asking the server whether it accepts the token for its controls.");
+    expect(said.textContent).toContain("disabled until it");
+    for (const control of actions()) {
+      expect(control).toHaveProperty("disabled", true);
+      await fireEvent.click(control);
+    }
+    expect(screen.getByLabelText("Paths to scan")).toHaveProperty("disabled", true);
+    expect(screen.getByLabelText("Path to withhold")).toHaveProperty("disabled", true);
+    expect(sent(server.calls)).toEqual([]);
+
+    // Enabled only once that read has answered 2xx.
+    gate.resolve(json({ exclusions: [], runtime_state: NOTICE }));
+    await screen.findByText("The server accepted the token for its controls.");
+    for (const control of actions()) {
+      expect(control).toHaveProperty("disabled", false);
+    }
+  });
+
+  it.each([
+    ["answered 500", () => plain("internal error reading exclusions", 500), "500 internal error reading exclusions", "it has not said so"],
+    [
+      "got no answer",
+      () => {
+        throw new TypeError("network down");
+      },
+      "network down",
+      "it got no answer",
+    ],
+    ["was answered in another shape", () => json({ status: "ok" }), "did not answer with the withheld paths", "it got no answer"],
+  ])("controls: with a token held, every control is disabled while the gate read %s, and the page says why", async (_name, answer, words, why) => {
+    let failing = true;
+    const inner = controlServer();
+    const server = fakeFetch((call) => {
+      if (failing && call.method === "GET") {
+        return answer();
+      }
+      return inner.fetch(call.url, { method: call.method, headers: call.headers, body: call.body });
+    });
+    render(Controls, { fetch: server.fetch, token: CONTROL });
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(words);
+    expect(alert.textContent).toContain("The controls are disabled");
+    expect(alert.textContent).toContain(why);
+    for (const control of actions()) {
+      expect(control).toHaveProperty("disabled", true);
+      await fireEvent.click(control);
+    }
+    expect(sent(server.calls)).toEqual([]);
+
+    // Asking again is the way out, and a 2xx is what enables them.
+    failing = false;
+    await fireEvent.click(button("Ask again"));
+    await screen.findByText("The server accepted the token for its controls.");
+    for (const control of actions()) {
+      expect(control).toHaveProperty("disabled", false);
+    }
+  });
+
+  it("controls: a gate that stops answering after a change disables the controls again", async () => {
+    let failing = false;
+    const inner = controlServer();
+    const server = fakeFetch((call) => {
+      if (failing && call.method === "GET") {
+        return plain("internal error reading exclusions", 500);
+      }
+      return inner.fetch(call.url, { method: call.method, headers: call.headers, body: call.body });
+    });
+    await shown(server);
+    failing = true;
+    await fireEvent.click(button("Refresh"));
+    const alert = await screen.findByText(/The controls are disabled/);
+    expect(alert.closest("[role=alert]")).not.toBeNull();
+    for (const control of actions()) {
+      expect(control).toHaveProperty("disabled", true);
+    }
+  });
+
+  it("controls: entering a token asks the gate again at once, and a forgotten token's answer and list are gone", async () => {
+    // The read made without a token is held back, so what the page shows after Forget
+    // is what it holds by itself and not yet a new answer.
+    const tokenless = deferred<Response>();
+    const inner = controlServer();
+    const server = fakeFetch((call) => {
+      if (!("Authorization" in call.headers)) {
+        return tokenless.promise;
+      }
+      return inner.fetch(call.url, { method: call.method, headers: call.headers, body: call.body });
+    });
+    const view = render(Controls, { fetch: server.fetch, token: "" });
+    expect(server.calls).toHaveLength(1);
+    expect(server.calls[0]?.headers).not.toHaveProperty("Authorization");
+
+    await view.rerender({ token: CONTROL });
+    expect(server.calls).toHaveLength(2);
+    expect(server.calls[1]?.headers["Authorization"]).toBe(`Bearer ${CONTROL}`);
+    await screen.findByText("The server accepted the token for its controls.");
+    expect(screen.getByRole("table", { name: "Withheld paths (exclusions)" }).textContent).toContain(
+      "/library/films/example-x.mkv",
+    );
+    expect(button("Pause")).toHaveProperty("disabled", false);
+
+    await view.rerender({ token: "" });
+    expect(server.calls).toHaveLength(3);
+    expect(server.calls[2]?.headers).not.toHaveProperty("Authorization");
+    // Before any new answer: nothing the control token was shown remains.
+    expect(screen.queryByText("The server accepted the token for its controls.")).toBeNull();
+    expect(screen.queryByRole("table", { name: "Withheld paths (exclusions)" })).toBeNull();
+    expect(view.container.textContent).not.toContain("/library/films/example-x.mkv");
+    expect(view.container.textContent).not.toContain(NOTICE);
+    expect(screen.getByTestId("control-gate").textContent).toContain("The controls are unavailable: no token is held.");
+    for (const control of actions()) {
+      expect(control).toHaveProperty("disabled", true);
     }
   });
 });
