@@ -26,6 +26,7 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/dynhdr"
+	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/node"
 	"github.com/NSchatz/holdfast/internal/nodeworker"
 	"github.com/NSchatz/holdfast/internal/probe"
@@ -87,6 +88,11 @@ type nodeRig struct {
 	ts              *testStore
 	eng             *Engine
 	hub             *node.Hub
+	hubMu           sync.Mutex
+	hubStop         context.CancelFunc
+	hubTune         func(*node.Options)
+	ledger          *flakyLedger
+	log             *slog.Logger
 	srv             *httptest.Server
 	argv            *argvLog
 	logs            *lockedBuf
@@ -97,8 +103,80 @@ type nodeRig struct {
 	stages  map[string]int
 }
 
+// rigWait bounds every wait for something that must happen. It is generous on purpose: the
+// gate runs this suite under -race on a loaded host, and a wait that passes returns at once.
+const rigWait = 5 * time.Minute
+
+// flakyLedger is a lease ledger whose writes to an existing row can be made to fail. It is
+// how a fixture leaves the ledger as a KILLED server leaves it: with it failing, a hub that is
+// stopped cannot end its leases, so their rows stay granted.
+type flakyLedger struct {
+	store.LeaseLedger
+	fail atomic.Bool
+}
+
+func (l *flakyLedger) UpdateLease(ctx context.Context, id string, decide func(node.Lease) (node.Lease, error)) (node.Lease, error) {
+	if l.fail.Load() {
+		return node.Lease{}, errors.New("the server was killed")
+	}
+	return l.LeaseLedger.UpdateLease(ctx, id, decide)
+}
+
 // newNodeRig builds an engine with nodes ON over a fresh library root.
 func newNodeRig(t *testing.T, mutate func(*config.Config)) *nodeRig {
+	t.Helper()
+	return newNodeRigHub(t, mutate, nil)
+}
+
+// startHub builds the rig's hub over its ledger and hands it to the engine. The lease
+// endpoints follow r.hub, so a rig can stand for a server that was restarted.
+func (r *nodeRig) startHub() {
+	ctx, cancel := context.WithCancel(context.Background())
+	r.t.Cleanup(cancel)
+	r.hubStop = cancel
+	o := node.Options{
+		Ledger: r.ledger, BaseCtx: ctx, Version: "test", TTL: r.cfg.NodeLeaseTTL(),
+		MaxLeases: r.cfg.EffectiveNodeMaxLeases(), MaxLeasesPerNode: r.cfg.EffectiveNodeMaxLeasesPerNode(),
+		MaxTransfers: r.cfg.EffectiveNodeMaxTransfers(), LongPoll: time.Hour, RetryAfter: time.Second,
+		SweepEvery: 20 * time.Millisecond, Now: r.clock.Now, Log: r.log,
+	}
+	if r.hubTune != nil {
+		r.hubTune(&o)
+	}
+	hub := node.New(o)
+	r.hubMu.Lock()
+	r.hub = hub
+	r.hubMu.Unlock()
+	r.eng.Nodes = hub
+}
+
+func (r *nodeRig) currentHub() *node.Hub {
+	r.hubMu.Lock()
+	defer r.hubMu.Unlock()
+	return r.hub
+}
+
+// kill stops the rig's server the way a SIGKILL does as far as the ledger can tell: every
+// job in flight ends, and no lease row is ended.
+func (r *nodeRig) kill() {
+	r.ledger.fail.Store(true)
+	r.hubStop()
+}
+
+// restart is the next start of the server on the same ledger and library: a new hub, and
+// the leases its recovery returns. The caller adopts them and calls Ready.
+func (r *nodeRig) restart() []node.Lease {
+	r.t.Helper()
+	r.ledger.fail.Store(false)
+	r.startHub()
+	live, err := r.hub.Recover(context.Background())
+	if err != nil {
+		r.t.Fatalf("Recover: %v", err)
+	}
+	return live
+}
+
+func newNodeRigHub(t *testing.T, mutate func(*config.Config), hubTune func(*node.Options)) *nodeRig {
 	t.Helper()
 	ffmpeg, ffprobe := tools(t)
 	root := filepath.Join(t.TempDir(), "library")
@@ -120,21 +198,16 @@ func newNodeRig(t *testing.T, mutate func(*config.Config)) *nodeRig {
 		r.stages[stage]++
 		r.stageMu.Unlock()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	r.hub = node.New(node.Options{
-		Ledger: r.ts.SQLite, BaseCtx: ctx, Version: "test", TTL: cfg.NodeLeaseTTL(),
-		MaxLeases: cfg.EffectiveNodeMaxLeases(), MaxLeasesPerNode: cfg.EffectiveNodeMaxLeasesPerNode(),
-		MaxTransfers: cfg.EffectiveNodeMaxTransfers(), LongPoll: 20 * time.Second, RetryAfter: time.Second,
-		SweepEvery: 20 * time.Millisecond, Now: r.clock.Now, Log: log,
-	})
-	if _, err := r.hub.Recover(ctx); err != nil {
+	r.log = log
+	r.ledger = &flakyLedger{LeaseLedger: r.ts.SQLite}
+	r.hubTune = hubTune
+	r.startHub()
+	if _, err := r.hub.Recover(context.Background()); err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
 	r.hub.Ready()
-	r.eng.Nodes = r.hub
 	mux := chi.NewRouter()
-	mux.Route(nodePrefix, func(sub chi.Router) { node.Mount(sub, func() *node.Hub { return r.hub }) })
+	mux.Route(nodePrefix, func(sub chi.Router) { node.Mount(sub, r.currentHub) })
 	r.srv = httptest.NewServer(mux)
 	t.Cleanup(r.srv.Close)
 	return r
@@ -233,7 +306,7 @@ func fileDigestOf(t *testing.T, path string) string {
 // of the node that is polling, and carries it to the seam.
 func (r *nodeRig) offer(src string) <-chan error {
 	r.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), rigWait)
 	tk, err := r.hub.WaitDemand(ctx)
 	if err != nil {
 		cancel()
@@ -257,7 +330,7 @@ func waitDone(t *testing.T, done <-chan error) {
 		if err != nil {
 			t.Fatalf("ProcessFile: %v", err)
 		}
-	case <-time.After(90 * time.Second):
+	case <-time.After(rigWait):
 		t.Fatal("the job did not end")
 	}
 }
@@ -270,7 +343,7 @@ func waitAnswer(t *testing.T, ch <-chan answer) answer {
 			t.Fatalf("node call: %v", a.err)
 		}
 		return a
-	case <-time.After(30 * time.Second):
+	case <-time.After(rigWait):
 		t.Fatal("the node's poll was never answered")
 		return answer{}
 	}
@@ -455,7 +528,7 @@ func TestNodes_OffByDefaultThePoolAndArgvAreUnchanged(t *testing.T) {
 // settleGoroutines waits for the goroutine count to come back to at most base.
 func settleGoroutines(t *testing.T, base int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(rigWait)
 	for runtime.NumGoroutine() > base {
 		if time.Now().After(deadline) {
 			buf := make([]byte, 1<<16)
@@ -491,7 +564,7 @@ func TestNodes_AJobThatIsNotLeasableIsEncodedByTheServer(t *testing.T) {
 	default:
 	}
 	// The poll is back in the queue: it can be reserved again.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), rigWait)
 	defer cancel()
 	tk, err := r.hub.WaitDemand(ctx)
 	if err != nil {
@@ -589,6 +662,7 @@ func TestNodes_FeedersLeakNoGoroutineAndNoTicket(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		feed := make(chan string)
 		var wg sync.WaitGroup
+		r.eng.nodeFeederIdle = time.Hour
 		stop := r.eng.startFeeders(ctx, &wg, feed, func(context.Context, string, string) bool {
 			t.Error("a feeder processed a file nobody fed")
 			return true
@@ -608,6 +682,7 @@ func TestNodes_FeedersLeakNoGoroutineAndNoTicket(t *testing.T) {
 		waitQueued(t, r)
 		feed := make(chan string)
 		var wg sync.WaitGroup
+		r.eng.nodeFeederIdle = time.Hour
 		stop := r.eng.startFeeders(context.Background(), &wg, feed, func(context.Context, string, string) bool { return false })
 		waitReserved(t, r)
 		close(feed)
@@ -621,7 +696,7 @@ func TestNodes_FeedersLeakNoGoroutineAndNoTicket(t *testing.T) {
 // reserved for it. The ticket is given straight back.
 func waitQueued(t *testing.T, r *nodeRig) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), rigWait)
 	defer cancel()
 	tk, err := r.hub.WaitDemand(ctx)
 	if err != nil {
@@ -633,7 +708,7 @@ func waitQueued(t *testing.T, r *nodeRig) {
 // waitReserved waits until a feeder has reserved the one poll: nothing is left to reserve.
 func waitReserved(t *testing.T, r *nodeRig) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(rigWait)
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 		tk, err := r.hub.WaitDemand(ctx)
@@ -657,7 +732,7 @@ func assertPollNotStranded(t *testing.T, r *nodeRig, lease <-chan answer) {
 		t.Fatalf("the poll was answered %d %s before the test released it", a.status, a.body)
 	default:
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), rigWait)
 	defer cancel()
 	tk, err := r.hub.WaitDemand(ctx)
 	if err != nil {
@@ -694,7 +769,7 @@ func TestNodes_TheNodeGateBoundsTheServersOwnWork(t *testing.T) {
 			got <- rel
 		}
 	}()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(rigWait)
 	for !g.full() {
 		if time.Now().After(deadline) {
 			t.Fatal("a gate with its slot held and a job waiting never read as full")
@@ -723,11 +798,11 @@ func TestNodes_TheNodeGateBoundsTheServersOwnWork(t *testing.T) {
 	if g.full() {
 		t.Error("the gate reads full with one slot held and nobody waiting")
 	}
-	select {
-	case rel := <-acquireAsync(g):
-		rel()
-		t.Fatal("a slot was free while the second job held the only one: release ran twice")
-	case <-time.After(50 * time.Millisecond):
+	g.mu.Lock()
+	held := g.held
+	g.mu.Unlock()
+	if held != 1 {
+		t.Fatalf("%d slot(s) held while the second job holds the only one: releasing twice gave two back", held)
 	}
 	second()
 
@@ -746,9 +821,23 @@ func TestNodes_TheNodeGateBoundsTheServersOwnWork(t *testing.T) {
 	ctx, cancel = context.WithCancel(context.Background())
 	feed := make(chan string)
 	var wg sync.WaitGroup
+	r.eng.nodeFeederIdle = time.Hour
 	stop := r.eng.startFeeders(ctx, &wg, feed, func(context.Context, string, string) bool { return false })
-	time.Sleep(100 * time.Millisecond)
-	tctx, tcancel := context.WithTimeout(context.Background(), time.Second)
+	// Every feeder is parked at the full gate queue, and none has reserved the node's poll:
+	// it is still there to reserve.
+	parked := func() int {
+		g := r.eng.gate()
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return g.parked
+	}
+	for deadline := time.Now().Add(rigWait); parked() != r.cfg.EffectiveNodeMaxLeases(); {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d feeder(s) parked at the full gate queue, want %d", parked(), r.cfg.EffectiveNodeMaxLeases())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	tctx, tcancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	tk, err := r.hub.WaitDemand(tctx)
 	tcancel()
 	if err != nil {
@@ -903,8 +992,13 @@ func TestWorkerFixture_TheRetryBoundParksTheFileNamingTheNodeAttempts(t *testing
 		t.Errorf("the park record does not name the three node attempts:\n%s", grepLines(logs, "retry bound"))
 	}
 
-	// Offered once more: the claim holds the row out, nothing is leased, the ticket goes back.
-	lease := r.poll("nodeA")
+	// Three failed leases in a row with none succeeding: the node is cooling off too.
+	if a := waitAnswer(t, r.poll("nodeA")); a.status != http.StatusServiceUnavailable || a.reason != "node_cooling_off" {
+		t.Errorf("the failing node's next poll answered %d %q, want 503 node_cooling_off", a.status, a.reason)
+	}
+	// Offered once more, to another node: the claim holds the row out, nothing is leased, the
+	// ticket goes back.
+	lease := r.poll("nodeB")
 	waitDone(t, r.offer(src))
 	select {
 	case a := <-lease:
@@ -971,7 +1065,7 @@ func TestWorkerFixture_AnExpiredLeaseUploadIsDiscardedAndTheJobIsRetried(t *test
 	if a := r.put(l, out, digestOf(out)); a.status != http.StatusGone {
 		t.Errorf("the stale node's upload answered %d after the re-grant, want 410", a.status)
 	}
-	if a := r.post(leasePath(node.RouteFail, again.LeaseID), node.FailRequest{Epoch: again.Epoch, Reason: "worker_stopping"}); a.status != http.StatusOK {
+	if a := r.post(leasePath(node.RouteFail, again.LeaseID), node.FailRequest{Epoch: again.Epoch, Reason: "encode_failed"}); a.status != http.StatusOK {
 		t.Fatalf("fail: %d %s", a.status, a.body)
 	}
 	waitDone(t, done)
@@ -1189,10 +1283,20 @@ func TestNodes_WithAScratchDirTheUploadLandsThereAndTheCopyBackRuns(t *testing.T
 
 // TestNodes_ANodesCommandLineIsTheServersOwn: the command line the real worker runs for a
 // leased job is the one the server builds for the same job itself, argument for argument,
-// apart from the two paths the node substitutes - so the shared assembly cannot drift.
+// apart from the two paths the node substitutes and the ONE intended difference: the server's
+// libx265 pool figures describe the server, so the node is sent none.
 func TestNodes_ANodesCommandLineIsTheServersOwn(t *testing.T) {
+	pools := encoder.X265ParallelismFor(5)
+	if pools.Params() == "" {
+		t.Fatal("the fixture's libx265 parallelism is empty; the difference it proves would not exist")
+	}
+	withPools := func(r *nodeRig) {
+		r.eng.Enc = FFmpegEncoder{FFmpeg: r.ffmpeg, Cfg: r.cfg, Probe: probe.New(r.ffmpeg, r.ffprobe),
+			X265: pools, argvObserver: r.argv.record}
+	}
 	// The server's own, from a run with nodes off.
 	local := newNodeRig(t, nil)
+	withPools(local)
 	local.eng.Nodes = nil
 	lsrc := local.source("movie.mkv")
 	if err := local.eng.RunOneshot(context.Background()); err != nil {
@@ -1201,6 +1305,7 @@ func TestNodes_ANodesCommandLineIsTheServersOwn(t *testing.T) {
 	own := local.argv.forSource(t, lsrc)
 
 	r := newNodeRig(t, nil)
+	withPools(r)
 	src := r.source("movie.mkv")
 	nodeArgv := newArgvLog()
 	var mapped string
@@ -1218,10 +1323,14 @@ func TestNodes_ANodesCommandLineIsTheServersOwn(t *testing.T) {
 	if mapped == src {
 		t.Fatal("the path map mapped the source to itself; the mapping is not exercised")
 	}
+	if r.serverEncodes(src) != 0 {
+		t.Fatal("the server encoded the file itself")
+	}
 	got := nodeArgv.forSource(t, mapped)
 	if len(got) != len(own) {
 		t.Fatalf("the node's command line has %d arguments, the server's %d:\nnode:   %q\nserver: %q", len(got), len(own), got, own)
 	}
+	differences := 0
 	for i := range own {
 		switch {
 		case own[i] == lsrc:
@@ -1232,8 +1341,566 @@ func TestNodes_ANodesCommandLineIsTheServersOwn(t *testing.T) {
 			if strings.HasPrefix(got[i], r.root) {
 				t.Errorf("the node wrote its output into the library: %s", got[i])
 			}
+		case i > 0 && own[i-1] == "-x265-params":
+			differences++
+			if !strings.Contains(own[i], pools.Params()) {
+				t.Errorf("the server's own -x265-params %q does not carry its pool figures %q", own[i], pools.Params())
+			}
+			if want := strings.Replace(own[i], pools.Params(), "", 1); got[i] != want || strings.Contains(got[i], "pools=") {
+				t.Errorf("the node's -x265-params = %q, want the server's without its pool figures: %q", got[i], want)
+			}
 		case got[i] != own[i]:
 			t.Errorf("argument %d: node %q, server %q", i, got[i], own[i])
 		}
+	}
+	if differences != 1 {
+		t.Errorf("%d -x265-params arguments compared, want 1", differences)
+	}
+}
+
+// reencode runs the leased command line as a node would, and returns the output's bytes.
+func (r *nodeRig) reencode(l node.AcquireResponse) []byte {
+	r.t.Helper()
+	out := filepath.Join(r.t.TempDir(), "node-output")
+	if err := (FFmpegEncoder{FFmpeg: r.ffmpeg}).RunLeased(context.Background(), l.Path, out, l.Pre, l.Body, nil); err != nil {
+		r.t.Fatalf("the fake node's encode: %v", err)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return b
+}
+
+// deliver uploads a real encode of the leased job and completes the lease, honestly.
+func (r *nodeRig) deliver(l node.AcquireResponse) {
+	r.t.Helper()
+	out := r.reencode(l)
+	if a := r.put(l, out, digestOf(out)); a.status != http.StatusOK {
+		r.t.Fatalf("upload: %d %s", a.status, a.body)
+	}
+	if a := r.post(leasePath(node.RouteComplete, l.LeaseID), node.CompleteRequest{Epoch: l.Epoch,
+		OutputDigest: digestOf(out), SourceDigest: fileDigestOf(r.t, l.Path), OutputBytes: int64(len(out))}); a.status != http.StatusOK {
+		r.t.Fatalf("complete: %d %s", a.status, a.body)
+	}
+}
+
+func (r *nodeRig) failLease(l node.AcquireResponse, reason string) {
+	r.t.Helper()
+	if a := r.post(leasePath(node.RouteFail, l.LeaseID), node.FailRequest{Epoch: l.Epoch, Reason: reason}); a.status != http.StatusOK {
+		r.t.Fatalf("fail: %d %s", a.status, a.body)
+	}
+}
+
+func (r *nodeRig) leaseRow(id string) node.Lease {
+	r.t.Helper()
+	l, found, err := r.ts.GetLease(context.Background(), id)
+	if err != nil || !found {
+		r.t.Fatalf("GetLease(%s): found %v, %v", id, found, err)
+	}
+	return l
+}
+
+func (r *nodeRig) untilLog(what string, subs ...string) {
+	r.t.Helper()
+	for deadline := time.Now().Add(rigWait); ; time.Sleep(5 * time.Millisecond) {
+		for _, line := range strings.Split(r.logs.String(), "\n") {
+			ok := true
+			for _, s := range subs {
+				ok = ok && strings.Contains(line, s)
+			}
+			if ok {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			r.t.Fatalf("timed out waiting for %s\n%s", what, r.logs.String())
+		}
+	}
+}
+
+// TestNodes_ANodeThatCannotRunALeaseCostsTheFileNothing: every typed reason a worker fails a
+// lease with when IT could not run the job - its path map, its mount, its encoders, its own
+// refusal of the command line, its own shutdown. The server encodes the job in the same
+// attempt, nothing is recorded against the file, one record names the node and the reason,
+// and three such endings in a row cool the node off.
+func TestNodes_ANodeThatCannotRunALeaseCostsTheFileNothing(t *testing.T) {
+	r := newNodeRig(t, nil)
+	reasons := []string{"unmapped_source", "source_mismatch", "source_unreadable",
+		"unsupported_encoder", "refused_plan", "worker_stopping"}
+	for i, reason := range reasons {
+		nodeName := "nodeA"
+		if i >= 3 {
+			nodeName = "nodeB"
+		}
+		src := r.source(reason + ".mkv")
+		lease := r.poll(nodeName)
+		done := r.offer(src)
+		l := waitAnswer(t, lease).lease
+		if l.LeaseID == "" {
+			t.Fatalf("%s: no lease was granted", reason)
+		}
+		r.failLease(l, reason)
+		waitDone(t, done)
+		j, _ := r.row(src)
+		if j.Status != store.Done || j.FailCount != 0 {
+			t.Errorf("%s: status = %s, fail_count = %d (%s); want done and 0: the node's trouble is not the file's",
+				reason, j.Status, j.FailCount, j.Outcome.Reason)
+		}
+		if r.serverEncodes(src) != 1 {
+			t.Errorf("%s: the server did not encode the job in the same attempt", reason)
+		}
+		r.untilLog("the record of "+reason, "this job is encoded by the server", "the node could not run the lease",
+			"node="+nodeName, "reason="+reason, "file="+src)
+		// The third in a row from one node cools it off; the first two do not.
+		cooling := strings.Count(r.logs.String(), "node cooling off")
+		if want := (i + 1) / 3; cooling != want {
+			t.Errorf("after %d ending(s) %d cool-off record(s), want %d", i+1, cooling, want)
+		}
+	}
+	if !strings.Contains(r.logs.String(), `reasons="unmapped_source source_mismatch source_unreadable"`) {
+		t.Errorf("the cool-off record does not name the reasons:\n%s", grepLines(r.logs.String(), "cooling off"))
+	}
+	for _, n := range []string{"nodeA", "nodeB"} {
+		if a := waitAnswer(t, r.poll(n)); a.status != http.StatusServiceUnavailable || a.reason != "node_cooling_off" {
+			t.Errorf("%s's next poll answered %d %q, want 503 node_cooling_off", n, a.status, a.reason)
+		}
+	}
+	if strings.Contains(r.logs.String(), "retry bound parked") {
+		t.Error("a file was parked for a node's trouble")
+	}
+	noTempBeside(t, r.root)
+}
+
+// TestNodes_OneMisconfiguredWorkerDoesNotParkTheLibrary: through the real pool, with the REAL
+// worker and a wrong path map. Before the split of lease endings this worker took files as
+// fast as the feed offered them, failed each in milliseconds, and after max_failures passes
+// the library was parked. Now every file is done after one pass, none carries a failure, and
+// the worker was cooled off after its third lease.
+func TestNodes_OneMisconfiguredWorkerDoesNotParkTheLibrary(t *testing.T) {
+	r := newNodeRig(t, func(c *config.Config) { c.Workers = 1 })
+	var srcs []string
+	for i := 0; i < 5; i++ {
+		srcs = append(srcs, r.source("movie"+strconv.Itoa(i)+".mkv"))
+	}
+	r.realWorker("nodeA", func(o *nodeworker.Options) {
+		o.PathMap = config.PathMap{{From: "/somewhere/else", To: "/mnt"}}
+	})
+	waitQueued(t, r)
+	if err := r.eng.RunOneshot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range srcs {
+		j, _ := r.row(s)
+		if j.Status != store.Done || j.FailCount != 0 {
+			t.Errorf("%s: status = %s, fail_count = %d; want done and 0", filepath.Base(s), j.Status, j.FailCount)
+		}
+	}
+	logs := r.logs.String()
+	if n := strings.Count(logs, "node lease granted"); n > node.DefaultCoolOffAfter {
+		t.Errorf("the misconfigured worker was granted %d lease(s), want at most %d before its cool-off", n, node.DefaultCoolOffAfter)
+	}
+	if strings.Contains(logs, "retry bound parked") || strings.Contains(logs, "FAIL (node encode failed") {
+		t.Errorf("a file was failed for the worker's wrong path map:\n%s", grepLines(logs, "FAIL"))
+	}
+	noTempBeside(t, r.root)
+}
+
+// cancelledPoll is a fake node's poll whose request can be ended by the test.
+func (r *nodeRig) cancelledPoll(name string) (end func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	payload, _ := json.Marshal(node.AcquireRequest{Node: name, Version: "test", Slots: 1,
+		Mode: node.ModeMapped, Encoders: []string{"cpu"}})
+	left := make(chan struct{})
+	go func() {
+		defer close(left)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, r.srv.URL+nodePrefix+node.RouteLeases, bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	return func() { cancel(); <-left }
+}
+
+// TestNodes_APollThatLeftCostsTheFileNothing: a node whose request ended - its client's
+// timeout, a dropped connection - while a feeder held its poll. Nothing is wrong with the
+// file and no node ever saw it, so no failure is recorded and no lease row is written: the
+// job waits for another node to ask, and failing that the server encodes it.
+func TestNodes_APollThatLeftCostsTheFileNothing(t *testing.T) {
+	// take reserves the departed node's poll and ends its request, and returns the ticket
+	// once the hub has seen the request end.
+	take := func(t *testing.T, r *nodeRig) *node.Ticket {
+		end := r.cancelledPoll("nodeA")
+		ctx, cancel := context.WithTimeout(context.Background(), rigWait)
+		defer cancel()
+		tk, err := r.hub.WaitDemand(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		end()
+		return tk
+	}
+	run := func(r *nodeRig, tk *node.Ticket, src string) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			nj := &nodeJob{ticket: tk}
+			err := r.eng.ProcessFile(withNodeJob(context.Background(), nj), "n0", src)
+			r.eng.settle(context.Background(), nj)
+			done <- err
+		}()
+		return done
+	}
+
+	t.Run("no other node asks: the server encodes it", func(t *testing.T) {
+		r := newNodeRig(t, nil)
+		r.eng.NodeRedemand = 200 * time.Millisecond
+		src := r.source("movie.mkv")
+		waitDone(t, run(r, take(t, r), src))
+		j, _ := r.row(src)
+		if j.Status != store.Done || j.FailCount != 0 {
+			t.Fatalf("status = %s, fail_count = %d (%s); want done and 0", j.Status, j.FailCount, j.Outcome.Reason)
+		}
+		if r.serverEncodes(src) != 1 {
+			t.Error("the server did not encode the job")
+		}
+		if strings.Contains(r.logs.String(), "node lease granted") {
+			t.Error("a lease was granted to a node that had stopped waiting")
+		}
+		r.untilLog("the record", "this job is encoded by the server", "stopped waiting", "node=nodeA")
+	})
+	t.Run("another node asks: it is leased to that one", func(t *testing.T) {
+		r := newNodeRig(t, nil)
+		r.eng.NodeRedemand = rigWait
+		src := r.source("movie.mkv")
+		done := run(r, take(t, r), src)
+		// The job is now waiting for fresh demand. nodeB asks, and gets it.
+		l := waitAnswer(t, r.poll("nodeB")).lease
+		if l.Path != src || l.Epoch != 1 {
+			t.Fatalf("nodeB was leased %q at epoch %d, want %s at epoch 1: the departed node's ticket must have granted nothing", l.Path, l.Epoch, src)
+		}
+		r.deliver(l)
+		waitDone(t, done)
+		j, _ := r.row(src)
+		if j.Status != store.Done || j.FailCount != 0 {
+			t.Fatalf("status = %s, fail_count = %d (%s); want done and 0", j.Status, j.FailCount, j.Outcome.Reason)
+		}
+		if r.serverEncodes(src) != 0 {
+			t.Error("the server encoded a job a node was asking for")
+		}
+	})
+	t.Run("the default wait is two long-poll bounds", func(t *testing.T) {
+		if DefaultNodeRedemand != 2*node.DefaultLongPoll || (&Engine{}).nodeRedemand() != DefaultNodeRedemand {
+			t.Errorf("DefaultNodeRedemand = %s, want two long-poll bounds (%s)", DefaultNodeRedemand, 2*node.DefaultLongPoll)
+		}
+	})
+}
+
+// TestNodes_AFeederDoesNotSitOnAPollWhileTheFeedIsIdle: with nothing arriving from the feed -
+// it is paused, or every file is with a local worker - a feeder lets the node's poll go after
+// a short bound instead of holding it reserved, and the poll is answered with no work at its
+// own long-poll bound.
+func TestNodes_AFeederDoesNotSitOnAPollWhileTheFeedIsIdle(t *testing.T) {
+	if (&Engine{}).feederIdle() != time.Second {
+		t.Errorf("the default idle bound is %s, want 1s", (&Engine{}).feederIdle())
+	}
+	r := newNodeRigHub(t, nil, func(o *node.Options) { o.LongPoll = 2 * time.Second })
+	r.eng.nodeFeederIdle = 20 * time.Millisecond
+	lease := r.poll("nodeA")
+	waitQueued(t, r)
+	ctx, cancel := context.WithCancel(context.Background())
+	feed := make(chan string)
+	var wg sync.WaitGroup
+	stop := r.eng.startFeeders(ctx, &wg, feed, func(context.Context, string, string) bool {
+		t.Error("a feeder processed a file nobody fed")
+		return true
+	})
+	// The poll is answered 204 at its bound, though feeders reserved it again and again.
+	if a := waitAnswer(t, lease); a.status != http.StatusNoContent {
+		t.Errorf("the idle poll answered %d %s, want 204", a.status, a.body)
+	}
+	// And a poll held by an idle feeder comes back to the queue: with a long-poll bound far
+	// away, the test itself can reserve it.
+	slow := newNodeRig(t, nil)
+	slow.eng.nodeFeederIdle = 20 * time.Millisecond
+	held := slow.poll("nodeB")
+	waitQueued(t, slow)
+	sctx, scancel := context.WithCancel(context.Background())
+	var swg sync.WaitGroup
+	sstop := slow.eng.startFeeders(sctx, &swg, make(chan string), func(context.Context, string, string) bool { return false })
+	waitReserved(t, slow)
+	wctx, wcancel := context.WithTimeout(context.Background(), rigWait)
+	tk, err := slow.hub.WaitDemand(wctx)
+	wcancel()
+	if err != nil {
+		t.Fatal("an idle feeder never let its poll go")
+	}
+	slow.hub.Release(tk, node.ErrNoRoom)
+	if a := waitAnswer(t, held); a.reason != "no_room" {
+		t.Errorf("poll answered %d %q", a.status, a.reason)
+	}
+	cancel()
+	scancel()
+	wg.Wait()
+	swg.Wait()
+	stop()
+	sstop()
+}
+
+// crashWithLeases grants one lease per source, each to its own fake node, then kills the
+// server: the jobs end, the lease rows stay granted, the job rows stay active.
+func (r *nodeRig) crashWithLeases(srcs ...string) []node.AcquireResponse {
+	r.t.Helper()
+	var leases []node.AcquireResponse
+	var jobs []<-chan error
+	for i, src := range srcs {
+		poll := r.poll("node" + strconv.Itoa(i))
+		jobs = append(jobs, r.offer(src))
+		l := waitAnswer(r.t, poll).lease
+		if l.Path != src {
+			r.t.Fatalf("leased %q, want %s", l.Path, src)
+		}
+		leases = append(leases, l)
+	}
+	r.kill()
+	for _, done := range jobs {
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				r.t.Fatalf("a job of the killed server ended with %v, want the interruption", err)
+			}
+		case <-time.After(rigWait):
+			r.t.Fatal("a job of the killed server did not end")
+		}
+	}
+	for _, l := range leases {
+		if row := r.leaseRow(l.LeaseID); row.State != store.LeaseGranted {
+			r.t.Fatalf("the fixture needs the lease still granted after the kill; it is %s", row.State)
+		}
+		if j, _ := r.row(l.Path); j.Status != store.Encoding {
+			r.t.Fatalf("the fixture needs the job row left active; it is %s", j.Status)
+		}
+	}
+	return leases
+}
+
+// TestNodes_ARestartTakesTwoLiveLeasesBackAtOnce: two leases were live when the server was
+// killed. The restart runs both jobs at once - the first is held before its seam until the
+// second has taken its lease back, which a serial adoption could never satisfy - re-graces
+// both at Ready, and both nodes then finish the encodes they were leased before the restart.
+func TestNodes_ARestartTakesTwoLiveLeasesBackAtOnce(t *testing.T) {
+	r := newNodeRig(t, nil)
+	a, b := r.source("a.mkv"), r.source("b.mkv")
+	leases := r.crashWithLeases(a, b)
+	live := r.restart()
+	if len(live) != 2 {
+		t.Fatalf("Recover returned %d lease(s), want 2", len(live))
+	}
+	secondBack := make(chan struct{})
+	r.eng.onClaim = func(worker, _ string) {
+		if worker == "adopt0" {
+			<-secondBack
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	adopted := make(chan func(), 1)
+	go func() { adopted <- r.eng.AdoptLeases(ctx, live, time.Hour) }()
+	r.untilLog("the second lease's adoption", "node lease adopted after a restart", "lease="+live[1].ID)
+	select {
+	case <-adopted:
+		t.Fatal("AdoptLeases returned while the first lease's job had not reached the seam")
+	default:
+	}
+	close(secondBack)
+	wait := <-adopted
+	r.untilLog("the first lease's adoption", "node lease adopted after a restart", "lease="+live[0].ID)
+	// The engine's start-up took most of a TTL. Ready gives both leases a whole one again.
+	r.clock.advance(r.cfg.NodeLeaseTTL() - 2*time.Second)
+	r.hub.Ready()
+	r.clock.advance(r.cfg.NodeLeaseTTL() - 2*time.Second)
+	for _, l := range leases {
+		if hb := r.post(leasePath(node.RouteHeartbeat, l.LeaseID), node.HeartbeatRequest{Epoch: l.Epoch}); hb.status != http.StatusOK {
+			t.Fatalf("a heartbeat inside the grace Ready gave answered %d %s", hb.status, hb.body)
+		}
+	}
+	for _, l := range leases {
+		r.deliver(l)
+	}
+	wait()
+	for _, src := range []string{a, b} {
+		if j, _ := r.row(src); j.Status != store.Done || j.FailCount != 0 {
+			t.Errorf("%s: status = %s, fail_count = %d (%s); want done", filepath.Base(src), j.Status, j.FailCount, j.Outcome.Reason)
+		}
+		if r.serverEncodes(src) != 0 {
+			t.Errorf("%s: the server encoded a job its node finished", filepath.Base(src))
+		}
+	}
+	noTempBeside(t, r.root)
+}
+
+// TestNodes_ARecoveredLeaseWhoseJobDoesNotComeBackIsAbandonedBeforeReady: the three ways a
+// recovered lease's job never takes it back. Each lease is ended - not left to run out -
+// before the hub may grant again, and the node's next heartbeat is 410.
+func TestNodes_ARecoveredLeaseWhoseJobDoesNotComeBackIsAbandonedBeforeReady(t *testing.T) {
+	for name, tc := range map[string]struct {
+		before func(t *testing.T, r *nodeRig, src string)
+		// unchanged says the library must be exactly what it was.
+		unchanged bool
+	}{
+		"the file is now withheld": {func(t *testing.T, r *nodeRig, src string) {
+			if _, err := r.ts.ExcludePath(context.Background(), src); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		"the file is gone": {func(t *testing.T, r *nodeRig, src string) {
+			if err := os.Remove(src); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		"the plan is no longer leasable": {func(_ *testing.T, r *nodeRig, _ string) {
+			// An adoption has no ticket to ask about encoders, so the plan itself is changed:
+			// the restarted server stream-copies the picture, which it does itself.
+			yes := true
+			cfg := r.cfg
+			cfg.RemuxOnly = &yes
+			r.replaceEngine(cfg)
+		}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newNodeRig(t, nil)
+			src := r.source("movie.mkv")
+			before := md5f(t, src)
+			l := r.crashWithLeases(src)[0]
+			tc.before(t, r, src)
+			live := r.restart()
+			if len(live) != 1 {
+				t.Fatalf("Recover returned %d lease(s), want 1", len(live))
+			}
+			wait := r.eng.AdoptLeases(context.Background(), live, time.Hour)
+			// BEFORE Ready: the lease is ended already.
+			if row := r.leaseRow(l.LeaseID); row.State != store.LeaseExpired || row.Reason != string(node.ReasonNotAdopted) {
+				t.Fatalf("before Ready the lease is %s (%s), want it abandoned", row.State, row.Reason)
+			}
+			r.hub.Ready()
+			if hb := r.post(leasePath(node.RouteHeartbeat, l.LeaseID), node.HeartbeatRequest{Epoch: l.Epoch}); hb.status != http.StatusGone {
+				t.Errorf("the node's next heartbeat answered %d, want 410", hb.status)
+			}
+			wait()
+			if strings.Contains(r.logs.String(), "node lease adopted") {
+				t.Error("the lease was taken back")
+			}
+			if tc.unchanged {
+				if _, err := os.Stat(src); err == nil && md5f(t, src) != before {
+					t.Error("the source changed")
+				}
+				ents, _ := os.ReadDir(r.root)
+				for _, e := range ents {
+					if e.Name() != "movie.mkv" {
+						t.Errorf("the library gained %s", e.Name())
+					}
+				}
+				if r.serverEncodes(src) != 0 {
+					t.Error("the server encoded the file")
+				}
+			} else {
+				r.untilLog("the record", "this job is encoded by the server", "stream-copied")
+			}
+		})
+	}
+}
+
+// replaceEngine swaps the rig's engine for one built from cfg, over the same store and
+// library: the restarted server runs another configuration.
+func (r *nodeRig) replaceEngine(cfg config.Config) {
+	prober := probe.New(r.ffmpeg, r.ffprobe)
+	r.cfg = cfg
+	r.eng = New(cfg, prober, FFmpegEncoder{FFmpeg: r.ffmpeg, Cfg: cfg, Probe: prober, argvObserver: r.argv.record}, r.ts, r.log)
+}
+
+// TestNodes_ARecoveredLeaseNotTakenBackInTimeIsAbandonedAndStartUpIsNotHeld: a recovered
+// lease's job is held up before its seam. AdoptLeases returns at its bound - the listener is
+// not held - with the lease abandoned; the job, when it gets there, finds its lease gone and
+// is encoded by the server.
+func TestNodes_ARecoveredLeaseNotTakenBackInTimeIsAbandonedAndStartUpIsNotHeld(t *testing.T) {
+	r := newNodeRig(t, nil)
+	src := r.source("movie.mkv")
+	l := r.crashWithLeases(src)[0]
+	live := r.restart()
+	held := make(chan struct{})
+	r.eng.onClaim = func(string, string) { <-held }
+	wait := r.eng.AdoptLeases(context.Background(), live, 100*time.Millisecond)
+	if row := r.leaseRow(l.LeaseID); row.State != store.LeaseExpired || row.Reason != string(node.ReasonNotAdopted) {
+		t.Fatalf("at the bound the lease is %s (%s), want it abandoned", row.State, row.Reason)
+	}
+	r.untilLog("the record", "not taken back within the start-up bound", "lease="+l.LeaseID, "node=node0")
+	r.hub.Ready()
+	if hb := r.post(leasePath(node.RouteHeartbeat, l.LeaseID), node.HeartbeatRequest{Epoch: l.Epoch}); hb.status != http.StatusGone {
+		t.Errorf("the node's next heartbeat answered %d, want 410", hb.status)
+	}
+	close(held)
+	wait()
+	j, _ := r.row(src)
+	if j.Status != store.Done || j.FailCount != 0 {
+		t.Fatalf("status = %s, fail_count = %d (%s); want done and 0", j.Status, j.FailCount, j.Outcome.Reason)
+	}
+	if r.serverEncodes(src) != 1 {
+		t.Error("the server did not encode the job whose lease was abandoned")
+	}
+	r.untilLog("the record", "this job is encoded by the server", "its recovered lease was abandoned")
+	noTempBeside(t, r.root)
+}
+
+// TestNodes_TheSourceHashStopsWhenTheServerDoes: the server's own hash of a source is a read
+// as long as the film, and a cancelled context ends it.
+func TestNodes_TheSourceHashStopsWhenTheServerDoes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source")
+	body := bytes.Repeat([]byte("holdfast"), 1<<18) // 2 MiB: more than one read
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := sourceDigest(context.Background(), path)
+	if err != nil || got != digestOf(body) {
+		t.Fatalf("sourceDigest = %q, %v; want %q", got, err, digestOf(body))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := sourceDigest(ctx, path); !errors.Is(err, context.Canceled) {
+		t.Errorf("sourceDigest on a cancelled context = %v, want the cancellation", err)
+	}
+	if _, err := sourceDigest(context.Background(), path+".missing"); err == nil {
+		t.Error("sourceDigest of a missing file returned no error")
+	}
+}
+
+// TestNodes_NodeAttemptsAreDroppedAtEveryOtherTerminalOutcome: what the engine remembers
+// about a file's node attempts lives only while the file's last outcome is a failed node
+// attempt.
+func TestNodes_NodeAttemptsAreDroppedAtEveryOtherTerminalOutcome(t *testing.T) {
+	r := newNodeRig(t, nil)
+	remembered := func(path string) int {
+		r.eng.nodeAttemptsMu.Lock()
+		defer r.eng.nodeAttemptsMu.Unlock()
+		return len(r.eng.nodeAttempts[path])
+	}
+	err := &node.LeaseError{Node: "nodeA", Epoch: 1, Reason: node.ReasonExpired}
+	for _, status := range []store.Status{store.Done, store.Skipped, store.Failed} {
+		path := filepath.Join(r.root, string(status)+".mkv")
+		if !r.eng.nodeFailure(path, err) {
+			t.Fatal("a lease error was not read as a node failure")
+		}
+		// The failed row of the node attempt itself keeps what was remembered.
+		r.eng.finishStore(context.Background(), path, "key", store.Failed, &store.Outcome{})
+		if remembered(path) != 1 {
+			t.Fatalf("the node failure's own row dropped the attempt")
+		}
+		// Any later terminal outcome of the file drops it.
+		r.eng.finishStore(context.Background(), path, "key", status, &store.Outcome{})
+		if n := remembered(path); n != 0 {
+			t.Errorf("after a %s outcome %d attempt(s) are still remembered", status, n)
+		}
+	}
+	if r.eng.nodeFailure("x", errors.New("an ordinary encode error")) {
+		t.Error("an ordinary error was read as a node failure")
 	}
 }

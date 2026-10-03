@@ -40,6 +40,10 @@ import (
 // logs every command line the server runs, which is how "the server ran no encode for that
 // file" and "the server ran the gates on that working file" are read off what it really ran.
 
+// labWait bounds every wait for something that must happen. It is generous on purpose: the
+// gate runs these under -race on a loaded host, and a wait that passes returns at once.
+const labWait = 10 * time.Minute
+
 type nodeLab struct {
 	t                *testing.T
 	dir, lib, mount  string
@@ -53,6 +57,8 @@ type nodeLab struct {
 	nodeFFLog        string
 	ffmpeg, ffprobe  string
 	blocker, movie   string
+	extraCfg         string
+	starts           int
 }
 
 func newNodeLab(t *testing.T, extraCfg string) *nodeLab {
@@ -66,16 +72,9 @@ func newNodeLab(t *testing.T, extraCfg string) *nodeLab {
 	if _, err := exec.LookPath(ffprobe); err != nil {
 		t.Fatalf("::error:: ffprobe required for the worker-node proof: %v", err)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
-
 	dir := t.TempDir()
 	l := &nodeLab{t: t, dir: dir, lib: filepath.Join(dir, "server", "media"), mount: filepath.Join(dir, "node-mount"),
-		state: filepath.Join(dir, "state"), addr: addr, base: "http://" + addr, token: "node-token-of-this-test",
+		state: filepath.Join(dir, "state"), token: "node-token-of-this-test", extraCfg: extraCfg,
 		cfgPath: filepath.Join(dir, "config.yaml"), hold: filepath.Join(dir, "hold"), blocked: filepath.Join(dir, "blocked"),
 		serverFF: filepath.Join(dir, "server-ffmpeg"), nodeFF: filepath.Join(dir, "node-ffmpeg"),
 		serverFFLog: filepath.Join(dir, "server-ffmpeg.log"), nodeFFLog: filepath.Join(dir, "node-ffmpeg.log"),
@@ -96,6 +95,9 @@ func newNodeLab(t *testing.T, extraCfg string) *nodeLab {
 	// while the hold file exists.
 	writeFile(t, l.serverFF, fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
+for a in "$@"; do
+	case "$a" in *.__transcoding__.*) [ -f "$a" ] && printf 'inode %%s %%s\n' "$(stat -c %%i "$a")" "$a" >> %q ;; esac
+done
 case "$*" in
 *%q*"-c:v libx265"*)
 	if [ -e %q ]; then
@@ -105,11 +107,26 @@ case "$*" in
 	;;
 esac
 exec %q "$@"
-`, l.serverFFLog, l.lib, l.hold, l.blocked, l.hold, realFF), 0o755)
+`, l.serverFFLog, l.serverFFLog, l.lib, l.hold, l.blocked, l.hold, realFF), 0o755)
 	writeFile(t, l.nodeFF, fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nexec %q \"$@\"\n", l.nodeFFLog, realFF), 0o755)
-	writeFile(t, l.cfgPath, "library_roots:\n  - "+l.lib+"\nstate_dir: "+l.state+"\nserver_addr: "+addr+
-		"\nnode_token: file:"+tokenFile+"\nmin_bitrate_kbps: 0\npreset: ultrafast\nscan_interval_sec: 0\n"+extraCfg, 0o600)
+	l.pickPort()
 	return l
+}
+
+// pickPort gives the server a free loopback port and writes its configuration. The port is
+// free when it is picked and can be taken before the server binds it, so serve picks again
+// when the bind collides.
+func (l *nodeLab) pickPort() {
+	l.t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		l.t.Fatal(err)
+	}
+	l.addr = ln.Addr().String()
+	l.base = "http://" + l.addr
+	_ = ln.Close()
+	writeFile(l.t, l.cfgPath, "library_roots:\n  - "+l.lib+"\nstate_dir: "+l.state+"\nserver_addr: "+l.addr+
+		"\nnode_token: file:"+filepath.Join(l.dir, "node-token")+"\nmin_bitrate_kbps: 0\npreset: ultrafast\nscan_interval_sec: 0\n"+l.extraCfg, 0o600)
 }
 
 func writeFile(t *testing.T, path, body string, mode os.FileMode) {
@@ -166,7 +183,7 @@ func (p *proc) stop() int {
 	_ = p.cmd.Process.Signal(syscall.SIGTERM)
 	select {
 	case <-p.done:
-	case <-time.After(30 * time.Second):
+	case <-time.After(labWait):
 		p.t.Errorf("the process did not stop on SIGTERM\n%s", p.log())
 		p.kill()
 	}
@@ -181,7 +198,7 @@ func (p *proc) log() string {
 // waitLog waits for a log record carrying every one of subs, and returns it.
 func (p *proc) waitLog(what string, subs ...string) string {
 	p.t.Helper()
-	deadline := time.Now().Add(120 * time.Second)
+	deadline := time.Now().Add(labWait)
 	for {
 		for _, line := range strings.Split(p.log(), "\n") {
 			ok := true
@@ -205,21 +222,40 @@ func (p *proc) waitLog(what string, subs ...string) string {
 }
 
 // serve starts the server and waits until its local worker is held inside the blocker's
-// encode: from then on the next file the scan offers waits for a node.
-func (l *nodeLab) serve(name string) *proc {
+// encode: from then on the next file the scan offers waits for a node. A start that loses its
+// port to another process between the pick and the bind is started again on a new one.
+func (l *nodeLab) serve() *proc {
 	l.t.Helper()
 	_ = os.Remove(l.blocked)
-	p := l.start(name, l.serverFF, "serve", "--config", l.cfgPath)
-	p.waitLog("the listener", "serve listening", "nodes_enabled=true")
-	deadline := time.Now().Add(60 * time.Second)
-	for {
-		if _, err := os.Stat(l.blocked); err == nil {
-			return p
+	for attempt := 1; ; attempt++ {
+		l.starts++
+		p := l.start("serve-"+strconv.Itoa(l.starts), l.serverFF, "serve", "--config", l.cfgPath)
+		deadline := time.Now().Add(labWait)
+		for {
+			log := p.log()
+			if strings.Contains(log, "serve listening") && strings.Contains(log, "nodes_enabled=true") {
+				if _, err := os.Stat(l.blocked); err == nil {
+					return p
+				}
+			}
+			exited := false
+			select {
+			case <-p.done:
+				exited = true
+			default:
+			}
+			if exited && strings.Contains(p.log(), "address already in use") && attempt < 5 {
+				l.pickPort()
+				break
+			}
+			if exited {
+				l.t.Fatalf("the server exited (%d) before it was serving\n%s", p.code, p.log())
+			}
+			if time.Now().After(deadline) {
+				l.t.Fatalf("the server never reached the blocker's encode\n%s", p.log())
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-		if time.Now().After(deadline) {
-			l.t.Fatalf("the local worker never reached the blocker's encode\n%s", p.log())
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -350,7 +386,7 @@ func (l *nodeLab) waitRow(path, what string, ok func(store.Job) bool) {
 		l.t.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(labWait)
 	for {
 		jobs, err := st.List(context.Background(), nil, 100)
 		if err != nil {
@@ -407,7 +443,7 @@ var leaseIDInLog = regexp.MustCompile(`lease=([0-9a-f]{32})`)
 func TestWorkerEndToEnd_SharedMountPathMapServerRegatesAndRenames(t *testing.T) {
 	l := newNodeLab(t, "vmaf_enable: true\n")
 	before := readAll(t, l.movie)
-	srv := l.serve("serve")
+	srv := l.serve()
 	wrk, work := l.worker()
 
 	granted := srv.waitLog("the lease", "node lease granted", "node=nodeA", "path="+l.movie)
@@ -447,11 +483,38 @@ func TestWorkerEndToEnd_SharedMountPathMapServerRegatesAndRenames(t *testing.T) 
 	if filepath.Dir(temp) != l.lib || !engine.IsTempConstructionName(filepath.Base(temp)) {
 		t.Errorf("the working file %s is not the engine's temp construction in the source's directory", temp)
 	}
-	if got := linesWith(t, l.serverFFLog, temp, "libvmaf"); len(got) == 0 {
-		t.Errorf("the server's VMAF gate never read the working file %s", temp)
+	// EVERY GATE RAN ON THE SERVER, against the working file IT named and ITS OWN path to the
+	// source - read off the command lines the server's ffmpeg was really given.
+	if got := linesWith(t, l.serverFFLog, "-xerror", "-err_detect", "-i "+temp+" ", "-f null"); len(got) == 0 {
+		t.Errorf("the server's decode-integrity pass never ran on the working file %s", temp)
 	}
-	if got := linesWith(t, l.serverFFLog, temp); len(got) < 2 {
-		t.Errorf("the server's gates read the working file in %d command(s), want the decode-integrity pass and VMAF at least", len(got))
+	vmafRuns := linesWith(t, l.serverFFLog, "libvmaf", "-i "+temp+" -i "+l.movie+" ")
+	if len(vmafRuns) == 0 {
+		t.Errorf("the server's VMAF gate never compared the working file %s with its own source %s", temp, l.movie)
+	}
+	if got := linesWith(t, l.serverFFLog, l.mount); len(got) != 0 {
+		t.Errorf("a server command line names the NODE's path to the library:\n%s", strings.Join(got, "\n"))
+	}
+	// THE NODE NEVER WROTE INTO THE LIBRARY: every command it ran reads the mapped source and
+	// writes into its own work directory, and none names the working file.
+	for _, line := range linesWith(t, l.nodeFFLog, l.mount) {
+		if !strings.Contains(line, "-- "+work+string(filepath.Separator)) || strings.Contains(line, "__transcoding__") {
+			t.Errorf("a worker command line could write under the library: %s", line)
+		}
+	}
+	// THE RENAME WAS THE SERVER'S, and a rename it was: the file now at the source's path is
+	// the very inode the server's gates read as the working file.
+	inodes := linesWith(t, l.serverFFLog, "inode ", temp)
+	if len(inodes) == 0 {
+		t.Fatalf("no gate command was handed the working file %s", temp)
+	}
+	var fin syscall.Stat_t
+	if err := syscall.Stat(l.movie, &fin); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("inode %d %s", fin.Ino, temp); inodes[len(inodes)-1] != want {
+		t.Errorf("the file at the source's path is inode %d; the gates read %q: the swap was not a rename of the gated file",
+			fin.Ino, inodes[len(inodes)-1])
 	}
 	for _, want := range []string{`output_digest="sha-256=:`, `source_digest="` + sha256Digest(before) + `"`} {
 		if !strings.Contains(nodeEncode, want) {
@@ -526,7 +589,7 @@ func TestWorkerEndToEnd_AWorkerVerdictNeverLicensesASwap(t *testing.T) {
 	l := newNodeLab(t, "vmaf_enable: true\n")
 	other := h264Fixture(t, l.ffmpeg, filepath.Join(l.lib, "other.mkv"))
 	before := map[string][]byte{l.movie: readAll(t, l.movie), other: readAll(t, other)}
-	srv := l.serve("serve")
+	srv := l.serve()
 
 	bad := map[string][]string{
 		"a valid file in the wrong codec": {"-map", "0", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "40", "-pix_fmt", "yuv420p", "-f", "matroska"},
@@ -548,8 +611,10 @@ func TestWorkerEndToEnd_AWorkerVerdictNeverLicensesASwap(t *testing.T) {
 	if len(reasons) != 2 {
 		t.Fatalf("the two bad outputs went to %d file(s), want 2", len(reasons))
 	}
-	if got := linesWith(t, l.serverFFLog, "-i "+l.movie, "-c:v libx265"); len(got) != 0 {
-		t.Errorf("the server encoded a leased file itself:\n%s", strings.Join(got, "\n"))
+	for path := range reasons {
+		if got := linesWith(t, l.serverFFLog, "-i "+path+" ", "-c:v libx265"); len(got) != 0 {
+			t.Errorf("the server encoded a leased file itself:\n%s", strings.Join(got, "\n"))
+		}
 	}
 	srv.stop()
 
@@ -583,14 +648,36 @@ func TestWorkerFixture_AServerRestartWithLiveLeasesAdoptsOrAbandonsBeforeAnyGran
 	// kills the server.
 	crash := func(t *testing.T, l *nodeLab) (lease node.AcquireResponse, temp, strayTemp string) {
 		t.Helper()
-		first := l.serve("serve-1")
+		first := l.serve()
 		lease = l.acquire()
 		if lease.Path != l.movie || lease.Epoch != 1 {
 			t.Fatalf("leased %s at epoch %d", lease.Path, lease.Epoch)
 		}
+		// The node heartbeats until the server is killed, so however long this host takes
+		// to get from the grant to the kill, the lease is live when the server dies.
+		beating, stopBeating := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(beating)
+			for {
+				select {
+				case <-stopBeating:
+					return
+				case <-time.After(250 * time.Millisecond):
+					b, _ := json.Marshal(node.HeartbeatRequest{Epoch: lease.Epoch})
+					req, _ := http.NewRequest(http.MethodPost, l.base+"/api/node/v1"+leaseAt(node.RouteHeartbeat, lease), bytes.NewReader(b))
+					req.Header.Set("Authorization", "Bearer "+l.token)
+					req.Header.Set("Content-Type", "application/json")
+					if resp, err := http.DefaultClient.Do(req); err == nil {
+						_ = resp.Body.Close()
+					}
+				}
+			}
+		}()
 		transcode := first.waitLog("the job's own record", "msg=transcode", "file="+l.movie)
 		temp = regexp.MustCompile(`working_file=(\S+)`).FindStringSubmatch(transcode)[1]
 		first.kill()
+		close(stopBeating)
+		<-beating
 		// What the dead process left: a partial upload in the lease's working file, and - for
 		// comparison - the working file of the local encode it was killed in.
 		writeFile(t, temp, "half an upload", 0o644)
@@ -600,11 +687,13 @@ func TestWorkerFixture_AServerRestartWithLiveLeasesAdoptsOrAbandonsBeforeAnyGran
 	}
 
 	t.Run("a heartbeat inside the grace continues the lease", func(t *testing.T) {
-		l := newNodeLab(t, "vmaf_enable: false\nnode_lease_ttl_sec: 30\n")
+		// A TTL no start-up on a loaded host outlasts: this case is about the grace being
+		// honoured, not about it running out.
+		l := newNodeLab(t, "vmaf_enable: false\nnode_lease_ttl_sec: 3600\n")
 		before := readAll(t, l.movie)
 		lease, temp, strayTemp := crash(t, l)
 
-		second := l.serve("serve-2")
+		second := l.serve()
 		// THE HOLDS ARE RE-TAKEN BEFORE ANY GRANT: the job that takes the lease back has
 		// claimed its row, re-taken its free-space hold and its working file, and reached the
 		// seam before the listener exists - and no grant is possible without the listener.
@@ -647,13 +736,22 @@ func TestWorkerFixture_AServerRestartWithLiveLeasesAdoptsOrAbandonsBeforeAnyGran
 	})
 
 	t.Run("heartbeats stop: the lease runs out and the file is offered again at a higher epoch", func(t *testing.T) {
-		l := newNodeLab(t, "vmaf_enable: false\nnode_lease_ttl_sec: 4\n")
+		l := newNodeLab(t, "vmaf_enable: false\nnode_lease_ttl_sec: 8\n")
 		before := readAll(t, l.movie)
 		lease, _, strayTemp := crash(t, l)
 
-		second := l.serve("serve-2")
-		// No heartbeat. After one TTL of grace the lease is gone, and says so.
-		second.waitLog("the lease running out", "FAIL (node encode failed, source untouched)", "file="+l.movie, "expired")
+		second := l.serve()
+		// The lease was TAKEN BACK first - this is "adopted, then ran out", not a lease that
+		// ran out before the engine came for it - and then, with no heartbeat, after the one
+		// TTL of grace Ready gave, it is gone and says so.
+		adopted := second.waitLog("the adoption", "node lease adopted after a restart", "lease="+lease.LeaseID)
+		expired := second.waitLog("the lease running out", "FAIL (node encode failed, source untouched)", "file="+l.movie, "expired")
+		if log := second.log(); strings.Index(log, adopted) > strings.Index(log, expired) {
+			t.Fatal("the lease ran out before it was taken back")
+		}
+		if strings.Contains(second.log(), "this job is encoded by the server") {
+			t.Fatalf("the lease was not adopted: the server encoded the job\n%s", second.log())
+		}
 		if r := l.postJSON(leaseAt(node.RouteHeartbeat, lease), node.HeartbeatRequest{Epoch: lease.Epoch}); r.status != http.StatusGone {
 			t.Fatalf("a heartbeat after the grace answered %d %s, want 410", r.status, r.body)
 		}
@@ -670,8 +768,8 @@ func TestWorkerFixture_AServerRestartWithLiveLeasesAdoptsOrAbandonsBeforeAnyGran
 		if again.Path != l.movie || again.Epoch != lease.Epoch+1 {
 			t.Fatalf("the retry leased %s at epoch %d, want %s at epoch %d", again.Path, again.Epoch, l.movie, lease.Epoch+1)
 		}
-		l.postJSON(leaseAt(node.RouteFail, again), node.FailRequest{Epoch: again.Epoch, Reason: "worker_stopping"})
-		second.waitLog("the second attempt ending", "FAIL (node encode failed, source untouched)", "worker_stopping")
+		l.postJSON(leaseAt(node.RouteFail, again), node.FailRequest{Epoch: again.Epoch, Reason: "encode_failed"})
+		second.waitLog("the second attempt ending", "FAIL (node encode failed, source untouched)", "encode_failed")
 		l.waitRow(l.movie, "the second failure's row", func(j store.Job) bool { return j.Status == store.Failed && j.FailCount == 2 })
 		second.stop()
 		if !bytes.Equal(readAll(t, l.movie), before) {
