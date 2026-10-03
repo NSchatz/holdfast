@@ -2202,7 +2202,7 @@ const (
 const readSurfaceRoot = "the root serves the web UI's page to a request that asks for HTML and a " +
 	"plain-text page to every other request and where the build carries no UI, with the " +
 	"Corresponding Source offer either way, and the page's static files are under /assets/ for any " +
-	"client; none of it carries a LIBRARY DATUM"
+	"client; all of it carries NO LIBRARY DATUM"
 
 // ReadSurfaceNotices states the read surface on whichever side of it this configuration
 // lands, to a command that has one to state. They are notices and neither is a warning: the
