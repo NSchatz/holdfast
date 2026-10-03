@@ -19,6 +19,8 @@ it but CPU (T6). Goal 1 ends at Checkpoint T; goals 2 to 15 then chain without f
 
 **Amended 2026-10-02 by the owner** (`AMENDMENT-2026-10-02-owner-2026-09-holdfast.md`, carrying out the owner's words of 2026-10-02, "Everything needs to get ported over", and the choice "Swap + compact briefs"): this brief references spec v1.1 instead of copying the standing contract, §0 keeps only this program's parameters, and the goal files name the owner's queue instead of NEEDS-OWNER.md; it applies to goals whose ledger is created after it merged.
 
+**Amended 2026-10-03 by the owner** (`AMENDMENT-2026-10-03-owner-2026-09-holdfast.md`, carrying out the owner's words of 2026-10-03, "Holdfast and chorus NEED to use the public CI and nothing local"): CI is the whole gate; no gate, tier, whole suite or mutation run happens on this host, and a PR merges when `build`, `package` and `mutation` are green on its branch with main merged in; by the owner's choice it applies at once to every remaining goal, goal 14 in flight included, and changes goals 14 and 15's gate lines.
+
 Every goal reads the spec's contract, this brief's §0 and §4 and its own section in full; §1-§3
 when a choice touches them. A goal section says *what* to build and *when it is done*. Where this
 brief and the spec disagree, the spec wins, except where a goal file or an approval in the owner's
@@ -126,27 +128,24 @@ Spec `contract.md` §3 and `gates.md` apply, with these rules of holdfast's:
   (`git merge origin/main`), never rebase a pushed branch. The squash merge keeps `main` linear.
   If `origin/main` moved only by ledger-only commits (paths under `.claude/goals/` only), the
   last gate result still stands; any other change on `main` means the gate runs again.
-- **The merge rule (T36, T52):** a PR is self-merged with `gh pr merge --squash --delete-branch`
-  only when BOTH hold on the branch up to date with `origin/main`:
-  1. the local gate passes: `timeout 10800 /cache/goals/<container>/bin/goals lock -w 10800 goals-heavy --
-     flock -o /cache/locks/holdfast-heavy.lock mise exec go@1.25.14 -- make check` (the heavy
-     locks of §0.4), with its last 20 lines, its wall-clock and the `internal/engine` seconds
-     pasted in the PR body;
-  2. the PR's CI is green (`build`, `package`, `mutation`), waited for with
-     `timeout 3600 gh pr checks <n> --watch`. CI is the only place the image builds and smokes,
-     because this container has no Docker daemon.
+- **The merge rule (T36, T52; the owner, 2026-10-03, `AMENDMENT-2026-10-03-owner-2026-09-holdfast.md`):**
+  a PR is self-merged with `gh pr merge --squash --delete-branch` only when the PR's CI is green
+  (`build`, `package`, `mutation`) on the branch up to date with `origin/main`, waited for with
+  `timeout 3600 gh pr checks <n> --watch`, with the run's link and wall-clock in the PR body. CI is
+  the whole gate: no gate, tier, whole-package or `-race` suite or mutation run happens on this host.
 - **Bounded fixing:** a red gate is fixed on the branch, at most 3 fix rounds per PR. At the limit
   the track is `DROPPED (why)` in the ledger, the PR is closed with the reason and the three red
   tails, and the goal carries on, unless the track carries a line marked (foundation), in which
   case the goal ends INCOMPLETE (§0.10, I14).
-- **Batch the work (T52):** the local gate takes about 26 minutes here (§0.11), so a goal groups
-  its work into a few larger PRs per track, not one per commit.
+- **Batch the work (T52):** CI's gate takes about 15-20 minutes, so a goal groups its work into a
+  few larger PRs per track, not one per commit.
 - **Ledger-only commits** (the goal's `.status.md`, and `NEEDS-OWNER.md`, the old list kept beside
-  the owner's queue until it becomes a pointer) go straight to `main` with `chore(goals): ...`,
-  after the fast docs checks of §4 pass on them; nothing else does.
+  the owner's queue until it becomes a pointer) go straight to `main` with `chore(goals): ...`;
+  CI's push run on main scans them (the identity and secret scans ride `make check`); nothing
+  else does.
 - **Releases (T37):** goals 5-14 may cut a minor release at their end when `main` is green
   (optional; the ledger says whether and why); goal 15 must.
-- **CI as it really behaves:** `ci.yml` (push and PR: `make check`, selftests, the config
+- **CI as it really behaves:** `ci.yml` (push, PR and nightly on main: `make check`, selftests, the config
   self-test, amd64 image smoke with a real encode, arm64 smoke with `--no-encode`; 10-13 minutes),
   `mutation.yml` (diff-scoped on PRs; full run Saturdays, which opens an issue when it fails),
   `pin-health.yml` (Mondays), `release.yml` (`v*` tags). GitGuardian also checks PRs.
@@ -162,7 +161,8 @@ Spec `contract.md` §4 and `locks.md` apply, with holdfast's budget and locks:
 - **At most 4 agents at once** (T40, raised 2026-09-30), and never more than
   `/cache/goals/<container>/bin/goals admit --agents <N>` allows. The maker container has 28 CPUs,
   shared by its 9 Claude sessions, and the host is shared.
-- **Heavy jobs** (`make check`, `make mutation-diff`, any real encode loop, `pnpm build`) hold
+- **Heavy jobs:** `make check`, `make mutation-diff` and `pnpm build` run on CI only (the owner,
+  2026-10-03). A focused test with a real encode loop, the one heavy thing left here, holds
   `goals-heavy`, then `holdfast-heavy`: `/cache/goals/<container>/bin/goals lock -w 10800 goals-heavy --
   flock -o /cache/locks/holdfast-heavy.lock <cmd>`. `holdfast-heavy` stays exclusive, so holdfast
   runs one heavy job at a time (T40); how many run in the container at once is `goals-heavy`'s
@@ -1094,7 +1094,7 @@ H. A fresh adversarial subagent checked every line above against the repos and f
 
 A. The precondition checks, printed with their output
 B. Every P1 row is DONE or a listed follow-up (count printed)
-C. The full gate passes on a fresh clone of origin/main: tail and wall-clock
+C. The full gate passes on CI on origin/main's head (`build`, `package`): the run's link, result and wall-clock
 D. (foundation) A minor release is out per docs/release.md: dry-run run URL, tag, green release run, `crane digest` of the pulled image, and the compose pin commit
 E. The homelab PR (never merged) is open with its item in the owner's queue: PR URL
 F. docs/program-report-2026-09-holdfast.md exists with sections for what was built, tests and runtimes, NEEDS-OWNER, proposals, follow-ups and the worker variables: path and its `## ` headings
