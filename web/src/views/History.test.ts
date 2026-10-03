@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { describe, expect, it } from "vitest";
 
-import { cellsOf, fakeFetch, jobRow, json, plain, textOf, total, type Call } from "../test-helpers";
+import { cellsOf, deferred, fakeFetch, jobRow, json, plain, textOf, total, type Call } from "../test-helpers";
 import History from "./History.svelte";
 
 const MiB = 1024 ** 2;
@@ -56,10 +56,10 @@ function pagingServer() {
     }
     return json(
       {
-        rule: "invalid-parameter",
+        rule: "invalid-query",
         error: "the request was refused: 1 parameter is not valid",
         retryable: false,
-        parameters: [{ parameter: "cursor", rule: "cursor-not-recognised", error: "the cursor is not one this server issued" }],
+        parameters: [{ parameter: "cursor", rule: "cursor-undecodable", error: "the cursor is not one this server issued" }],
       },
       400,
     );
@@ -206,10 +206,10 @@ describe("history view", () => {
     const refusing = fakeFetch(() =>
       json(
         {
-          rule: "invalid-parameter",
+          rule: "invalid-query",
           error: "the request was refused: 1 parameter is not valid",
           retryable: false,
-          parameters: [{ parameter: "cursor", rule: "cursor-not-recognised", error: "the cursor is not one this server issued" }],
+          parameters: [{ parameter: "cursor", rule: "cursor-undecodable", error: "the cursor is not one this server issued" }],
         },
         400,
       ),
@@ -219,14 +219,15 @@ describe("history view", () => {
     expect(alert.textContent).toContain("400 the request was refused: 1 parameter is not valid");
     expect(alert.textContent).toContain("cursor: the cursor is not one this server issued");
     // Never the stable tokens in place of the words.
-    expect(alert.textContent).not.toContain("cursor-not-recognised");
+    expect(alert.textContent).not.toContain("cursor-undecodable");
+    expect(alert.textContent).not.toContain("invalid-query");
   });
 
   it("history view: after a refused page, offers the way back to the first page", async () => {
     let refuse = false;
     const server = fakeFetch((call) => {
       if (refuse && call.query.get("cursor") !== null) {
-        return json({ rule: "invalid-parameter", error: "refused", retryable: false, parameters: [] }, 400);
+        return json({ rule: "invalid-query", error: "refused", retryable: false, parameters: [] }, 400);
       }
       return json({ history: [done], history_total: total(3, 50), next_cursor: "c2" });
     });
@@ -261,5 +262,77 @@ describe("history view", () => {
   it("history view: a 401 is shown in the server's words", async () => {
     render(History, { fetch: fakeFetch(() => plain("unauthorized", 401)).fetch, intervalMs: 0 });
     expect((await screen.findByRole("alert")).textContent).toContain("401 unauthorized");
+  });
+
+  it("history view: shows each parameter's words for every refusal the server names, and never the token", async () => {
+    const refusing = fakeFetch(() =>
+      json(
+        {
+          rule: "invalid-query",
+          error: "nothing was read: the request's status and cursor could not be accepted",
+          retryable: false,
+          parameters: [
+            { parameter: "status", rule: "status-not-terminal", error: "status names a state that is not terminal" },
+            { parameter: "cursor", rule: "cursor-filter-mismatch", error: "cursor was issued under another status set" },
+          ],
+        },
+        400,
+      ),
+    );
+    render(History, { fetch: refusing.fetch, intervalMs: 0 });
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("status: status names a state that is not terminal");
+    expect(alert.textContent).toContain("cursor: cursor was issued under another status set");
+    for (const token of ["invalid-query", "status-not-terminal", "cursor-filter-mismatch"]) {
+      expect(alert.textContent).not.toContain(token);
+    }
+  });
+
+  it("history view: states how old history_total is beside it, where the server says it is not current", async () => {
+    await shown(fakeFetch(() => json({ history: [done], history_total: total(40, 50, "", 12), next_cursor: null })));
+    expect(textOf(screen.getByTestId("history-total"))).toBe(
+      "Page 1: 1 rows. The ledger holds 40 rows (every matching row in the ledger), total as of 12 s before this read.",
+    );
+  });
+
+  it("history view: more rows on the page than a stale total is said as that, not as a contradiction", async () => {
+    await shown(
+      fakeFetch(() => json({ history: [done, skipped, failed], history_total: total(2, 50, "", 12), next_cursor: null })),
+    );
+    const said = textOf(screen.getByTestId("history-total"));
+    expect(said).toBe(
+      "Page 1: 3 rows. The server's total of 2 was counted 12 s before this read, so it is older than the rows shown.",
+    );
+    expect(said).not.toContain("The ledger holds 2 rows");
+  });
+
+  it("history view: a page that arrives after the filter changed does not land over the newer one", async () => {
+    // The answer to the filtered read is held back, and delivered only after the filter
+    // was cleared and the unfiltered page has been shown. This fetch does not honour the
+    // abort: a real one may already have the answer on its way.
+    const late = deferred<Response>();
+    const server = fakeFetch((call) => {
+      if (call.query.getAll("status").length > 0) {
+        return late.promise;
+      }
+      return json({ history: [done], history_total: total(3, 50), next_cursor: null });
+    });
+    const { container, calls } = await shown(server);
+    await fireEvent.click(screen.getByRole("checkbox", { name: "failed" }));
+    await waitFor(() => expect(calls.at(-1)?.query.getAll("status")).toEqual(["failed"]));
+    const superseded = calls.at(-1);
+
+    await fireEvent.click(screen.getByRole("checkbox", { name: "failed" }));
+    await waitFor(() => expect(calls).toHaveLength(3));
+    await screen.findByText(/^Read at /);
+    expect(superseded?.signal?.aborted).toBe(true);
+    expect(cellsOf(container, "/library/films/example-a.mkv")[0]).toBe("done");
+
+    late.resolve(json({ history: [failed], history_total: total(1, 50), next_cursor: null }));
+    await late.promise;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(cellsOf(container, "/library/films/example-a.mkv")[0]).toBe("done");
+    expect(container.textContent).not.toContain("/library/films/example-c.mkv");
+    expect(textOf(screen.getByTestId("history-total"))).toContain("The ledger holds 3 rows");
   });
 });

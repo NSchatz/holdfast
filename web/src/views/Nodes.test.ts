@@ -18,7 +18,7 @@ const body = {
     {
       node: "n1",
       path: "/library/films/example-a.mkv",
-      state: "active",
+      state: "granted",
       epoch: 3,
       granted_at: 1700000000,
       updated_at: 1700000010,
@@ -37,7 +37,7 @@ const body = {
       updated_at: 1699990100,
       expires_at: 1699990160,
       ended_at: 1699990160,
-      reason: "heartbeat_lost",
+      reason: "server_restart",
       source_bytes: 1024 * MiB,
       output_bytes: 300 * MiB,
     },
@@ -74,11 +74,11 @@ describe("nodes view", () => {
   it("nodes view: lists each lease with its node, state, reason, epoch, times and sizes", async () => {
     const { container } = await shown(body);
     const active = cellsOf(container, "/library/films/example-a.mkv");
-    expect(active.slice(0, 4)).toEqual(["n1", "active", "", "3"]);
+    expect(active.slice(0, 4)).toEqual(["n1", "granted", "", "3"]);
     expect(active[7]).toBe("not ended");
     expect(active.slice(8)).toEqual(["2.00 GiB", "none uploaded"]);
     const ended = cellsOf(container, "/library/films/example-b.mkv");
-    expect(ended.slice(0, 4)).toEqual(["n2", "expired", "heartbeat_lost", "1"]);
+    expect(ended.slice(0, 4)).toEqual(["n2", "expired", "server_restart", "1"]);
     expect(ended[7]).not.toBe("not ended");
     expect(ended.slice(8)).toEqual(["1.00 GiB", "300.00 MiB"]);
   });
@@ -132,5 +132,37 @@ describe("nodes view", () => {
     await screen.findByText(/^Read at /);
     expect(server.calls[0]?.headers["Authorization"]).toBe("Bearer s3cret");
     expect(server.calls[0]?.url).toBe("/api/nodes");
+  });
+
+  it("nodes view: shows the server's own words for a mode and a lease state", async () => {
+    const lease = body.leases[0];
+    const states = ["granted", "uploaded", "completed", "failed", "expired"];
+    const { container } = await shown({
+      ...body,
+      nodes: [
+        { node: "n-mapped", mode: "mapped", encoders: [], waiting: true, cooling_until: null, leases_active: 0 },
+        { node: "n-http", mode: "http", encoders: [], waiting: true, cooling_until: null, leases_active: 0 },
+      ],
+      leases: states.map((state) => ({ ...lease, state, path: `/library/films/${state}.mkv` })),
+    });
+    expect(cellsOf(container, "n-mapped")[0]).toBe("mapped");
+    expect(cellsOf(container, "n-http")[0]).toBe("http");
+    expect(states.map((state) => cellsOf(container, `/library/films/${state}.mkv`)[1])).toEqual(states);
+  });
+
+  it("nodes view: states how old leases_total is beside it, where the server says it is not current", async () => {
+    await shown({ ...body, leases_total: total(12, 200, "", 75) });
+    expect(textOf(screen.getByTestId("leases-total"))).toBe(
+      "Showing 2 of 12 leases, newest first (the server sends at most 200), total as of 1 min 15 s before this read.",
+    );
+  });
+
+  it("nodes view: more leases than a stale total is said as that, never as 'N of fewer'", async () => {
+    await shown({ ...body, leases_total: total(1, 200, "", 30) });
+    const said = textOf(screen.getByTestId("leases-total"));
+    expect(said).toBe(
+      "Showing 2 leases, newest first. The server's total of 1 was counted 30 s before this read, so it is older than the rows shown.",
+    );
+    expect(said).not.toMatch(/\d of \d/);
   });
 });

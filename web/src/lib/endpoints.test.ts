@@ -108,7 +108,33 @@ describe("endpoints: a field that is missing or null is null, never 0", () => {
 
   it("a total marked unavailable has no count, whatever number sits beside it", () => {
     const q = parseQueue({ queue: [], queue_total: { available: false, unavailable: "not read", cap: 500, count: 0 } });
-    expect(q?.total).toEqual({ available: false, count: null, cap: 500, covers: null, unavailable: "not read" });
+    expect(q?.total).toEqual({
+      available: false,
+      count: null,
+      cap: 500,
+      covers: null,
+      unavailable: "not read",
+      ageSeconds: null,
+    });
+  });
+
+  it("the age of a total and of each whole-ledger figure is a number, else null", () => {
+    const aged = (age: unknown) => ({ available: true, cap: 500, count: 3, age_seconds: age });
+    expect(parseQueue({ queue: [], queue_total: aged(12) })?.total?.ageSeconds).toBe(12);
+    expect(parseQueue({ queue: [], queue_total: aged(0) })?.total?.ageSeconds).toBe(0);
+    expect(parseQueue({ queue: [], queue_total: aged(null) })?.total?.ageSeconds).toBeNull();
+    expect(parseQueue({ queue: [], queue_total: aged("12") })?.total?.ageSeconds).toBeNull();
+    expect(parseHistory({ history: [], history_total: aged(7) })?.total?.ageSeconds).toBe(7);
+    expect(parseNodes({ nodes: [], leases: [], leases_total: aged(9) })?.total?.ageSeconds).toBe(9);
+    const figure = (age: unknown) => ({ available: true, age_seconds: age, counted: 1, excluded: 0, buckets: [] });
+    const s = parseSummary({
+      summary: {},
+      aggregates: { outcomes: figure(30), skips_by_guard: figure("30"), size_ratio: figure(4), encode_ms: figure(null) },
+    });
+    expect(s?.aggregates?.outcomes?.ageSeconds).toBe(30);
+    expect(s?.aggregates?.skipsByGuard?.ageSeconds).toBeNull();
+    expect(s?.aggregates?.sizeRatio?.ageSeconds).toBe(4);
+    expect(s?.aggregates?.encodeMs?.ageSeconds).toBeNull();
   });
 
   it("history tells an absent cursor from a null one", () => {

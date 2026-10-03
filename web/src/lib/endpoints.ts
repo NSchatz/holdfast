@@ -41,6 +41,11 @@ export interface RowTotal {
   cap: number | null;
   covers: string | null;
   unavailable: string | null;
+  /**
+   * How old the count was when the server answered, in seconds: it serves the count from
+   * a cache, and the rows beside it are read fresh. null where it did not say.
+   */
+  ageSeconds: number | null;
 }
 
 function rowTotal(v: unknown): RowTotal | null {
@@ -55,6 +60,7 @@ function rowTotal(v: unknown): RowTotal | null {
     cap: num(v["cap"]),
     covers: text(v["covers"]),
     unavailable: text(v["unavailable"]),
+    ageSeconds: num(v["age_seconds"]),
   };
 }
 
@@ -171,6 +177,8 @@ export interface Spread {
   unavailable: string | null;
   covers: string | null;
   window: string | null;
+  /** How old the figure was when the server answered, in seconds. null where it did not say. */
+  ageSeconds: number | null;
   counted: number | null;
   excluded: number | null;
   min: number | null;
@@ -183,6 +191,8 @@ export interface Breakdown {
   unavailable: string | null;
   covers: string | null;
   window: string | null;
+  /** How old the figure was when the server answered, in seconds. null where it did not say. */
+  ageSeconds: number | null;
   counted: number | null;
   excluded: number | null;
   buckets: { key: string; count: number | null }[];
@@ -233,6 +243,7 @@ function spread(v: unknown): Spread | null {
     unavailable: text(v["unavailable"]),
     covers: text(v["covers"]),
     window: text(v["window"]),
+    ageSeconds: num(v["age_seconds"]),
     counted: num(v["counted"]),
     excluded: num(v["excluded"]),
     min: available ? num(v["min"]) : null,
@@ -250,6 +261,7 @@ function breakdown(v: unknown): Breakdown | null {
     unavailable: text(v["unavailable"]),
     covers: text(v["covers"]),
     window: text(v["window"]),
+    ageSeconds: num(v["age_seconds"]),
     counted: num(v["counted"]),
     excluded: num(v["excluded"]),
     buckets: (dicts(v["buckets"]) ?? []).flatMap((b) => {
@@ -350,8 +362,9 @@ export interface History {
   /** The cursor of the next page, or null on the last one. */
   nextCursor: string | null;
   /**
-   * Whether the answer carried `next_cursor` at all. A server that predates paging
-   * answers without it, and ignores a filter: the view says so.
+   * Whether the answer carried `next_cursor` at all. The API always sends it, a string
+   * or null; a server that predates paging answers without it, and ignores a filter: the
+   * view says so.
    */
   pages: boolean;
 }

@@ -117,3 +117,25 @@ export function saving(sourceBytes: number | null, outputBytes: number | null): 
   }
   return { bytes: sourceBytes - outputBytes, fraction: (sourceBytes - outputBytes) / sourceBytes };
 }
+
+/**
+ * How old a figure the server served from its cache is, in words: "as of 12 s before this
+ * read". Empty where the figure is current or the server gave no age: nothing is claimed
+ * about an age nobody stated.
+ */
+export function ageNote(ageSeconds: number | null): string {
+  return ageSeconds !== null && Number.isFinite(ageSeconds) && ageSeconds > 0
+    ? `as of ${formatDuration(ageSeconds)} before this read`
+    : "";
+}
+
+/**
+ * What to say where more rows are shown than the server's total counts. The rows are read
+ * fresh and the total may be older, so "N of M" would read as a contradiction; this says
+ * which of the two is behind, and never puts the two figures side by side as a share.
+ */
+export function totalBehind(count: number, ageSeconds: number | null): string {
+  return ageNote(ageSeconds) === ""
+    ? `The server's total of ${count} is lower than the rows shown: it was counted apart from them, and the rows are the newer of the two.`
+    : `The server's total of ${count} was counted ${formatDuration(ageSeconds)} before this read, so it is older than the rows shown.`;
+}

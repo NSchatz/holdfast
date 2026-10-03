@@ -2,11 +2,13 @@
   import type { Fetch } from "../lib/api";
   import { loadQueue, QUEUE_PATH } from "../lib/endpoints";
   import {
+    ageNote,
     formatCount,
     formatDimensions,
     formatDuration,
     formatFraction,
     NOT_RECORDED,
+    totalBehind,
     UNAVAILABLE,
   } from "../lib/format";
   import { createResource } from "../lib/resource.svelte";
@@ -45,10 +47,13 @@
   {#if queue.result?.kind === "ok"}
     {@const q = queue.result.value}
     <p data-testid="queue-total">
-      {#if q.total !== null && q.total.count !== null}
+      {#if q.total !== null && q.total.count !== null && q.rows.length > q.total.count}
+        Showing {q.rows.length} pending and active jobs. {totalBehind(q.total.count, q.total.ageSeconds)}
+      {:else if q.total !== null && q.total.count !== null}
+        {@const age = ageNote(q.total.ageSeconds)}
         Showing {q.rows.length} of {q.total.count} pending and active jobs{q.total.cap === null
           ? ""
-          : ` (the server sends at most ${q.total.cap})`}.
+          : ` (the server sends at most ${q.total.cap})`}{age === "" ? "" : `, total ${age}`}.
       {:else}
         Showing {q.rows.length} pending and active jobs. The total behind them is unavailable{q.total
           ?.unavailable

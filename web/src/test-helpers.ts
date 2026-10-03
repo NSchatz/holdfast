@@ -76,8 +76,28 @@ export function jobRow(over: Record<string, unknown> = {}): Record<string, unkno
   };
 }
 
-export function total(count: number | null, cap: number, unavailable = ""): Record<string, unknown> {
-  return { available: count !== null, unavailable, covers: "every matching row in the ledger", cap, age_seconds: 0, count };
+/**
+ * A total as the server writes one. `age` is how old the count is, in seconds; a total
+ * that could not be read carries a null age beside its null count, as the server's does.
+ */
+export function total(count: number | null, cap: number, unavailable = "", age = 0): Record<string, unknown> {
+  return {
+    available: count !== null,
+    unavailable,
+    covers: "every matching row in the ledger",
+    cap,
+    age_seconds: count === null ? null : age,
+    count,
+  };
+}
+
+/** A promise and the function that settles it, for an answer a test delivers late. */
+export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve: (value: T) => void = () => {};
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
 }
 
 /** An element's text with its whitespace collapsed, as a reader sees it. */

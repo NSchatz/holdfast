@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Fetch } from "../lib/api";
   import { loadSummary, SUMMARY_PATH, type Breakdown, type RootFigures, type Spread } from "../lib/endpoints";
-  import { formatCount, formatMillis, formatNumber, UNAVAILABLE } from "../lib/format";
+  import { ageNote, formatCount, formatMillis, formatNumber, UNAVAILABLE } from "../lib/format";
   import { createResource } from "../lib/resource.svelte";
   import Bytes from "./Bytes.svelte";
   import ReadState from "./ReadState.svelte";
@@ -55,7 +55,9 @@
       <table>
         <caption>
           Over {b.covers ?? "a set the server did not name"}{b.window === null ? "" : ` (${b.window})`}:
-          {formatCount(b.counted)} counted, {formatCount(b.excluded)} left out.
+          {formatCount(b.counted)} counted, {formatCount(b.excluded)} left out{ageNote(b.ageSeconds) === ""
+            ? ""
+            : `, ${ageNote(b.ageSeconds)}`}.
         </caption>
         <thead>
           <tr><th scope="col">{keyHeading}</th><th scope="col" class="num">Rows</th></tr>
@@ -85,7 +87,13 @@
       <td class="num">{write(s.max)}</td>
       <td class="num">{formatCount(s.counted)}</td>
       <td class="num">{formatCount(s.excluded)}</td>
-      <td>{s.covers ?? "a set the server did not name"}{s.window === null ? "" : ` (${s.window})`}</td>
+      <td>
+        {s.covers ?? "a set the server did not name"}{s.window === null ? "" : ` (${s.window})`}{ageNote(
+          s.ageSeconds,
+        ) === ""
+          ? ""
+          : `, ${ageNote(s.ageSeconds)}`}
+      </td>
     {/if}
   </tr>
 {/snippet}

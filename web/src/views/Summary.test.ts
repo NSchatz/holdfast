@@ -249,4 +249,36 @@ describe("summary view", () => {
     view.unmount();
     expect(calls[0]?.signal?.aborted).toBe(true);
   });
+
+  it("summary view: states how old a whole-ledger figure is beside it, where the server says it is not current", async () => {
+    const aged = {
+      ...body,
+      aggregates: {
+        ...body.aggregates,
+        outcomes: { ...body.aggregates.outcomes, age_seconds: 30 },
+        size_ratio: { ...body.aggregates.size_ratio, age_seconds: 12 },
+      },
+    };
+    const { fetch } = serve(aged);
+    const { container } = await shown(fetch);
+    const captions = Array.from(container.querySelectorAll("caption")).map(textOf);
+    expect(captions).toContain("Over every terminal row in the ledger: 21 counted, 0 left out, as of 30 s before this read.");
+    // The figure beside it is current, and nothing is said about its age.
+    expect(captions).toContain("Over every skipped row in the ledger: 7 counted, 0 left out.");
+    expect(cellsOf(container, "Output size as a share of the source")[5]).toBe(
+      "every done row in the ledger, as of 12 s before this read",
+    );
+    expect(cellsOf(container, "Encode time")[5]).toBe("every done row in the ledger");
+  });
+
+  it("summary view: claims no age for a figure that carries none", async () => {
+    const { age_seconds: _dropped, ...outcomes } = body.aggregates.outcomes;
+    void _dropped;
+    const { fetch } = serve({
+      ...body,
+      aggregates: { ...body.aggregates, outcomes, size_ratio: { ...body.aggregates.size_ratio, age_seconds: null } },
+    });
+    const { container } = await shown(fetch);
+    expect(container.textContent).not.toContain("before this read");
+  });
 });

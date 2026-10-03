@@ -2,6 +2,7 @@
   import type { Fetch } from "../lib/api";
   import { HISTORY_PATH, loadHistory, TERMINAL_STATUSES } from "../lib/endpoints";
   import {
+    ageNote,
     formatCount,
     formatDimensions,
     formatFraction,
@@ -10,6 +11,7 @@
     formatTime,
     NOT_RECORDED,
     saving,
+    totalBehind,
     UNAVAILABLE,
   } from "../lib/format";
   import { createResource } from "../lib/resource.svelte";
@@ -111,11 +113,14 @@
     {@const h = history.result.value}
     <p data-testid="history-total">
       Page {page}: {h.rows.length} rows.
-      {#if h.total !== null && h.total.count !== null}
+      {#if h.total !== null && h.total.count !== null && h.rows.length > h.total.count}
+        {totalBehind(h.total.count, h.total.ageSeconds)}
+      {:else if h.total !== null && h.total.count !== null}
+        {@const age = ageNote(h.total.ageSeconds)}
         The ledger holds {h.total.count} rows{statuses.length > 0 ? " matching this filter" : ""}{h
           .total.covers === null
           ? ""
-          : ` (${h.total.covers})`}.
+          : ` (${h.total.covers})`}{age === "" ? "" : `, total ${age}`}.
       {:else}
         The total behind them is unavailable{h.total?.unavailable ? `: ${h.total.unavailable}` : ""}.
       {/if}

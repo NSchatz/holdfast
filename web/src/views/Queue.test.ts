@@ -139,4 +139,64 @@ describe("queue view", () => {
     await vi.advanceTimersByTimeAsync(5000);
     expect(calls).toHaveLength(3);
   });
+
+  it("queue view: states how old queue_total is beside it, where the server says it is not current", async () => {
+    await shown({ now: 1790000125, queue: rows, queue_total: total(1234, 500, "", 12) });
+    expect(textOf(screen.getByTestId("queue-total"))).toBe(
+      "Showing 3 of 1234 pending and active jobs (the server sends at most 500), total as of 12 s before this read.",
+    );
+  });
+
+  it.each([
+    ["an age of 0", 0],
+    ["no age", null],
+    ["an age that is not a number", "12"],
+  ])("queue view: claims no age for a total that carries %s", async (_name, age) => {
+    await shown({ now: 1790000125, queue: rows, queue_total: { ...total(1234, 500), age_seconds: age } });
+    expect(textOf(screen.getByTestId("queue-total"))).toBe(
+      "Showing 3 of 1234 pending and active jobs (the server sends at most 500).",
+    );
+  });
+
+  it("queue view: more rows than a stale total is said as that, never as 'N of fewer'", async () => {
+    await shown({ now: 1790000125, queue: rows, queue_total: total(2, 500, "", 12) });
+    const said = textOf(screen.getByTestId("queue-total"));
+    expect(said).toBe(
+      "Showing 3 pending and active jobs. The server's total of 2 was counted 12 s before this read, so it is older than the rows shown.",
+    );
+    expect(said).not.toMatch(/\d of \d/);
+  });
+
+  it("queue view: more rows than a total that states no age is not written as a share either", async () => {
+    await shown({ now: 1790000125, queue: rows, queue_total: total(2, 500) });
+    const said = textOf(screen.getByTestId("queue-total"));
+    expect(said).toBe(
+      "Showing 3 pending and active jobs. The server's total of 2 is lower than the rows shown: it was counted apart from them, and the rows are the newer of the two.",
+    );
+    expect(said).not.toMatch(/\d of \d/);
+  });
+
+  it("queue view: as many rows as the total is still 'N of N'", async () => {
+    await shown({ now: 1790000125, queue: rows, queue_total: total(3, 500, "", 5) });
+    expect(textOf(screen.getByTestId("queue-total"))).toBe(
+      "Showing 3 of 3 pending and active jobs (the server sends at most 500), total as of 5 s before this read.",
+    );
+  });
+
+  it("queue view: entering a token reads again at once with it, and forgetting it reads again without", async () => {
+    // No interval: only the token changing can cause the second and third reads.
+    const { fetch, calls } = serve({ now: 1, queue: [], queue_total: total(0, 500) });
+    const view = render(Queue, { fetch, intervalMs: 0 });
+    await screen.findByText(/^Read at /);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.headers).not.toHaveProperty("Authorization");
+
+    await view.rerender({ token: "s3cret" });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.headers["Authorization"]).toBe("Bearer s3cret");
+
+    await view.rerender({ token: "" });
+    expect(calls).toHaveLength(3);
+    expect(calls[2]?.headers).not.toHaveProperty("Authorization");
+  });
 });

@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Fetch } from "../lib/api";
   import { loadNodes, NODES_PATH } from "../lib/endpoints";
-  import { formatCount, formatTime, NOT_RECORDED, UNAVAILABLE } from "../lib/format";
+  import { ageNote, formatCount, formatTime, NOT_RECORDED, totalBehind, UNAVAILABLE } from "../lib/format";
   import { createResource } from "../lib/resource.svelte";
   import Bytes from "./Bytes.svelte";
   import ReadState from "./ReadState.svelte";
@@ -77,10 +77,13 @@
 
     <h3 id="lease-list-heading">Leases</h3>
     <p data-testid="leases-total">
-      {#if n.total !== null && n.total.count !== null}
+      {#if n.total !== null && n.total.count !== null && n.leases.length > n.total.count}
+        Showing {n.leases.length} leases, newest first. {totalBehind(n.total.count, n.total.ageSeconds)}
+      {:else if n.total !== null && n.total.count !== null}
+        {@const age = ageNote(n.total.ageSeconds)}
         Showing {n.leases.length} of {n.total.count} leases, newest first{n.total.cap === null
           ? ""
-          : ` (the server sends at most ${n.total.cap})`}.
+          : ` (the server sends at most ${n.total.cap})`}{age === "" ? "" : `, total ${age}`}.
       {:else}
         Showing {n.leases.length} leases, newest first. The total behind them is unavailable{n.total
           ?.unavailable
