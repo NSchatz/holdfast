@@ -56,7 +56,7 @@ machine has. Each worker copies the module into the temp dir and links a test bi
 per mutant; with one worker per core on a 56-core shared host a diff-scoped run wrote 878 MB
 to one disk in a minute (`/proc/<pid>/io`, 2026-10-03) and every other job on the host waited
 behind it. A hosted CI runner has 4 cores, so the pull-request and scheduled runs are as they
-were. `scripts/mutation.sh` puts the run's temp files on a RAM-backed scratch directory where
+were. `scripts/mutation.sh` puts the run's temp files and its Go build cache on a RAM-backed scratch directory where
 the host has one with 3 GiB free (`/scratch`, or the directory `HOLDFAST_MUTATION_SCRATCH`
 names), prints which directory it used, and otherwise leaves `TMPDIR` as the caller set it.
 
