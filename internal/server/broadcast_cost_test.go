@@ -58,6 +58,14 @@ func (c *countingStore) List(context.Context, []store.Status, int) ([]store.Job,
 	return nil, nil
 }
 
+// ListPage is the history endpoint's paged read: a capped list read like List, counted with it.
+func (c *countingStore) ListPage(context.Context, []store.Status, *store.PagePosition, int) ([]store.Job, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.list++
+	return nil, false, nil
+}
+
 func (c *countingStore) CountRows(_ context.Context, _ []store.Status) store.RowTotal {
 	c.mu.Lock()
 	defer c.mu.Unlock()

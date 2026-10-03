@@ -949,6 +949,12 @@ type Store interface {
 	// API traffic can alter file handling.
 	List(ctx context.Context, statuses []Status, limit int) ([]Job, error)
 
+	// ListPage is one PAGE of the rows in a status set, in a TOTAL order: newest transition
+	// first, then path ascending, then fingerprint ascending (history_page.go). It returns
+	// at most limit rows strictly after the position given (the newest rows when after is
+	// nil) and whether a further row follows them. A pure read, like List.
+	ListPage(ctx context.Context, statuses []Status, after *PagePosition, limit int) (rows []Job, more bool, err error)
+
 	// Summary counts rows per status; only statuses with at least one row appear.
 	Summary(ctx context.Context) (map[Status]int, error)
 

@@ -13,7 +13,7 @@ per-field reference `README.md` points at rather than restates.
 | `GET /assets/*` | - | the static files the web UI's page names (its script and stylesheet), by exact name; `404` for anything else and on a build that embeds no UI. Never gated: they hold no library datum |
 | `GET /api/summary` | read | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** (see below). It does not carry `bytes_held_by_undo_window`: that figure rides the SSE snapshot and the `/metrics` gauge only |
 | `GET /api/queue` | read | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
-| `GET /api/history?limit=N` | read | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
+| `GET /api/history?limit=N&status=S&cursor=C` | read | terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, newest first, one capped page at a time, optionally filtered by status, with `history_total` and `next_cursor` - see *`GET /api/history` - filtering and paging* |
 | `GET /api/events` | read | SSE: a fresh snapshot on every state change |
 | `GET /api/health` | read | the library health sweep: its state, the sweep under way and the last one that finished, each with its counts and the files it found corrupt or unreadable - see *`GET /api/health`* below. Report only: no route acts on a finding |
 | `GET /api/schema` | - | a machine-readable document of this surface, GENERATED from the router and the response types this build actually serves. Never gated: it carries endpoint paths, methods, status codes, media types, field names and field types, and no value of any kind - see below |
@@ -670,6 +670,81 @@ Each one carries the same envelope, and every part of it is load-bearing:
 Every aggregate ships beside the set it covers and the count of rows it had to leave out, so a client
 never has to guess what a figure was taken over.
 
+### `GET /api/history` - filtering and paging
+
+One response carries at most **200** rows, and the whole ledger is readable through it, one page at a
+time. Three query parameters, all optional:
+
+| Parameter | Meaning |
+|---|---|
+| `limit` | rows per page, 1 to 200. Anything else (0, a negative, more than 200, not a number) keeps 200 |
+| `status` | serve only rows in these statuses. Terminal statuses only: `done`, `skipped`, `failed`, `would-transcode`, `indeterminate`, `applied-despite-error`. Repeat the parameter, separate values with commas, or both; the filter is their union, and `status=done,failed`, `status=failed&status=done` and `status=done&status=failed` are one request |
+| `cursor` | the `next_cursor` of the previous page, exactly as it was served. Opaque: do not build one, and do not read one |
+
+The 200 body:
+
+```json
+{
+  "history": [ ... ],
+  "history_total": { "available": true, "unavailable": "", "covers": "every row in the ledger with status done, failed",
+                     "cap": 200, "age_seconds": 0, "count": 41237 },
+  "next_cursor": "eyJ2IjoxLCJ1Ijox..."
+}
+```
+
+- **Order.** Newest transition first (`updated_at` descending), then `path` ascending, then the row's
+  internal key. The order is total: no two rows compare equal, so a page boundary always falls between
+  two rows.
+- **`next_cursor`** is a string while at least one more matching row follows the page, and JSON `null`
+  on the last page. The key is always present. A last page that is exactly full still carries `null`:
+  no cursor ever leads to an empty page. To read everything, send the request, then send it again with
+  `cursor` set to each `next_cursor` until one is `null`, keeping `status` the same throughout.
+- **`history_total`** is the count of matching rows in the whole ledger - under a filter, the rows in
+  the requested statuses; `covers` names them. It is never the number of rows returned, and `cap` is
+  the limit this response applied. If it cannot be read the page and its cursor still ship, with
+  `available: false` and `count: null`.
+- **`history`** is always an array. A valid filter that matches nothing answers 200 with `[]`,
+  `next_cursor: null` and a `count` of 0.
+
+**What a traversal guarantees.** A row that exists, stays in the requested statuses and is not
+re-transitioned from the first page's read to the last page's is served exactly once. No row is served
+twice when the changes made during the traversal are stamped in a later second than every row already
+served. A cursor is a position, not a row: if the row it was issued from has since been deleted, the
+next page is the rows that follow that position.
+
+**What it does not.** `updated_at` is in whole seconds. A row that is re-transitioned in the same
+second as the position a cursor stands at, and that sorts after it, can be served a second time in its
+new state. A row not yet served that transitions again moves to the newest end and is not in this
+traversal: it is at the top of the next one. A row the ledger retention deletes during a traversal is
+not served. A consumer that needs every row as it stood at one instant should use `holdfast export`.
+
+**Refusals.** A `status` or `cursor` this endpoint cannot accept is a `400` with a JSON body, and no
+rows. It is never read as "no filter" and never answered with an empty page: an empty page for a
+mistyped status reads as "no such rows". With `server_read_token` set, a request without a valid token
+is a `401` before either parameter is looked at.
+
+```json
+{
+  "rule": "invalid-query",
+  "error": "nothing was read: the request's status and cursor could not be accepted, ...",
+  "retryable": false,
+  "parameters": [
+    { "parameter": "status", "rule": "status-not-terminal", "error": "status takes the terminal statuses only (...)" },
+    { "parameter": "cursor", "rule": "cursor-undecodable", "error": "cursor is not a token this server issued: ..." }
+  ]
+}
+```
+
+Every parameter that was wrong is named in the one response, once each, `status` before `cursor`.
+`retryable` is always `false`. Branch on the tokens, never on the words:
+
+| Token | Where | Meaning |
+|---|---|---|
+| `invalid-query` | top-level `rule` | a query parameter was refused; `parameters` says which |
+| `status-not-terminal` | `status` | a value is not one of the six terminal statuses: an unknown word, a status the queue serves (`pending`, `probing`, `encoding`, `verifying`), or an empty element (`status=`, `status=done,`). Values are exact: no other case, no surrounding space |
+| `cursor-undecodable` | `cursor` | not a token this server issued: empty, truncated, altered beyond reading, or given more than once |
+| `cursor-filter-mismatch` | `cursor` | a readable token presented with a status set other than the one it was issued under, including a token from an unfiltered request presented with a filter and the reverse. The same set in another order or spelling is accepted. Reported only when `status` itself was accepted |
+
 ### The total behind a cap
 
 `GET /api/queue` returns at most **500** rows and `GET /api/history` at most **200**. A truncated view that
@@ -681,7 +756,7 @@ in the `jobs` table**:
 | Response | Field |
 |---|---|
 | `GET /api/queue` | `queue_total` |
-| `GET /api/history?limit=N` | `history_total` |
+| `GET /api/history` | `history_total` (over the requested statuses when `status` is given) |
 | the SSE snapshot | both |
 
 ```json

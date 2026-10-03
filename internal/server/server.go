@@ -450,9 +450,15 @@ type queueResponse struct {
 }
 
 // historyResponse is the body of GET /api/history.
+//
+// NextCursor continues the traversal (history_paging.go): a token while a further row
+// follows this page, and an explicit null on the last one. It is never omitted, so "no more
+// rows" is something the response SAYS rather than something a client infers from a key
+// that is not there.
 type historyResponse struct {
 	History      []jobDTO    `json:"history"`
 	HistoryTotal rowTotalDTO `json:"history_total"`
+	NextCursor   *string     `json:"next_cursor"`
 }
 
 // rescanResponse is the body of POST /api/rescan, under 202 and under 409 alike.
@@ -487,30 +493,6 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		Now:        time.Now().Unix(),
 		Queue:      s.hub.queueDTOs(jobs),
 		QueueTotal: rowTotalOf(s.hub.ledgerFigures(r.Context(), true).QueueTotal, queueLimit),
-	})
-}
-
-func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
-	limit := historyLimit
-	if q := r.URL.Query().Get("limit"); q != "" {
-		// Clamp a requested limit into (0, historyLimit]; anything larger keeps the
-		// cap, anything else keeps the default. `<=` lets a caller ask for exactly
-		// the cap.
-		if n, err := strconv.Atoi(q); err == nil && n > 0 && n <= limit {
-			limit = n
-		}
-	}
-	jobs, err := s.reads().List(r.Context(), terminal, limit)
-	if err != nil {
-		s.fail(w, "history", err)
-		return
-	}
-	// history_total counts the matching rows in the LEDGER, so it is the same figure
-	// whether the caller took the cap or asked for fewer: `cap` moves with the request,
-	// `count` does not. A total that tracked the request would just be len(history).
-	writeJSON(w, http.StatusOK, historyResponse{
-		History:      toDTOs(jobs),
-		HistoryTotal: rowTotalOf(s.hub.ledgerFigures(r.Context(), true).HistoryTotal, limit),
 	})
 }
 
