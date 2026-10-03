@@ -16,3 +16,11 @@ out
 state
 config.yaml
 docker-compose.yml
+
+# The web UI's dependencies and build output: the image installs and builds its own, in
+# the `ui` stage, from the lockfile. A developer's built UI in the embed directory stays
+# out too - only its committed placeholder is sent.
+web/node_modules
+web/dist
+internal/ui/dist/*
+!internal/ui/dist/.gitkeep

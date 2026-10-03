@@ -154,6 +154,18 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           check-latest: false
 
+      # The web UI's gate (`make check`: ui-lint, ui-typecheck, ui-test, ui-build) runs on
+      # the Node web/.node-version pins, READ from that file and never restated here
+      # (scripts/check-pins.sh section 12 refuses a literal). pnpm is not installed by
+      # this step: scripts/ui.sh takes it from corepack, which reads the version and its
+      # sha512 from web/package.json. No dependency cache: the install is seconds, and a
+      # cache is one more thing that could hand the gate packages the lockfile did not name.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: web/.node-version
+          check-latest: false
+          package-manager-cache: false
+
       # A release re-gates itself rather than trusting that CI ran on this commit - a tag
       # can point at ANY commit, including one CI never ran on or one CI failed on, and
       # ci.yml does not trigger on tags. So run the repo's whole gate here, not a token
@@ -239,6 +251,11 @@ jobs:
           # at all - which is the gap the NOTICE file was added to close, and it does not
           # close it by sitting next to the tarball in a CI artifact that expires.
           cp LICENSE NOTICE dist/
+          # The binaries embed the web UI from internal/ui/dist, which `make check` built
+          # earlier in this job. If that step ever stops leaving it there, these would be
+          # binaries that serve no UI, built green: refuse instead.
+          test -f internal/ui/dist/index.html \
+            || { echo "::error::internal/ui/dist holds no built web UI: the release binaries would embed the placeholder alone" >&2; exit 1; }
           for target in linux/amd64 linux/arm64; do
             os="${target%/*}"; arch="${target#*/}"
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
