@@ -51,6 +51,15 @@ budget as a generous multiple of the coverage run, and gives each mutated test p
 CPU so that the runner's own parallelism does not oversubscribe the machine, because a
 busy machine quietly shrinks the number of mutants the score is computed over.
 
+The runner uses at most 4 workers (`unleash.workers` in `.gremlins.yaml`), whatever the
+machine has. Each worker copies the module into the temp dir and links a test binary there
+per mutant; with one worker per core on a 56-core shared host a diff-scoped run wrote 878 MB
+to one disk in a minute (`/proc/<pid>/io`, 2026-10-03) and every other job on the host waited
+behind it. A hosted CI runner has 4 cores, so the pull-request and scheduled runs are as they
+were. `scripts/mutation.sh` puts the run's temp files on a RAM-backed scratch directory where
+the host has one with 3 GiB free (`/scratch`, or the directory `HOLDFAST_MUTATION_SCRATCH`
+names), prints which directory it used, and otherwise leaves `TMPDIR` as the caller set it.
+
 ## The mutation domain
 
 The domain is the module MINUS the list below. Every Go file outside these paths is
