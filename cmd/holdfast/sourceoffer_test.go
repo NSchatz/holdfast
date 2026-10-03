@@ -259,7 +259,7 @@ func TestServe_ServesTheOfferAndTheVersionSubcommandAgrees(t *testing.T) {
 	go func() { done <- runServer(ctx, cfg, discardLog(), io.Discard) }()
 
 	base := "http://" + addr
-	waitHTTP(t, base+"/api/summary", 10*time.Second)
+	waitHTTP(t, base+"/api/summary", serverReady)
 	page := httpGet(t, base+"/")
 
 	// The `version` subcommand of this same binary.
@@ -397,7 +397,7 @@ func TestLdflags_StampedForkValueIsServedAndUpstreamIsAbsent(t *testing.T) {
 	}
 	defer func() { cancel(); _ = cmd.Wait() }()
 
-	waitHTTP(t, "http://"+addr+"/api/summary", 30*time.Second)
+	waitHTTP(t, "http://"+addr+"/api/summary", serverReady)
 	page := httpGet(t, "http://"+addr+"/")
 
 	offer := rootOfferOf(t, page)

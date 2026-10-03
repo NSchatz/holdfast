@@ -108,7 +108,7 @@ func TestServe_StatesTheResolvedQueueOrderAtStartup(t *testing.T) {
 	done := make(chan int, 1)
 	go func() { done <- runServer(ctx, cfg, logging.To(logs, "info"), &bytes.Buffer{}) }()
 
-	waitHTTP(t, "http://"+addr+"/api/summary", 10*time.Second)
+	waitHTTP(t, "http://"+addr+"/api/summary", serverReady)
 	if !strings.Contains(logs.String(), "queue_order="+config.QueueOrderNewest) {
 		t.Errorf("serve's startup records carry no queue_order=%s field:\n%s",
 			config.QueueOrderNewest, logs.String())

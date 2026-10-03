@@ -116,7 +116,7 @@ func TestServeStartsTheWatchOnlyForTheRootThatAskedForOne(t *testing.T) {
 	go func() { done <- runServer(ctx, cfg, log, sink) }()
 
 	base := "http://" + addr
-	waitHTTP(t, base+"/api/summary", 15*time.Second)
+	waitHTTP(t, base+"/api/summary", serverReady)
 
 	deadline := time.Now().Add(15 * time.Second)
 	for len(watchRecords(t, sink, watched)) == 0 {

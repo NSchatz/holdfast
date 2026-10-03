@@ -134,7 +134,7 @@ func TestServeSmoke(t *testing.T) {
 	go func() { done <- runServer(ctx, cfg, discardLog(), io.Discard) }()
 
 	base := "http://" + addr
-	waitHTTP(t, base+"/api/summary", 3*time.Second)
+	waitHTTP(t, base+"/api/summary", serverReady)
 
 	// The root path serves the plain-text page: holdfast ships no frontend, so what a
 	// browser gets at / is the endpoint banner and the AGPL section 13 source offer.
@@ -334,6 +334,14 @@ func TestRun_DisabledGateDoesNotRefuseAnUnresolvableModel(t *testing.T) {
 }
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// serverReady bounds every wait for a test server's first 200. It is a hang guard and not
+// a speed claim: waitHTTP returns on the first 200, so a ready server costs nothing extra.
+// Before it answers, a server opens its store and migrates it and runs its startup checks,
+// all on the gate's TMPDIR, and on a host whose disk other gates are saturating that has
+// taken more than the 3 s this package once allowed: TestServeSmoke went red on "server
+// never became ready" with nothing wrong in the code.
+const serverReady = 30 * time.Second
 
 func waitHTTP(t *testing.T, url string, timeout time.Duration) {
 	t.Helper()
