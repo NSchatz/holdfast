@@ -1278,8 +1278,9 @@ func logResolvedProfiles(cfg *config.Config, log *slog.Logger) {
 	}
 }
 
-// logConfigWarnings logs the notices and then the warnings, as its statement above says.
-// What it does NOT say is anything about the read surface. `run` goes through here too and
+// logConfigWarnings logs the notices and then the warnings (the reasoning for both is at
+// its announcement, above logResolvedProfiles). What it does NOT say is anything about the
+// read surface. `run` goes through here too and
 // binds no listener, so that statement belongs to `serve` alone: see logReadSurface.
 func logConfigWarnings(cfg *config.Config, log *slog.Logger) {
 	for _, n := range cfg.Notices() {

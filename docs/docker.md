@@ -298,10 +298,15 @@ services:
 
 **It does not gate the root path.** holdfast ships no frontend, so `/` is a plain-text page
 naming the endpoints and carrying the Corresponding Source offer. (A web UI is to ship on this
-API - decided 2026-09-29 by the owner (T14, T18); until that release, `/` is this page.) It is still served with no
+API - decided 2026-09-29 by the owner (T14, T18); until that release, `/` is this page for
+every client but a browser, which gets the UI's shell with the same offer, its static files
+under `/assets/`.) It is still served with no
 credential when a read token is set, and it holds no library datum for a credential to
 protect - every media path is behind `/api/queue`, `/api/history` and `/api/events`, which
-the key does gate. holdfast says so at startup rather than leaving you to find it.
+the key does gate. `serve` says so at startup rather than leaving you to find it, and
+`validate` says what it can see of it: a token that is not set in the file or in its own
+environment may still be supplied where `serve` runs. `run` opens no listener and says nothing
+about one.
 
 `/metrics` is gated by neither key. Its reachability is governed by `metrics_enable` alone,
 because the exposition carries counters, a byte total and two histograms labelled only by

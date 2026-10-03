@@ -736,8 +736,8 @@ type Config struct {
 	// privileged surface. The reverse never holds - a read token buys no mutation.
 	//
 	// It does NOT gate the ROOT PATH or /metrics. The root serves the web UI's page
-	// and its static files under /assets/ to a browser, and a plain-text page to every other
-	// client and where the build carries no UI, with the AGPL section 13 source offer either way, and it holds no library datum for a credential to protect.
+	// to a request that asks for HTML and a plain-text page otherwise, with the AGPL section
+	// 13 source offer either way; the page's static files under /assets/ are open too, and it holds no library datum for a credential to protect.
 	// /metrics is governed by metrics_enable alone and its exposition names no file. Both
 	// are stated by ReadSurfaceNotices when `serve` starts rather than left for an operator
 	// to discover.
@@ -2199,9 +2199,10 @@ const (
 // readSurfaceRoot is what both read-surface statements say about the root path, in one
 // place so the two cannot drift: what is served there depends on the build, and neither
 // rendering carries anything a credential would protect.
-const readSurfaceRoot = "the root serves the web UI's page and its static files under /assets/ " +
-	"to a browser, and a plain-text page to every other client and where the build carries no UI, " +
-	"with the Corresponding Source offer either way, and it carries NO LIBRARY DATUM"
+const readSurfaceRoot = "the root serves the web UI's page to a request that asks for HTML and a " +
+	"plain-text page to every other request and where the build carries no UI, with the " +
+	"Corresponding Source offer either way, and the page's static files are under /assets/ for any " +
+	"client; none of it carries a LIBRARY DATUM"
 
 // ReadSurfaceNotices states the read surface on whichever side of it this configuration
 // lands, to a command that has one to state. They are notices and neither is a warning: the
