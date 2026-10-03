@@ -478,10 +478,13 @@ func (e *Engine) encodeAt(ctx context.Context, worker, key string, fi os.FileInf
 
 // nodeCouldNotRun are the typed reasons a worker fails a lease with when IT could not run
 // the job: its path map, its mount, its encoders, its own refusal of the command line, its
-// own shutdown. They say something about the node and nothing about the file.
+// own shutdown - and, in http mode, a source it could not download as media or a work
+// directory with no room for it. They say something about the node and nothing about the
+// file.
 var nodeCouldNotRun = map[string]bool{
 	"unmapped_source": true, "source_mismatch": true, "source_unreadable": true,
 	"unsupported_encoder": true, "refused_plan": true, "worker_stopping": true,
+	"source_download_failed": true, "work_dir_full": true,
 }
 
 // encodeOnNode leases the job (or takes its recovered lease back) and waits for the node's
@@ -503,7 +506,10 @@ var nodeCouldNotRun = map[string]bool{
 // A nil error from the hub is a CANDIDATE, and two things about it are checked before any
 // gate: the server hashes ITS OWN copy of the source and compares it with the digest of the
 // bytes the node read - a mismatch is a wrong worker_path_map entry or a stale mount on the
-// node, and the job fails - and the working file is the length the lease recorded.
+// node, or in http mode a source that changed after it was streamed, and the job fails -
+// and the working file is the length the lease recorded. In http mode the hub has already
+// held the node's digest to the digest of what it streamed (node.ReasonSourceMismatch); this
+// check is taken in both modes all the same, so a ranged download is never unchecked.
 func (e *Engine) encodeOnNode(ctx context.Context, nj *nodeJob, worker, key string, fi os.FileInfo, in, out string,
 	props *probe.VideoProps, job *EncodePlan) (handled bool, err error) {
 	server := func(why string, args ...any) (bool, error) {
@@ -627,7 +633,8 @@ func (e *Engine) acceptNodeOutput(ctx context.Context, nj *nodeJob, worker, in s
 	}
 	e.Log.Info("node encode", "file", in, "worker", worker, "node", res.Node, "lease", res.LeaseID,
 		"epoch", res.Epoch, "output_bytes", res.OutputBytes, "output_digest", res.OutputDigest,
-		"source_digest", res.SourceDigest, "node_encode_sec", res.EncodeSeconds)
+		"source_digest", res.SourceDigest, "node_encode_sec", res.EncodeSeconds,
+		"source_streamed_digest", res.StreamedDigest)
 	refuse := func(reason, why string) error {
 		e.Nodes.Report(res.Node, reason)
 		return &NodeVerdictError{Node: res.Node, LeaseID: res.LeaseID, Epoch: res.Epoch, Why: why}
@@ -641,8 +648,8 @@ func (e *Engine) acceptNodeOutput(ctx context.Context, nj *nodeJob, worker, in s
 	}
 	if own != res.SourceDigest {
 		return refuse("source_digest_mismatch", fmt.Sprintf("the source the node read is not the server's (the node read %s, the "+
-			"server's copy is %s): a wrong worker_path_map entry or a stale mount on the node; nothing was gated "+
-			"and the source is untouched", res.SourceDigest, own))
+			"server's copy is %s): a wrong worker_path_map entry or a stale mount on the node, or a source that "+
+			"changed after it was streamed; nothing was gated and the source is untouched", res.SourceDigest, own))
 	}
 	st, err := os.Stat(lj.Temp)
 	if err != nil {

@@ -163,6 +163,8 @@ func (f *fixture) open(tune func(*Options)) {
 	srv, st2 := f.srv, st
 	f.t.Cleanup(func() {
 		stop()
+		// A request a failed test left open must not hold the server's Close for ever.
+		srv.CloseClientConnections()
 		srv.Close()
 		_ = st2.Close()
 	})
@@ -453,4 +455,33 @@ func leaseErr(t *testing.T, err error) *LeaseError {
 func exists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
+}
+
+// feed writes part of a piped request body. A pipe write blocks until the transport reads
+// it, and a server that answers a request WITHOUT reading its body leaves that write blocked
+// for ever - which is how a regression in an upload's liveness checks used to show up as a
+// package timeout. So the write is raced against the answer and against a bound, and each
+// loses by name.
+func feed(t *testing.T, pw *io.PipeWriter, part []byte, answered chan reply) {
+	t.Helper()
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := pw.Write(part)
+		wrote <- err
+	}()
+	select {
+	case err := <-wrote:
+		if err != nil {
+			t.Fatalf("writing %d bytes of the body: %v", len(part), err)
+		}
+	case r := <-answered:
+		_ = pw.CloseWithError(errors.New("answered before the body was read"))
+		// Put back for a caller that reads the answer after the test has failed.
+		answered <- r
+		t.Fatalf("the request was answered %d %s before its body was read: the server decided it without "+
+			"the bytes this case sends", r.status, r.body)
+	case <-time.After(10 * time.Second):
+		_ = pw.CloseWithError(errors.New("the body was never read"))
+		t.Fatalf("%d bytes of the body were not read within 10s", len(part))
+	}
 }

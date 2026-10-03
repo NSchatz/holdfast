@@ -1,8 +1,9 @@
 // Package nodeworker is the `holdfast worker` loop: the node side of the lease protocol
 // (docs/design/nodes.md#worker).
 //
-// A worker only ever ENCODES. It asks the server for a lease, reads the source through its
-// own mount of the library (worker_path_map), runs the command line the lease carried, and
+// A worker only ever ENCODES. It asks the server for a lease, reads the source - through its
+// own mount of the library (worker_path_map) in mapped mode, or downloaded from the server
+// on the lease in http mode (source.go) - runs the command line the lease carried, and
 // uploads the output with its length and sha-256. It never writes into the library, never
 // decides anything about the source, and nothing it reports licenses a swap: the server
 // re-runs every gate on what arrives.
@@ -72,6 +73,12 @@ const (
 	ReasonUploadRefused      = "upload_refused"
 	ReasonRefusedPlan        = "refused_plan"
 	ReasonWorkerStopping     = "worker_stopping"
+	// ReasonSourceDownloadFailed is an http-mode lease whose source the worker could not
+	// download as media: the server did not answer 200 with exactly the leased length, or
+	// every attempt the bound allows failed. ReasonWorkDirFull is one whose source and
+	// output the work directory has no room for.
+	ReasonSourceDownloadFailed = "source_download_failed"
+	ReasonWorkDirFull          = "work_dir_full"
 )
 
 // ErrInsecureServer is a worker_server the worker will not send its credential to.
@@ -80,6 +87,27 @@ var ErrInsecureServer = errors.New("worker_server is plain http to a host that i
 // ErrVersionMismatch is a server that runs another holdfast version. It is fatal: no retry
 // makes two builds the same.
 var ErrVersionMismatch = errors.New("the worker and the server run different holdfast versions")
+
+// InsecureWarning is the record a worker writes at warn level at EVERY start when
+// worker_insecure_http lets it speak plain http to a server that is not loopback
+// (docs/design/nodes.md#transport).
+const InsecureWarning = "worker_insecure_http is true and worker_server is plain http to a host that is not " +
+	"loopback: THE NODE CREDENTIAL CROSSES THE NETWORK IN CLEARTEXT ON EVERY REQUEST, and in http mode so " +
+	"does the library's media. Whoever captures the credential can lease jobs, upload outputs and, in http " +
+	"mode, read the media; digests do not help against that. Use an https:// worker_server (server_tls_cert " +
+	"and server_tls_key on the server, or a reverse proxy in front of it)"
+
+// CheckTransport is CheckServer with the operator's override: a plain http server that is
+// not loopback is accepted when insecureHTTP (worker_insecure_http) is true, and cleartext
+// then reports that the override is what let it through, so the caller says so loudly.
+// With https or a loopback host the override changes nothing and cleartext is false.
+func CheckTransport(raw string, insecureHTTP bool) (cleartext bool, err error) {
+	err = CheckServer(raw)
+	if errors.Is(err, ErrInsecureServer) && insecureHTTP {
+		return true, nil
+	}
+	return false, err
+}
 
 // CheckServer refuses a server address the node credential must not be sent to: anything but
 // https, or plain http to a loopback host. Over plain http the token crosses the network in
@@ -103,8 +131,9 @@ func CheckServer(raw string) error {
 			return nil
 		}
 		return fmt.Errorf("%w (%s): the node credential would cross the network in cleartext on every "+
-			"request. Point worker_server at an https:// address (a reverse proxy in front of the server "+
-			"is enough)", ErrInsecureServer, u.Host)
+			"request. Point worker_server at an https:// address (server_tls_cert and server_tls_key on the "+
+			"server, or a reverse proxy in front of it), or set worker_insecure_http: true to accept that",
+			ErrInsecureServer, u.Host)
 	}
 	return errors.New("worker_server is not an http or https URL")
 }
@@ -122,11 +151,25 @@ type Options struct {
 	Name, Version string
 	// Slots is how many encodes run at once (worker_slots).
 	Slots int
-	// PathMap translates a source path as the server names it into this worker's mount.
+	// Mode is how the worker reaches a leased source (worker_mode): node.ModeMapped, which
+	// "" also means, or node.ModeHTTP.
+	Mode string
+	// InsecureHTTP is worker_insecure_http: it lets Server be plain http to a host that is
+	// not loopback, which New then says at warn level.
+	InsecureHTTP bool
+	// PathMap translates a source path as the server names it into this worker's mount. It
+	// is read in mapped mode only, and refused in http mode.
 	PathMap config.PathMap
-	// WorkDir is where an encode's output is written before it is uploaded. It is created
-	// if it is missing, and every output is removed from it whatever became of its lease.
+	// WorkDir is where an encode's output - and in http mode the downloaded source - is
+	// written. It is created if it is missing, and every file this worker wrote there is
+	// removed whatever became of its lease.
 	WorkDir string
+	// FreeSpace reports the free bytes on the filesystem holding a directory
+	// (internal/diskfree.Bytes in production). nil skips the http-mode room check.
+	FreeSpace func(dir string) (uint64, error)
+	// SourceIdle is how long a source download may go without a byte arriving before it
+	// is cut; 0 means DefaultSourceIdle.
+	SourceIdle time.Duration
 	// Encoders is the encoder registry keys this worker's own probe found.
 	Encoders []string
 	// Encode runs one encode.
@@ -158,8 +201,21 @@ func New(o Options) (*Worker, error) {
 	if strings.TrimSpace(o.Server) == "" {
 		return nil, errors.New("worker_server is not set: a worker needs the address of the server it leases from")
 	}
-	if err := CheckServer(o.Server); err != nil {
+	cleartext, err := CheckTransport(o.Server, o.InsecureHTTP)
+	if err != nil {
 		return nil, err
+	}
+	switch o.Mode {
+	case "":
+		o.Mode = node.ModeMapped
+	case node.ModeMapped:
+	case node.ModeHTTP:
+		if len(o.PathMap) > 0 {
+			return nil, errors.New("worker_mode is http and worker_path_map is set: a worker in http mode " +
+				"downloads each source from its server and maps no path")
+		}
+	default:
+		return nil, fmt.Errorf("worker_mode %q is not one of mapped|http", o.Mode)
 	}
 	if o.Token.Empty() {
 		return nil, errors.New("node_token is not set: a worker needs the node credential, by reference " +
@@ -188,6 +244,14 @@ func New(o Options) (*Worker, error) {
 	o.HTTP = &client
 	if o.Log == nil {
 		o.Log = slog.Default()
+	}
+	if cleartext {
+		// Said here, where a worker is built, so it is said at every start and cannot be
+		// configured away.
+		o.Log.Warn(InsecureWarning, "worker_server", o.Server, "worker_mode", o.Mode)
+	}
+	if o.SourceIdle <= 0 {
+		o.SourceIdle = DefaultSourceIdle
 	}
 	if o.MinBackoff <= 0 {
 		o.MinBackoff = DefaultMinBackoff
@@ -243,16 +307,32 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 // outputName is the name an encode's output is written under in the work directory, and
-// outputNamed recognises exactly that shape: 32 hex characters, a dot, the epoch, `.out`.
+// sourceName the name an http-mode lease's downloaded source is: the same stem with `.src`
+// and, where the leased path has a short plain one, the source's own extension, which is
+// what a demuxer that reads the name sees. outputNamed recognises exactly those two shapes:
+// 32 hex characters, a dot, the epoch, then `.out`, or `.src` and an optional extension of
+// 1 to 8 lower-case letters and digits.
 func outputName(leaseID string, epoch int64) string {
 	return leaseID + "." + strconv.FormatInt(epoch, 10) + ".out"
 }
 
-var outputNamed = regexp.MustCompile(`^[0-9a-f]{32}\.[0-9]+\.out$`)
+func sourceName(leaseID string, epoch int64, leasedPath string) string {
+	name := leaseID + "." + strconv.FormatInt(epoch, 10) + ".src"
+	if ext := strings.ToLower(filepath.Ext(leasedPath)); sourceExt.MatchString(ext) {
+		name += ext
+	}
+	return name
+}
 
-// sweepWorkDir removes the outputs a previous run of this worker left: a killed worker
-// removes nothing on its way out. Only a regular file whose name is this worker's own output
-// naming is touched - the directory may be shared, and nothing else in it is this worker's.
+var (
+	outputNamed = regexp.MustCompile(`^[0-9a-f]{32}\.[0-9]+\.(out|src(\.[a-z0-9]{1,8})?)$`)
+	sourceExt   = regexp.MustCompile(`^\.[a-z0-9]{1,8}$`)
+)
+
+// sweepWorkDir removes the files a previous run of this worker left: a killed worker
+// removes nothing on its way out. Only a regular file whose name is this worker's own
+// naming - an output, or a downloaded source - is touched: the directory may be shared, and
+// nothing else in it is this worker's.
 func (w *Worker) sweepWorkDir() {
 	ents, err := os.ReadDir(w.o.WorkDir)
 	if err != nil {
@@ -319,7 +399,7 @@ func (w *Worker) slot(ctx context.Context) error {
 // lease this worker can read in full; every other answer - another status with any body, a
 // 200 that is not JSON, a JSON object missing what a lease must carry - is no lease.
 func (w *Worker) acquire(ctx context.Context, b *backoff) (*node.AcquireResponse, time.Duration, error) {
-	req := node.AcquireRequest{Node: w.o.Name, Version: w.o.Version, Slots: 1, Mode: node.ModeMapped, Encoders: w.o.Encoders}
+	req := node.AcquireRequest{Node: w.o.Name, Version: w.o.Version, Slots: 1, Mode: w.o.Mode, Encoders: w.o.Encoders}
 	resp, body, err := w.call(ctx, DefaultAcquireTimeout, http.MethodPost, node.RouteLeases, req)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -331,6 +411,9 @@ func (w *Worker) acquire(ctx context.Context, b *backoff) (*node.AcquireResponse
 	switch resp.StatusCode {
 	case http.StatusOK:
 		lease, err := readLease(resp, body)
+		if err == nil && lease.Mode != w.o.Mode {
+			err = fmt.Errorf("its mode is %q, and this worker asked for work in %s mode", lease.Mode, w.o.Mode)
+		}
 		if err != nil {
 			w.o.Log.Warn("worker: the server's answer is not a lease, so nothing is encoded", "status", resp.StatusCode, "why", err)
 			return nil, b.next(retry), nil
@@ -371,8 +454,8 @@ func readLease(resp *http.Response, body []byte) (*node.AcquireResponse, error) 
 	switch {
 	case l.Epoch < 1:
 		return nil, errors.New("it carries no epoch")
-	case l.Mode != node.ModeMapped:
-		return nil, fmt.Errorf("its mode is %q, and this worker reads the source through its own mount only", l.Mode)
+	case l.Mode != node.ModeMapped && l.Mode != node.ModeHTTP:
+		return nil, fmt.Errorf("its mode is %q, which is neither mapped nor http", l.Mode)
 	case l.Path == "" || l.Encoder == "" || len(l.Body) == 0:
 		return nil, errors.New("it carries no source path, no encoder or no command line")
 	case l.SourceSize < 2 || l.MaxOutputBytes < 1 || l.MaxOutputBytes >= l.SourceSize:
@@ -503,16 +586,20 @@ func refusedPlan(l *node.AcquireResponse) string {
 	return ""
 }
 
-// runLease carries one lease to its end: map and check the source, encode, hash, upload,
-// complete. The local output is removed on every way out this process lives through. It
+// runLease carries one lease to its end: reach and check the source, encode, hash, upload,
+// complete. The local files are removed on every way out this process lives through. It
 // reports false when this worker failed the lease itself.
 func (w *Worker) runLease(ctx context.Context, l *node.AcquireResponse) (ok bool) {
 	log := w.o.Log.With("lease", l.LeaseID, "epoch", l.Epoch, "path", l.Path)
-	src, err := node.MapSource(w.o.PathMap, l.Path)
-	if err != nil {
-		log.Warn("worker: no worker_path_map entry covers the leased source; it is never guessed at", "err", err)
-		w.fail(l, ReasonUnmappedSource)
-		return false
+	streamed := w.o.Mode == node.ModeHTTP
+	var src string
+	if !streamed {
+		var err error
+		if src, err = node.MapSource(w.o.PathMap, l.Path); err != nil {
+			log.Warn("worker: no worker_path_map entry covers the leased source; it is never guessed at", "err", err)
+			w.fail(l, ReasonUnmappedSource)
+			return false
+		}
 	}
 	if why := refusedPlan(l); why != "" {
 		log.Warn("worker: the leased command line is not one this worker runs", "why", why)
@@ -523,22 +610,25 @@ func (w *Worker) runLease(ctx context.Context, l *node.AcquireResponse) (ok bool
 		w.fail(l, ReasonUnsupportedEncoder)
 		return false
 	}
-	same, err := sameSource(src, l)
-	if err != nil {
-		log.Warn("worker: the mapped source could not be read", "mapped", src, "err", err)
-		w.fail(l, ReasonSourceUnreadable)
-		return false
-	}
-	if !same {
-		log.Warn("worker: the mapped source is not the size and modification time the lease was granted on", "mapped", src)
-		w.fail(l, ReasonSourceMismatch)
-		return false
+	if !streamed {
+		same, err := sameSource(src, l)
+		if err != nil {
+			log.Warn("worker: the mapped source could not be read", "mapped", src, "err", err)
+			w.fail(l, ReasonSourceUnreadable)
+			return false
+		}
+		if !same {
+			log.Warn("worker: the mapped source is not the size and modification time the lease was granted on", "mapped", src)
+			w.fail(l, ReasonSourceMismatch)
+			return false
+		}
 	}
 
 	out := filepath.Join(w.o.WorkDir, outputName(l.LeaseID, l.Epoch))
 	defer func() { _ = os.Remove(out) }()
 
-	// The lease's own context: a 410 from any call cancels it, which stops the encode at once.
+	// The lease's own context: a 410 from any call cancels it, which stops the download and
+	// the encode at once.
 	lctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var gone atomic.Bool
@@ -551,12 +641,33 @@ func (w *Worker) runLease(ctx context.Context, l *node.AcquireResponse) (ok bool
 	}()
 	defer func() { cancel(); <-hbDone }()
 
+	// In http mode the source is downloaded first, heartbeating all the while, and hashed as
+	// it is written: srcSum is then the sha-256 of exactly the bytes that arrived.
+	var srcSum []byte
+	if streamed {
+		src = filepath.Join(w.o.WorkDir, sourceName(l.LeaseID, l.Epoch, l.Path))
+		defer func() { _ = os.Remove(src) }()
+		sum, reason := w.fetchSource(lctx, l, src, &gone)
+		switch {
+		case gone.Load():
+			log.Warn("worker: the lease is gone; the source download was stopped and discarded")
+			return true
+		case ctx.Err() != nil:
+			w.fail(l, ReasonWorkerStopping)
+			return false
+		case reason != "":
+			w.fail(l, reason)
+			return false
+		}
+		srcSum = sum
+	}
+
 	var dur float64
 	if w.o.Duration != nil {
 		dur, _ = w.o.Duration(lctx, src)
 	}
 	started := time.Now()
-	err = w.o.Encode(lctx, src, out, l.Pre, l.Body, func(pos float64) {
+	err := w.o.Encode(lctx, src, out, l.Pre, l.Body, func(pos float64) {
 		if dur > 0 {
 			progress.Store(math.Float64bits(min(pos/dur, 1)))
 		}
@@ -576,18 +687,20 @@ func (w *Worker) runLease(ctx context.Context, l *node.AcquireResponse) (ok bool
 	}
 	progress.Store(math.Float64bits(1))
 
-	srcSum, _, err := hashFile(src)
-	if err == nil {
-		// The source is hashed after the encode read it; one that moved meanwhile is not the
-		// source this output was encoded from.
-		if same, serr := sameSource(src, l); serr != nil || !same {
-			err = errors.New("the source changed while it was encoded")
+	if !streamed {
+		srcSum, _, err = hashFile(src)
+		if err == nil {
+			// The source is hashed after the encode read it; one that moved meanwhile is not the
+			// source this output was encoded from.
+			if same, serr := sameSource(src, l); serr != nil || !same {
+				err = errors.New("the source changed while it was encoded")
+			}
 		}
-	}
-	if err != nil {
-		log.Warn("worker: the source could not be hashed as leased", "err", err)
-		w.fail(l, ReasonSourceMismatch)
-		return false
+		if err != nil {
+			log.Warn("worker: the source could not be hashed as leased", "err", err)
+			w.fail(l, ReasonSourceMismatch)
+			return false
+		}
 	}
 	outSum, size, err := hashFile(out)
 	if err != nil {

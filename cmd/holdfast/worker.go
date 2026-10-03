@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -33,12 +34,14 @@ const workerWorkDirName = "holdfast-worker"
 
 // cmdWorker is `holdfast worker`: the node side of the lease protocol
 // (docs/design/nodes.md#worker). It leases encodes from the server worker_server names, reads
-// each source through its own mount of the library, and uploads the output. It writes nothing
-// into the library and holds one credential, node_token, which can lease and upload and
-// nothing else.
+// each source through its own mount of the library (worker_mode: mapped) or downloads it on
+// the lease (worker_mode: http), and uploads the output. It writes nothing into the library
+// and holds one credential, node_token, which can lease and upload and nothing else.
 func cmdWorker(args []string, _, stderr io.Writer) int {
 	fs := flag.NewFlagSet("worker", flag.ContinueOnError)
-	cfg, code := loadConfig(fs, args, stderr)
+	// A worker in http mode names no library root, so its configuration is held to
+	// config.ValidateWorker; in mapped mode that is Validate itself.
+	cfg, code := loadConfigWith(fs, args, stderr, (*config.Config).ValidateWorker)
 	if cfg == nil {
 		return code
 	}
@@ -64,10 +67,26 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	if srv == "" {
 		return refuse("worker_server is not set: a worker needs the address of the server it leases from")
 	}
-	// D8: the credential never crosses a network in cleartext. Checked before the secret is
-	// even resolved.
-	if err := nodeworker.CheckServer(srv); err != nil {
+	// The credential never crosses a network in cleartext unless the operator wrote
+	// worker_insecure_http: true (docs/design/nodes.md#transport), which nodeworker.New says
+	// at warn level at every start. Checked before the secret is even resolved.
+	if _, err := nodeworker.CheckTransport(srv, cfg.WorkerInsecureHTTP); err != nil {
 		return refuse("%v", err)
+	}
+	mode := cfg.EffectiveWorkerMode()
+	if mode == config.WorkerModeHTTP && len(cfg.LibraryRoots) > 0 {
+		// config.ValidateWorker refuses this; a Config built another way is held to it too.
+		return refuse("worker_mode is http and library_roots is set: a worker in http mode reads no library")
+	}
+	// worker_tls_ca: certificates trusted beside the system roots. An unreadable or empty
+	// bundle refuses here; nothing ever switches verification off.
+	var client *http.Client
+	if ca := strings.TrimSpace(cfg.WorkerTLSCA); ca != "" {
+		c, err := nodeworker.TrustingClient(ca)
+		if err != nil {
+			return refuse("%v", err)
+		}
+		client = c
 	}
 	if !cfg.NodesEnabled() {
 		return refuse("node_token is not set: a worker needs the node credential, by reference " +
@@ -123,6 +142,7 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	opts := nodeworker.Options{
 		Server: srv, Token: secrets.Get(config.NodeTokenKey), Name: name, Version: version.Version,
 		Slots: cfg.EffectiveWorkerSlots(), PathMap: cfg.WorkerPathMap, WorkDir: workDir,
+		Mode: mode, InsecureHTTP: cfg.WorkerInsecureHTTP, HTTP: client, FreeSpace: diskfree.Bytes,
 		Encoders: encoders, Log: log,
 		// The command line is assembled by the engine's own function, the one every local
 		// encode goes through, so a node's argv and the server's cannot drift.
@@ -140,7 +160,7 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	if err != nil {
 		return refuse("%v", err)
 	}
-	log.Info("worker starting", "server", srv, "name", name, "slots", opts.Slots,
+	log.Info("worker starting", "server", srv, "name", name, "mode", mode, "slots", opts.Slots,
 		"encoders", strings.Join(encoders, ","), "work_dir", workDir,
 		"path_map_entries", len(cfg.WorkerPathMap), "version", version.Version)
 	if err := w.Run(ctx); err != nil {

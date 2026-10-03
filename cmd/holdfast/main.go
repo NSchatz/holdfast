@@ -125,6 +125,13 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 // loadConfig parses --config and returns a validated Config, or a nonzero exit
 // code written to stderr. Shared by run and validate so both enforce identically.
 func loadConfig(fs *flag.FlagSet, args []string, stderr io.Writer) (*config.Config, int) {
+	return loadConfigWith(fs, args, stderr, (*config.Config).Validate)
+}
+
+// loadConfigWith is loadConfig with the validation the command holds its configuration to:
+// Validate for every command but `worker`, whose http mode names no library root.
+func loadConfigWith(fs *flag.FlagSet, args []string, stderr io.Writer,
+	validate func(*config.Config) error) (*config.Config, int) {
 	path := fs.String("config", "", "path to the YAML config file (required)")
 	fs.SetOutput(stderr)
 	if err := fs.Parse(args); err != nil {
@@ -146,18 +153,44 @@ func loadConfig(fs *flag.FlagSet, args []string, stderr io.Writer) (*config.Conf
 	}
 	// Load already returns a fully-defaulted config (koanf defaults layer) and
 	// distinguishes an explicit zero (e.g. crf: 0) from an absent key.
-	if err := cfg.Validate(); err != nil {
+	if err := validate(cfg); err != nil {
 		fmt.Fprintf(stderr, "holdfast: invalid config: %v\n", err)
 		return nil, 1
 	}
 	return cfg, 0
 }
 
+// workerServerOrUnset is worker_server as `validate` prints it.
+func workerServerOrUnset(cfg *config.Config) string {
+	if s := strings.TrimSpace(cfg.WorkerServer); s != "" {
+		return s
+	}
+	return "its server (worker_server is not set)"
+}
+
 func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
-	cfg, code := loadConfig(fs, args, stderr)
+	// The configuration of a worker in http mode names no library root (it reads no
+	// library), and it is one only when it says `worker_mode: http` AND names none: that
+	// file is held to the worker's validation, and every other file to Validate, which
+	// refuses an empty library_roots exactly as it always has.
+	httpWorker := func(c *config.Config) bool {
+		return c.EffectiveWorkerMode() == config.WorkerModeHTTP && len(c.LibraryRoots) == 0
+	}
+	cfg, code := loadConfigWith(fs, args, stderr, func(c *config.Config) error {
+		if httpWorker(c) {
+			return c.ValidateWorker()
+		}
+		return c.Validate()
+	})
 	if cfg == nil {
 		return code
+	}
+	if httpWorker(cfg) {
+		fmt.Fprintf(stdout, "config OK: a `holdfast worker` in http mode - it names no library root, downloads "+
+			"each leased source from %s and uploads the output there. `run` and `serve` refuse this file\n",
+			workerServerOrUnset(cfg))
+		return 0
 	}
 	// The configured working location, checked here for the same reason `run` and
 	// `serve` check it before their first encode: a missing, unwritable, overlapping
@@ -1322,6 +1355,15 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		return 1
 	}
 
+	// Built-in TLS, only where both server_tls_cert and server_tls_key are written
+	// (docs/design/nodes.md#transport). A pair that does not parse or does not match
+	// refuses here, before anything opens, and the refusal carries nothing of the key.
+	tlsConfig, err := serverTLS(cfg, secrets.Get(config.ServerTLSKeyKey))
+	if err != nil {
+		fmt.Fprintf(stderr, "holdfast: refusing to start: %v\n", err)
+		return 1
+	}
+
 	// The daemon serves the WHOLE library - it scans on an interval and takes submissions
 	// for any configured root - so its classification is never narrowed.
 	eng, st, code := buildEngine(cfg, log, stderr, classifyScope{})
@@ -1478,8 +1520,21 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 			// one it always was.
 			listening = append(listening, "nodes_enabled", true)
 		}
+		serve := httpSrv.ListenAndServe
+		if tlsConfig != nil {
+			// Said only where built-in TLS is on, for the reason nodes_enabled is. The
+			// certificate is the one in TLSConfig, so ListenAndServeTLS is given no file:
+			// "Filenames containing a certificate and matching private key for the server
+			// must be provided if neither the Server's TLSConfig.Certificates nor
+			// TLSConfig.GetCertificate are populated" (`go doc net/http
+			// Server.ListenAndServeTLS`, Go 1.25.14; https://pkg.go.dev/net/http, read
+			// 2026-10-03).
+			httpSrv.TLSConfig = tlsConfig
+			serve = func() error { return httpSrv.ListenAndServeTLS("", "") }
+			listening = append(listening, "tls", true)
+		}
 		log.Info("serve listening", listening...)
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
