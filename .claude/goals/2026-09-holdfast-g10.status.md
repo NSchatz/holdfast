@@ -66,36 +66,36 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g10-b
 | 1.1 | Precondition checked (header above) | DONE (`6e1058f`): goal 9's COMPLETE line is on `origin/main` |
 | 1.2 | Ledger created as the goal's first commit, straight to `main` | DONE (the commit that adds this file): fast docs checks passed first |
 | 1.3 | Baseline gate with timings | DONE (`6e1058f`): `make check` exit 0 in 2488 s; the table above |
-| 1.4 | `TEST_TIMEOUT` raised in its own commit (the engine passed 80%, I15) | DOING |
+| 1.4 | `TEST_TIMEOUT` raised in its own commit (the engine passed 80%, I15) | DONE (PR #151, `b139fcb`): 45m to 60m with the measurement in `Makefile`; gate exit 0 (`internal/engine` 2430.5 s, `cmd/holdfast` 914.0 s); CI green. A first gate run was stopped by the session's 2-hour background limit while waiting for the lock and re-run detached |
 
 ## Phase 2 - Triage rows (line B)
 
 | # | Item | State |
 |---|---|---|
-| 2.1 | S0178 statement half: `validate` and startup state the effective `preserve_mtime` choice | TODO |
-| 2.2 | S0179 post-swap rescan (merged into phase 3) | TODO |
+| 2.1 | S0178 statement half: `validate` and startup state the effective `preserve_mtime` choice | DONE (PR #152, `2787ea6`): one `preserve_mtime` notice (value, default or explicit, its consequence) printed by `validate` and logged at start; `TestNotices_S0178_AC5_StatesTheEffectivePreserveMtimeChoice`, `TestValidate_S0178_AC5_PrintsExactlyOnePreserveMtimeNote`, `TestStartup_S0178_AC5_LogsThePreserveMtimeChoice`, AC-6 and restore tests; default unchanged; mutation-diff 100%; gate exit 0 (`internal/engine` 2446.3 s); CI green; 1 fix round (an empty key still loads as the default) |
+| 2.2 | S0179 post-swap rescan (merged into phase 3) | DONE (PR #153, `138c0cc`): AC-1 to AC-16 tested in `internal/mediaclient`, `internal/config`, `cmd/holdfast/post_swap_hook_test.go`; AC-17 the gate; AC-18 is the owner's live check (phase 5) |
 
 ## Phase 3 - Plex, Sonarr and Radarr after a swap (line C)
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | Plex partial refresh of the section path after a swap | TODO |
-| 3.2 | Plex hold on a file currently being played, beside the Tautulli hold | TODO |
-| 3.3 | Sonarr `RescanSeries` and Radarr `RescanMovie` after a swap | TODO |
+| 3.1 | Plex partial refresh of the section path after a swap | DONE (PR #153): `TestMediaClients_AfterASwapPlexGetsAPartialRefreshOfTheSectionPath`, `TestHook_AC4_*`; a file directly in a section location is never refreshed (review fix) |
+| 3.2 | Plex hold on a file currently being played, beside the Tautulli hold | DONE (PR #153): held at the door (no row) and before the swap's rename (ahead of its re-checks); `TestMediaClients_AFileBeingPlayedInPlexIsHeld`, `TestMediaClients_PlexUnreachableDoesNotHoldAndWarnsOnce`, `TestPlayHold_*` incl. `TestPlayHold_TheWaitSitsAheadOfTheSwapsOwnChecks` (red when the wait is moved below them) |
+| 3.3 | Sonarr `RescanSeries` and Radarr `RescanMovie` after a swap | DONE (PR #153): `TestMediaClients_AfterASwapSonarrGetsRescanSeriesAndRadarrGetsRescanMovie`, `TestArr_NoCommandIsEverSentWithoutAnOwnerID`; mutation-diff 100%; gate exit 0 (`internal/engine` 2447.4 s, `cmd/holdfast` 882.2 s); CI green; 1 fix round (an adversarial review: 4 MED, 4 LOW, none HIGH, all fixed or recorded) |
 
 ## Phase 4 - Webhook intake (line D)
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | Authenticated intake: both Sonarr Download shapes and Radarr's, queues the file | TODO |
-| 4.2 | `docs/docker.md`: the native intake replaces the custom script | TODO |
-| 4.3 | `make api-schema-diff` passes, `.api-schema-breaks.yaml` still `[]` | TODO |
+| 4.1 | Authenticated intake: both Sonarr Download shapes and Radarr's, queues the file | DONE (PR #155, `c727f7a`): `POST`/`PUT` `/api/webhook/sonarr` and `/api/webhook/radarr`, `webhook_token` as bearer or Basic password; `TestWebhook_SonarrDownloadPerFileShapeQueuesTheFile`, `TestWebhook_SonarrDownloadImportCompleteShapeQueuesEveryFile`, `TestWebhook_RadarrDownloadQueuesTheFile`, `TestWebhook_UpgradeArrivesAsDownloadWithIsUpgradeAndIsQueued`, `TestWebhook_IsAuthenticated`; gate exit 0 (`internal/engine` 2701.8 s, `internal/server` 325.7 s); CI green; 1 fix round (an adversarial review: 2 MED, 5 LOW, none HIGH, fixed) |
+| 4.2 | `docs/docker.md`: the native intake replaces the custom script | DONE (PR #155): the Custom Script and the shim are gone; `Connect > Webhook` is the documented route |
+| 4.3 | `make api-schema-diff` passes, `.api-schema-breaks.yaml` still `[]` | DONE (PR #155): four `endpoint-added` additions, 0 breaks |
 
 ## Phase 5 - Credentials and live checks (line E)
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | Each new credential key in `config.SecretBearingKeys`, a literal refused | TODO |
+| 5.1 | Each new credential key in `config.SecretBearingKeys`, a literal refused | DONE (PRs #153, #155): `plex_token`, `sonarr_api_key`, `radarr_api_key`, `webhook_token`; `TestSecretKeys_PlexSonarrRadarrAreSecretBearingAndRefuseALiteral`, `TestSecretKeys_WebhookTokenIsSecretBearingAndRefusesALiteral` |
 | 5.2 | Live-check commands that write a redacted report, filed on the owner's queue for Plex, Sonarr and Radarr | TODO |
 
 ## Phase 6 - Report
@@ -143,9 +143,24 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g10-b
   no environment form; no command without an id and no unscoped refresh can be built; the hold at
   the door writes no row, and the wait before the swap has no upper bound.
 
+- D9 (2026-10-03): PR #155's own decisions are in its PR body and
+  `docs/design/media-clients.md#webhook-intake`: the control and read tokens are not accepted on
+  the intake; a `webhook_token` that resolves to a server token refuses to start; an event
+  holdfast does not consume answers 200 and queues nothing; a pause answers 200; a path not in
+  clean form is refused before the path map; Rename queues the new path only.
+- D10 (2026-10-03): merging `origin/main` into a branch stacked on a squash-merged one conflicts
+  on the same content. The branch first merged the stacked branch's final commit, then
+  `origin/main` keeping the branch side, and the merge was checked: `git diff origin/main HEAD`
+  equals the branch's own diff over the stacked commit (same `sha1sum`).
+
 ## Proposals awaiting the owner
 
 - Fail-open against fail-closed for the Plex play hold (D3).
+- A bound on the wait before the swap while a file is played: today it is unbounded (it only
+  delays) and says so every 10 minutes; a paused session pins a worker
+  (`docs/post-swap-hook.md`).
+- `TestServeSmoke` waits 3 s for the listener, and two runs under host load average 40-60 missed
+  it; a longer wait in that test would remove a flake that is not about the code.
 
 ## Resume here
 
