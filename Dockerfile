@@ -347,7 +347,7 @@ RUN set -eu; \
     ls -lR dist
 
 # --- build the binary --------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.25.14-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.1-trixie@sha256:3b77fc618ec235a1ab412de7737f120dd507c57e8d87de4cbb7994fb94275ed5 AS build
 
 # The DIGEST is what Docker pulls; the tag beside it is a label the registry does not
 # enforce. scripts/check-pins.sh holds the Go version together across this file, ci.yml
