@@ -88,7 +88,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g13-b
 | # | Item | State |
 |---|---|---|
 | 5.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `2f1f4ed`): `func Test` 2004 -> 2033, no package fell (`cmd/holdfast` 269 -> 280, `internal/config` 174 -> 176, `internal/server` 129 -> 137, `internal/sourceoffer` 9 -> 10, `internal/ui` 0 -> 7, every other package unchanged); `git diff --numstat d636e7f origin/main -- docs/design/swap.md docs/design/quality-gate.md` empty (66 and 80 lines); `*_test.go` +1456 -10, the 10 deleted lines in D16; zero `co-authored-by` in `git log d636e7f..origin/main --format=%B` |
-| 5.2 | Adversarial review of the report | DOING |
+| 5.2 | Adversarial review of the report | DONE: a fresh subagent (2026-10-03) checked lines A to G and the merge rule against `0ade223` and GitHub in its own clone: it re-ran the pin check and its selftest (88/88), the five `scripts/ui.sh` steps, and the S0175, UI, source-offer and node tests; mutated the product code five times and saw each go red by a named S0175 assertion and none by a timeout; defeated section 8 by hand with an `.npmrc`-only project and with a `minimumReleaseAgeExclude` list (both refused); built the binary with and without the UI and read `/` both ways from a real `serve`; recounted `func Test` per package and judged the 10 deleted test lines; checked the three PRs' states, checks and gate tails: "VERDICT: none false". Its corrections and findings are in D18 |
 
 ## Decisions taken
 
@@ -213,18 +213,32 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g13-b
   What merged is the UI's shell with no views; goal 14 builds them, and a release that
   announces a web UI is better cut with one.
 
+- D18 (2026-10-03): the report review's corrections and findings, as recorded. The
+  `packageManager` sha512 is checked on the corepack route only (CI and the image); where the
+  pinned pnpm is already on `PATH` or comes from mise, `scripts/ui.sh` holds the version and
+  not the hash, and the report says "version pinned, hash checked by corepack". "No other repo
+  was touched" rests on this goal having opened no PR elsewhere and pushed nowhere else; the
+  umbrella clone was read and its push URL is disabled. `main`'s CI had no completed green run
+  between `8af5573` and the flake fix; the run for `0ade223`, which contains all three merges,
+  is green (`build` and `package`, run 37139249199). LOW, left for goal 14, which works in
+  `web/`: `scripts/ui.sh toolchain` probes `pnpm --version` inside `web/`, and pnpm rewrites
+  the lockfile's `packageManagerDependencies` block there when the pin and the lockfile
+  disagree, so a step documented as naming the toolchain can write a file in that one case.
+  The first-key-wins reading of a duplicate `ignoreScripts` fails safe: pnpm 12.8.1 refuses a
+  workspace file with a duplicate key.
+
 ## Requests
 
 None filed, none addressed to holdfast (T6, §0.13). The owner's queue: no new item so far; nothing in this goal needs the owner's hands (no hardware, no live service).
 
 ## Resume here
 
-All three PRs of this goal are merged: #161 (`0c3b25d`), #165 (`ff3f4f5`), #166 (`2f1f4ed`).
-No branch or worktree of this goal is left, and no PR of it is open (the open ones are
-Dependabot's and another program's `speed/gate`, D13). The owner's queue has no new item.
+Nothing is left. Merged: #161 (`0c3b25d`), #165 (`ff3f4f5`), #166 (`2f1f4ed`); `main`'s CI is
+green on `0ade223`; no branch, worktree or PR of this goal is open; the owner's queue has no new
+item. Goal 14 starts from `origin/main` and finds: the shell in `web/src/App.svelte`, the API
+module `web/src/lib/api.ts`, the embed and root negotiation in `docs/design/web-ui.md`, the
+page's Content-Security-Policy (no inline script or style), the statements D2 leaves for it,
+and D18's note on `scripts/ui.sh toolchain`. The gate needs `/cache/ffmpeg/bin` on `PATH` in
+this container (D4).
 
-Left: `main`'s CI run for `2f1f4ed` (watched; log `main-ci.log`), the fresh adversarial review
-of the report's lines A to G against the repos (row 5.2), then the COMPLETE line,
-`goals check /workspace/holdfast 2026-09-holdfast 13` and the GOAL REPORT. Evidence files are
-under `/cache/tmp/holdfast-g13/` (`gate-ui-1.log`, `gate-notices-2.log`, `gate-flake-1.log`,
-`evidence/`, `pr161-smoke.txt`); the directory is deleted at the goal's end.
+COMPLETE (goal 13): 2026-10-03
