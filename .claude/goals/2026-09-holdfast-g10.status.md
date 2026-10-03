@@ -103,7 +103,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g10-b
 | # | Item | State |
 |---|---|---|
 | 6.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `21ee6fc`): `func Test` 1724 -> 1834, no package fell (`cmd/holdfast` 244 -> 259, `internal/config` 150 -> 163, `internal/engine` 569 -> 574, `internal/mediaclient` 0 -> 44, `internal/server` 107 -> 125, `scripts/clientreport` 0 -> 15, every other package unchanged); `git diff --numstat 6e1058f origin/main -- docs/design/swap.md docs/design/quality-gate.md` empty (66 and 80 lines); `*_test.go` +7439 -1, the one deleted line below; zero `co-authored-by` in `git log 6e1058f..origin/main --format=%B` |
-| 6.2 | Adversarial review of the report | TODO |
+| 6.2 | Adversarial review of the report | DONE: a fresh subagent (2026-10-03) checked lines A-G against `4e9cdc0` and GitHub, re-running the line C, D and E tests (`-count=1`), `make api-schema-diff`, the `func Test` counts, the design-doc diffs, the merge rule of PRs #151-#155 and the queue items #202-#204: "VERDICT: none false". LOW, taken: the report gives PR URLs; S0178's AC-6 tightening (D7) is listed for the owner. LOW, recorded: queue #203 and #204 repeat the Plex admin-scope note; PR #154's comment cites a load figure from `uptime`, not from the log; the green re-run of #154 reused cached results for three packages unchanged by it |
 
 ### The one deleted `*_test.go` line and why
 
@@ -172,11 +172,16 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g10-b
 - A bound on the wait before the swap while a file is played: today it is unbounded (it only
   delays) and says so every 10 minutes; a paused session pins a worker
   (`docs/post-swap-hook.md`).
+- S0178 AC-6 as built refuses two readings an existing config could carry: a number for
+  `preserve_mtime` in the file (it read as true) and an empty `HOLDFAST_PRESERVE_MTIME` (it read
+  as false) (D7). Restoring the old readings is one small change if the owner prefers I5 here.
 - `TestServeSmoke` waits 3 s for the listener, and two runs under host load average 40-60 missed
   it; a longer wait in that test would remove a flake that is not about the code.
 
 ## Resume here
 
 All PRs merged: #151, #152, #153, #155, #154; the live checks are queue #202-#204. No branch,
-worktree or open PR of this goal remains (#156 is another session's). Left: the adversarial
-review of the GOAL REPORT (6.2), then the COMPLETE line, `goals check`, and the report.
+worktree or open PR of this goal remains (#156 is another session's). The adversarial review
+found none false. Goal complete.
+
+COMPLETE (goal 10): 2026-10-03
