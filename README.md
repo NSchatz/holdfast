@@ -97,11 +97,11 @@ own licence text or project page.
 
 ## Non-goals
 
-Two boundaries, each stated in full below, and both settled; Dolby Vision and HDR10+ are no longer
-one: they are [carried on the cpu encoder](#dynamic-hdr-carried), behind gates of their own, and
-skipped where they cannot be. One of the two boundaries, distributed
-processing, is reversed by the owner's decision of 2026-09-29; the note under it says what changes,
-and until a release ships it the paragraph still describes this build. Exotic-chroma
+One boundary, stated in full below and settled: [library management](#non-goal-library-manager).
+Dolby Vision and HDR10+ are no longer one: they are [carried on the cpu encoder](#dynamic-hdr-carried),
+behind gates of their own, and skipped where they cannot be. Distributed processing is no longer one
+either: [worker nodes](#worker-nodes) exist, off until configured, and the paragraph below says what
+they may do and what the server keeps for itself. Exotic-chroma
 and `multi-video-stream` sources are **skipped, not converted**. Four things are NOT boundaries - they
 are the transformations this tool makes on request, each **off by default**:
 [interlacing](#interlacing-posture), [the resolution ceiling](#downscaling-posture),
@@ -169,19 +169,32 @@ once the swap has committed, never over an existing file and only after it parse
 the embedded streams stay in the replacement, and picture-based and `mov_text` subtitles are skipped
 with a reason. See [docs/design/subtitles.md](docs/design/subtitles.md#sidecars).
 
-**Distributed or remote processing is a non-goal by design, not a missing feature.** holdfast is one
-process: no server/node split, no remote workers. The no-loss argument rests on an atomic
-same-filesystem `rename(2)` - it either happened or it did not, so a failure never leaves a partial file
-where the source was. A remote worker encoding to its own disk and shipping the result back is a
-**copy**, not a rename, and every gate here would have to be re-argued for it. To use more of one
-machine, raise `workers` (default 1 - see **[docs/docker.md](docs/docker.md)**).
+<a id="worker-nodes"></a>
 
-> **Reversed - decided 2026-09-29 by the owner (T14, T16, T17).** Distributed worker nodes stop being a
-> non-goal, without re-arguing the swap: a worker only encodes, and the server that owns the library
-> re-runs every gate and makes the same-filesystem rename itself. Each node reaches media either
-> through a shared mount (with path mapping) or by the server streaming source and output over HTTP,
-> chosen per node. None of it is in this build: the release that ships it rewrites the paragraph above,
-> which until then is what holdfast does.
+**Encodes can run on other machines, and the swap still cannot.** Worker nodes are **off until
+`node_token` is set**; with it unset nothing about an existing deployment changes. A worker
+(`holdfast worker`) only encodes. The server that owns the library names the working file a node's
+output lands in, re-runs every gate against **its own copy of the source**, and makes the atomic
+same-filesystem `rename(2)` itself - so the no-loss argument is the one it always was, and no
+verdict of a worker licenses a swap
+([docs/design/nodes.md](docs/design/nodes.md#leases)). Each node reaches media one of two ways,
+chosen per node: through its own read-only mount of the library with a path map
+(`worker_mode: mapped`, the default), or by the server streaming the source to it over HTTP
+(`worker_mode: http`, no mount at all). Either way the output comes back over HTTP with its length
+and a sha-256 digest, on a lease the server can refuse, and the node reports the sha-256 of the
+source bytes it read, which the server compares with its own before any gate. The transport is TLS
+or loopback: a worker refuses a plain `http://` server on any other host unless
+`worker_insecure_http: true` says so, and logs that at every start
+([docs/design/nodes.md](docs/design/nodes.md#transport)). A complete deployment, both modes, is in
+**[docs/docker.md](docs/docker.md#worker-nodes)**.
+
+The limits, stated rather than hidden: only a plan whose command line is self-contained on another
+host is leased - a software encoder, software decode, no loudness-normalised track, no dynamic-HDR
+carriage - and every other job, hardware encodes included, is encoded by the server
+([which jobs](docs/design/nodes.md#leasable)). Every node output costs the server a source hash, a
+full decode-integrity pass and a VMAF run, so nodes move the encode off the server and not the
+proof. To use more of ONE machine, raising `workers` (default 1) is still the lever
+(**[docs/docker.md](docs/docker.md#workers-cpus-and-max-load)**).
 
 <a id="dynamic-hdr-carried"></a>
 
@@ -367,7 +380,10 @@ build, is to ship on top of this API; until that release, this paragraph is what
 a **read-and-control** surface on top of the config-as-code engine: the YAML file stays the source of
 truth and the SQLite store stays the source of job state. The API can only **read the store, start a
 scan, and pause/resume the feeding of new files** - it never touches a media file, so the data-safety
-invariant is entirely unaffected.
+invariant is entirely unaffected. The one route group that carries media bytes is the worker-node
+lease protocol under `/api/node/v1`, which is closed until `node_token` is set and takes no other
+token: there a node's upload lands in a working file the server named, as a candidate the server's
+own gates and rename then decide ([worker nodes](#worker-nodes)).
 
 Every endpoint, what it answers and which of them need a token:
 **[`docs/api-reference.md`](docs/api-reference.md)**.

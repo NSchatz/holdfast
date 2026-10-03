@@ -143,17 +143,20 @@ beside the source and both delete sources.
 **Do this instead.** Run one container per `state_dir`. A library that genuinely needs its own
 daemon gets its own container, its own `state_dir` volume and its own `/media` mount - never a
 second process on the first one's state. To use more of one machine, do not start a second
-process: raise `workers`.
+process: raise `workers`. To use ANOTHER machine, do not start a second `serve` or `run` there
+either: run a `holdfast worker` on it, which opens neither the `state_dir` nor the library for
+writing ([Worker nodes](#worker-nodes)).
 
 ```yaml
 workers: 1   # concurrent encode workers inside the one daemon; the default
 ```
 
 `workers` is 1 by default on purpose, and raising it - to a number, or to `auto` - is an opt-in.
-It buys concurrency **inside the one daemon**: holdfast is a single process whatever you set it
-to, which is the point. That is a design decision, not an unbuilt feature, and the README's
-[non-goal](../README.md#non-goals) says why. How it interacts with the container's `cpus:` limit
-and with `max_load` is the next section.
+It buys concurrency **inside the one daemon**: the process that owns a `state_dir` and a library
+is a single process whatever you set it to, which is the point. Encodes can also be leased to
+other machines ([Worker nodes](#worker-nodes)), and that changes nothing here: the gates and the
+swap of every job stay in this one process, and `workers` is still how it uses more of its own
+host. How it interacts with the container's `cpus:` limit and with `max_load` is the next section.
 
 <a id="workers-cpus-and-max-load"></a>
 
@@ -320,6 +323,10 @@ can be talked into forging one of those headers gains nothing by it. Enabling th
 is a decision separate from putting a proxy in front, and it is the one that gives a stolen
 bearer token something to buy.
 
+A proxy that also carries worker nodes has requirements of its own - an upload-sized request
+body, timeouts that outlast a long-poll, and no login on the node route:
+[Worker nodes](#worker-nodes).
+
 Serve holdfast at the **host root**, on a hostname of its own. The API's own paths are
 absolute (`/api/events`, `/api/rescan`), so a router that strips or rewrites a path prefix
 serves the root page and 404s every request under it. Pass the Host header through, and put
@@ -345,7 +352,8 @@ A literal token in `config.yaml` **or** in `HOLDFAST_SERVER_AUTH_TOKEN` refuses 
 That is deliberate: holdfast starts `ffmpeg` as a child process, a child inherits its
 parent's environment, and a credential in the environment is readable from every encoder
 invocation's `/proc/<pid>/environ`. The same applies to `server_read_token`, `notify_url`,
-`tautulli_api_key`, `radarr_api_key`, `sonarr_api_key`, `plex_token` and `webhook_token`.
+`tautulli_api_key`, `radarr_api_key`, `sonarr_api_key`, `plex_token`, `webhook_token`,
+`node_token` and `server_tls_key`.
 `docs/secrets.md` has the reference forms and the migration.
 
 ## Telling holdfast about one file: Sonarr / Radarr
@@ -501,6 +509,353 @@ The token is the value `server_auth_token` points at - the same one `rescan`, `p
 **403**, like every other mutating endpoint. It applies no path map: the paths it is sent are
 judged as they stand. Full request and response shapes, every refusal status and the per-request
 limits are in [docs/api-reference.md](api-reference.md).
+
+<a id="worker-nodes"></a>
+
+## Worker nodes
+
+Off by default. A worker node is a second machine that **only encodes**: it leases one job at a
+time from the server, runs the ffmpeg command line the server's plan built, and sends the output
+back over HTTP. The server names the working file that output lands in, re-runs every gate
+against its own copy of the source and makes the same-filesystem rename itself, so nothing in
+"Volumes and permissions" above changes and no node's verdict licenses a swap. The argument is in
+[docs/design/nodes.md](design/nodes.md#leases); this section is the deployment.
+
+### What runs where
+
+| | Where | Command | Holds |
+|---|---|---|---|
+| the server | the one host that owns the library and `/state` | `serve` | the configuration, the job store, every gate, the rename |
+| a worker, one per node | any other host | `worker` | a work directory, the node credential and, in mapped mode, a read-only mount of the library |
+
+Both are the **same image at the same tag**: the image's entrypoint is the `holdfast` binary, so a
+worker is the compose `command: ["worker", "--config", "/config/worker.yaml"]` where the server's
+is `["serve", "--config", "/config/config.yaml"]`. Only `serve` leases work; a oneshot `run`
+leases nothing. A worker opens every connection itself and listens on nothing, so a worker
+container publishes no port.
+
+One server per `state_dir` is still the rule ([above](#one-process-per-state_dir)): more machines
+means more workers leasing from the one server, never a second `serve`.
+
+### The server side
+
+Three things change on the server: the node credential, a listener the workers can reach, and
+TLS in front of it.
+
+```yaml
+# config.yaml (the server) - the keys a node deployment adds
+server_addr: 0.0.0.0:8080
+node_token: file:/run/secrets/holdfast_node_token          # this is what turns nodes on
+server_read_token: file:/run/secrets/holdfast_read_token   # see below: not optional here
+server_auth_token: file:/run/secrets/holdfast_control_token
+server_tls_cert: /config/tls/server.pem                    # a plain path: the PEM chain
+server_tls_key: file:/run/secrets/holdfast_tls_key         # a secret reference, never a literal
+
+# The caps, at their shipped defaults. Every one is ASSUMED: nobody has measured a
+# node deployment.
+node_lease_ttl_sec: 60        # a lease lives this long without a heartbeat
+node_max_leases: 4            # live leases across every node
+node_max_leases_per_node: 1   # live leases one node may hold
+node_max_transfers: 2         # uploads in flight across every node
+node_gate_slots: 1            # node outputs the server gates at once
+```
+
+```yaml
+# compose (the server) - what changes from the shipped docker-compose.yml
+services:
+  holdfast:
+    command: ["serve", "--config", "/config/config.yaml"]
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - ./tls/server.pem:/config/tls/server.pem:ro
+      - ./state:/state
+      - /srv/media:/media
+    ports:
+      - "192.0.2.10:8080:8080"   # the address the workers reach, no longer loopback only
+    secrets:
+      - holdfast_node_token
+      - holdfast_read_token
+      - holdfast_control_token
+      - holdfast_tls_key
+
+secrets:
+  holdfast_node_token:
+    file: ./secrets/holdfast_node_token      # gitignored; mode 0400, owned by the `user:` above
+  holdfast_read_token:
+    file: ./secrets/holdfast_read_token
+  holdfast_control_token:
+    file: ./secrets/holdfast_control_token
+  holdfast_tls_key:
+    file: ./secrets/holdfast_tls_key
+```
+
+**`node_token` is what turns nodes on, and it opens nothing else.** With it unset no lease is
+granted and every endpoint under `/api/node/v1` answers **403**. It is a reference (`file:` or
+`cmd:`) like every credential here, and a literal in the file or in `HOLDFAST_NODE_TOKEN` refuses
+to start ([docs/secrets.md](secrets.md)). It must be a secret of its own: written as the same
+reference as `server_auth_token`, `server_read_token` or `webhook_token` it refuses to start, and
+so does one that resolves to the same value. The read, control and webhook tokens are not
+accepted on the node endpoints, and the node token is accepted nowhere else.
+
+**Set `server_read_token` in the same change.** Nodes need the server on an address other
+machines can reach, and with `server_read_token` unset the read API (`/api/summary`,
+`/api/queue`, `/api/history`, `/api/events`) is unauthenticated: publishing the port to a network
+serves **every media path in your library** to that network. holdfast says so at startup; this is
+the deployment in which that notice stops being hypothetical. `server_auth_token` is in the
+excerpt for the same reason it is anywhere else - without it the controls answer 403 - and it is
+not something a worker needs or should hold. [The control surface](#reverse-proxy-posture) has
+both in full.
+
+**TLS, built in.** `server_tls_cert` is a plain path to a PEM certificate chain and
+`server_tls_key` a secret reference to its key; set both or neither. With them `serve` listens
+with TLS on `server_addr`. The certificate has to be one the workers will verify for the host
+name in their `worker_server`: one from a public authority, or one from your own, in which case
+each worker is given that authority's certificate with `worker_tls_ca` (below). There is no
+option that skips verification.
+
+**TLS, at a reverse proxy instead.** Leave the two keys unset, keep the published port on
+loopback or a private container network, and let the proxy terminate TLS. Everything in the
+[reverse-proxy posture](#reverse-proxy-posture) applies, and a route that carries nodes has four
+more requirements:
+
+- **Its request-body limit must admit an output-sized upload.** An output is a whole encoded
+  file, as large as its source less one byte at most. A proxy default of a megabyte or a hundred
+  refuses every upload.
+- **It must not time out a long-poll.** A worker with nothing to do waits up to 30 s for an
+  answer (**ASSUMED**; [docs/design/nodes.md](design/nodes.md#leases)). A proxy that gives up on
+  a quiet request sooner turns every idle poll into an error the worker backs off from. The same
+  goes for the transfers: a source or an output takes as long as the link makes it.
+- **No login in front of `/api/node/v1`.** A worker sends `Authorization: Bearer` with the node
+  token and nothing else. It answers no challenge and **follows no redirect**, so forward auth
+  on that route, or a redirect from `http://` to `https://`, stops it. The node token is the
+  authentication of that route.
+- **The hop from the proxy to holdfast is plain HTTP.** Keep it on the same host or a network
+  only the two share.
+
+### A mapped-mode worker
+
+`worker_mode: mapped` is the default. The node reads each source through **its own mount** of the
+library and translates the path the server names into the path it sees with `worker_path_map`.
+
+```yaml
+# worker.yaml (node-a)
+worker_server: https://holdfast.example.internal:8080
+worker_name: node-a
+worker_mode: mapped
+node_token: file:/run/secrets/holdfast_node_token
+worker_slots: 1                    # encodes this worker runs at once; the default
+worker_work_dir: /work             # local disk: each encode is written here, then uploaded
+worker_tls_ca: /config/ca.pem      # only for a private or self-signed server certificate
+
+library_roots:
+  - /mnt/library                   # this worker's mount of the library
+worker_path_map:
+  - {from: /media, to: /mnt/library}   # the server's view -> this worker's view
+```
+
+```yaml
+# compose (node-a)
+services:
+  holdfast-worker:
+    image: ghcr.io/nschatz/holdfast:<the tag and digest the server runs>
+    command: ["worker", "--config", "/config/worker.yaml"]
+    restart: unless-stopped
+    user: "1000:1000"              # may READ the library and write /work
+    environment:
+      - TZ=Etc/UTC
+    volumes:
+      - ./worker.yaml:/config/worker.yaml:ro
+      - ./ca.pem:/config/ca.pem:ro
+      - /srv/media:/mnt/library:ro   # READ-ONLY. A worker never writes into the library.
+      - ./work:/work                 # local disk, writable by the `user:` above
+    secrets:
+      - holdfast_node_token
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+secrets:
+  holdfast_node_token:
+    file: ./secrets/holdfast_node_token    # the same value the server's reference resolves to
+```
+
+**Mount the library read-only.** A worker only reads it: the output goes to `/work` and from
+there over HTTP, and the server is the only writer beside the sources. `:ro` makes that true by
+construction rather than by the worker's good behaviour, whatever a lease tells its ffmpeg to do.
+
+**The path map is refused, never guessed.** The longest matching prefix wins, on whole path
+components, and a source no entry covers fails that lease `unmapped_source` rather than being
+read from wherever the unchanged name leads on the node. A worker that mounts the library at the
+server's own path says so with an entry mapping the directory to itself. A wrong entry that
+still finds a file is caught twice: the size and modification time the lease was granted on must
+match what the worker sees, and the sha-256 of the bytes the worker read must equal the server's
+own hash of its source before any gate runs.
+
+**Set `worker_work_dir`.** Unset, it is `holdfast-worker` under the OS temp directory
+(`cmd/holdfast/worker.go`), which in the hardened container above is the RAM-backed `/tmp`. Give
+it a directory on local disk with room for `worker_slots` outputs, and nothing else in it. Like
+the server's `state` directory it must be writable by the `user:` the container runs as:
+
+```bash
+mkdir -p work && sudo chown 1000:1000 work
+```
+
+**`worker_name`** defaults to the host name, which in a container is the container id; name the
+node so the server's log lines say which machine they mean. 1 to 64 characters from letters,
+digits, `.`, `_` and `-`.
+
+### An http-mode worker
+
+`worker_mode: http` is for a node that cannot mount the library. The server streams each source
+to it on a live lease (`GET /api/node/v1/leases/{id}/source`), so the worker has **no library
+mount and no path map**.
+
+```yaml
+# worker.yaml (node-b)
+worker_server: https://holdfast.example.internal:8080
+worker_name: node-b
+worker_mode: http
+node_token: file:/run/secrets/holdfast_node_token
+worker_work_dir: /work             # holds the downloaded source AND the output
+worker_tls_ca: /config/ca.pem
+```
+
+```yaml
+# compose (node-b) - the mapped worker's service, without the library
+services:
+  holdfast-worker:
+    image: ghcr.io/nschatz/holdfast:<the tag and digest the server runs>
+    command: ["worker", "--config", "/config/worker.yaml"]
+    restart: unless-stopped
+    user: "1000:1000"              # owns ./work; there is no media for it to own
+    environment:
+      - TZ=Etc/UTC
+    volumes:
+      - ./worker.yaml:/config/worker.yaml:ro
+      - ./ca.pem:/config/ca.pem:ro
+      - ./work:/work                 # no /srv/media line: this node has no mount
+    secrets:
+      - holdfast_node_token
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+secrets:
+  holdfast_node_token:
+    file: ./secrets/holdfast_node_token
+```
+
+**Size the work volume for a source plus its output, per slot.** The source is downloaded into
+`worker_work_dir` before the encode and the output is written beside it, so the directory needs
+room for the largest source in the library and for its output, which is never as large as the
+source - twice the largest source, times `worker_slots`, is the bound that cannot run out.
+
+**What it costs.** Every job moves a whole source across the network to the node and an output
+back, where a mapped node moves only the output. The digests are the same in both modes: the
+worker reports the sha-256 of the source bytes it read and sends the output with its
+`Content-Length` and a sha-256 `Content-Digest`, and the server checks both against its own
+figures before a gate runs.
+
+<a id="worker-transport"></a>
+
+### The transport
+
+**A worker talks to `https://` or to loopback.** `worker_server` naming a plain `http://` host
+that is not loopback **refuses to start**. `worker_insecure_http: true` overrides that, and says
+so loudly in the log at every start. Before you set it, this is what plain HTTP means here:
+
+- **The `node_token` crosses the network in cleartext on every request.** Every poll, every
+  heartbeat, every upload carries it in a header anyone on the path can read.
+- **Whoever captures it can lease jobs and upload outputs.** Those outputs still face every gate,
+  so a captured token cannot put a bad file into your library - but each one costs the server a
+  source hash, a full decode and a VMAF run, and holds a free-space reservation while it does. It
+  is a way to burn the server's CPU and stall its queue.
+- **In http mode it can also read the library's media.** A leased job's source is served to the
+  holder of the token. On plain HTTP that is your library, to anyone who was listening.
+- **Digests do not help against that attacker.** A sha-256 over a body proves the body arrived as
+  it was sent; someone on the path replaces the digest along with the bytes. Digests here are
+  transport integrity against accident, and the gates are the fidelity proof. Neither is
+  confidentiality or authentication.
+
+So: TLS on the server, or a proxy you trust terminating it, and `worker_insecure_http: true`
+only as a deliberate choice for a network you have decided to trust - a choice the log restates
+every time the worker starts. The token cannot pause, scan, search, exclude or queue anything,
+and no node endpoint restores or requeues; what it can do is listed above, in full.
+
+**`worker_tls_ca`** is a plain path to a PEM bundle the worker trusts **in addition to** the
+system roots, for a server certificate from a private authority or a self-signed one. It is a
+certificate, not a secret, and it is not a reference.
+
+**There is no mTLS and no per-node login.** Every node holds the one `node_token`; a node is not
+identified by a certificate, and a `worker_name` is a label, not an identity. Rotating the token
+means changing the file on the server and on every worker and restarting each.
+
+### Operating it
+
+**The same version on both sides.** A worker whose build version is not the server's is answered
+**409** naming both versions, and stops; a restart policy starts it again to the same answer
+until the tags match. Pin every worker to the tag and digest the server runs, and upgrade the
+server and the workers together.
+
+**Stopping a worker.** On SIGTERM (`docker stop`, `docker compose down`) a worker stops its
+encodes, fails their leases `worker_stopping`, removes its local output and exits 0. Nothing is
+recorded against those files: the server encodes each one itself in the same attempt.
+
+**A killed worker.** One that dies without the chance to say so - `SIGKILL`, a power cut, a
+network that went away - stops heartbeating. Its lease expires after `node_lease_ttl_sec`
+(60 s, **ASSUMED**), the server removes the working file that lease recorded and nothing else,
+and the job is offered again at the next epoch, counted by `max_failures` like any failed encode.
+On the node, the output it was writing stays in `worker_work_dir`; the next start removes the
+files there that carry its own output naming and nothing else
+([docs/design/nodes.md](design/nodes.md#worker)), which is the reason to give that directory to
+the worker alone.
+
+**A worker never writes into the library.** Not in mapped mode, where its mount is read-only, and
+not in http mode, where it has none. The only writer beside your sources is the server.
+
+**Size the server for the proof.** Nodes move the encode off the server and not the gates: each
+node output costs the server a sha-256 of its own source, a full decode-integrity pass and a VMAF
+run. `node_gate_slots` (1, **ASSUMED**) is how many node jobs the server does that work for at
+once, **beside** its `workers` local jobs, so the memory and CPU arithmetic of
+[Workers, `cpus` and `max_load`](#workers-cpus-and-max-load) is for `workers` plus
+`node_gate_slots` jobs, not `workers` alone. While every slot is held and as many jobs again are
+waiting for one, workers asking for work are answered that there is none, so adding nodes past
+what the server can gate buys nothing. A job the server will not lease - see below - is also
+encoded by the server inside one of those slots.
+
+**Nodes are given work only while a pass runs**: the initial scan, an interval scan
+(`scan_interval_sec`) or a rescan. A file submitted through `POST /api/scan` is encoded by the
+server.
+
+**Probing a server that has TLS on.** The image has no `HEALTHCHECK`
+([The image](#the-image)), and the external check that section recommends has to change with the
+listener: once `server_tls_cert` and `server_tls_key` are set, a probe must speak `https://` to
+the name the certificate was issued for and trust the authority that issued it, and a probe left
+on `http://` fails however healthy the server is. With `server_read_token` set, as it is in this
+deployment, a probe of `/api/summary` also needs that token as a bearer credential; `/metrics`
+needs none. A worker has no port to probe: watch its log and its exit status.
+
+### What is not built
+
+- **Hardware encoders on a node.** A worker offers only the software encoders its own start-up
+  probe proved. Only a plan that is self-contained on another host is leased - software encoder,
+  software decode, no loudness-normalised track, no dynamic-HDR carriage, no attached picture -
+  and every other job, every hardware encode among them, is encoded by the server
+  ([docs/design/nodes.md](design/nodes.md#leasable)). GPU passthrough on a worker container buys
+  nothing.
+- **Resumable transfers.** An upload that fails is sent again from its first byte, inside the
+  same lease.
+- **mTLS**, and any per-node credential or login.
+- **A maximum lease lifetime.** A worker that keeps heartbeating keeps its job, as a hung local
+  encode keeps its worker ([docs/design/nodes.md](design/nodes.md#gate-slots)).
 
 ## GPU passthrough
 

@@ -117,17 +117,6 @@ replacement of it. Read this before you switch.
 - **Plugins and flows.** Tdarr's plugin/flow system is its whole extensibility model.
   `holdfast` has none. It does exactly one job — re-encode bloated video to a smaller modern
   codec, safely — and it is configured by a YAML file, not by assembling a pipeline.
-- **The Server/Node model.** `holdfast` is single-host and single-process, and distributed
-  worker nodes are a **non-goal** rather than an unbuilt feature: the no-loss guarantee is stated
-  for an atomic same-filesystem rename, and a remote node encoding to its own disk and shipping
-  the result back is a copy, which is a different safety argument from the one this tool makes.
-  Use more of the one machine with `workers` instead (default 1, and
-  [docs/docker.md](docker.md) says why); running a second holdfast process against one
-  `state_dir` is not supported. **Reversed - decided 2026-09-29 by the owner (T14, T16, T17):**
-  worker nodes are to come, on terms that keep the swap argument whole - a worker only encodes,
-  the server that owns the library re-runs every gate and makes the same-filesystem rename
-  itself, and each node reaches media through a shared mount or over HTTP from the server. Until
-  the release that ships them, this build is single-host as described above.
 - **Filters as a pipeline.** No aspect-ratio changes and no library management; black bars are
   cut only under `crop: auto` ([docs/design/crop.md](design/crop.md)). What a root CAN say about streams is which to carry:
   `audio_languages`, `subtitle_languages` and `keep_commentary` select streams and
@@ -137,6 +126,58 @@ replacement of it. Read this before you switch.
   cropping black bars (`crop: auto`) and the audio keys - re-encoding lossless audio tracks, an added stereo downmix and two-pass EBU R128
   loudness ([docs/design/audio.md](design/audio.md)) - each off by default and each stated in full
   in the [README's non-goals](../README.md#non-goals).
+
+<a id="server-and-nodes"></a>
+
+### What carries over, differently: the Server/Node model
+
+`holdfast` has a server and worker nodes. `holdfast serve` is the server: it owns the library, the
+configuration and the job state. `holdfast worker`, the same binary and the same image on another
+host, is a node. Nodes are off until `node_token` is set on the server, so a single-host
+deployment is still what you get by default.
+
+| Tdarr | holdfast |
+|---|---|
+| Server | `holdfast serve`, with `node_token` set |
+| Node | `holdfast worker`, pointed at the server with `worker_server` |
+| a **mapped** node, sharing the file system with the server | `worker_mode: mapped` (the default): the node reads each source through its own read-only mount of the library |
+| path translators | `worker_path_map`: an ordered list of `{from, to}` prefixes, the server's view of the library to the node's mount. A source no entry covers is refused, never passed through |
+| an **unmapped** node, which downloads and uploads its working files through the server | `worker_mode: http`: the server streams the source to the node on a live lease, and the node needs no mount and no path map |
+| the node opens the connection to the server | the same: a worker polls the server and needs no inbound port |
+| the same version on Server and Node | enforced: a worker whose build version is not the server's is answered `409` and stops |
+
+What differs, and it is the point:
+
+- **A node only encodes.** In both modes the output comes back over HTTP with its length and a
+  sha-256 digest and lands in a working file the server named. The server then re-runs every gate
+  against its own copy of the source and makes the same-filesystem rename itself, so the no-loss
+  guarantee is the one stated for a single host and no node's verdict licenses a swap. A node never
+  writes into the library, mapped or not
+  ([docs/design/nodes.md](design/nodes.md#leases)).
+- **Work is leased, not assigned.** A lease has a time to live the node's heartbeats renew, and an
+  epoch that rises at every grant of the same file, so a node that went quiet and came back cannot
+  contribute an output to a job that was since given to another. The node also reports the sha-256
+  of the source bytes it read, and the server compares it with its own before any gate - which is
+  what catches a wrong path map entry or a stale network-mount cache.
+- **One credential, and it can only lease.** `node_token`, by reference on both sides, opens the
+  lease endpoints and nothing else - a node leases, uploads and, in http mode, downloads the
+  source of a lease it holds - and it cannot pause, scan or read the queue. There is no per-node
+  login and no mTLS. The transport is TLS or loopback unless a worker is explicitly told otherwise
+  ([docs/docker.md](docker.md#worker-nodes)).
+- **No plugin stack runs on a node.** A node runs one ffmpeg command line the server's plan built,
+  and refuses, unrun, one outside the shape those plans have.
+- **Hardware encoders on a node are not built.** Only a plan that is self-contained on another host
+  is leased - a software encoder with software decode, among other conditions
+  ([which jobs](design/nodes.md#leasable)); every other job, a hardware encode included, is encoded
+  by the server itself. A node with a GPU does not add GPU encodes.
+- **Nodes do not take the proof off the server.** Each node output costs the server a source hash,
+  a full decode and a VMAF run. To use more of the ONE machine, `workers` is still the lever
+  (default 1, and [docs/docker.md](docker.md#workers-cpus-and-max-load) says why).
+
+What has not changed: running a second holdfast `serve` or `run` against one `state_dir` is not
+supported ([docs/docker.md](docker.md#one-process-per-state_dir)). More machines means workers
+leasing from the one server, never a second server on the same state. The deployment, both modes,
+is in [docs/docker.md](docker.md#worker-nodes).
 
 ### What you get
 
