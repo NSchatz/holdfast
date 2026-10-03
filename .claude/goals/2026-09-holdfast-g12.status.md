@@ -96,7 +96,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g12-b
 | # | Item | State |
 |---|---|---|
 | 5.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `e679d0a`): `func Test` 1958 -> 2004, no package fell (`cmd/holdfast` 264 -> 269, `internal/config` 170 -> 174, `internal/engine` 597 -> 598, `internal/node` 54 -> 73, `internal/nodeworker` 23 -> 40, every other package unchanged); `git diff --numstat e375997 origin/main -- docs/design/swap.md docs/design/quality-gate.md` empty (66 and 80 lines); `*_test.go` +3463 -15, the 15 deleted lines in D10; zero `co-authored-by` in `git log e375997..origin/main --format=%B` |
-| 5.2 | Adversarial review of the report | DOING |
+| 5.2 | Adversarial review of the report | DONE: a fresh subagent (2026-10-03) checked lines A-G against `3f3a5e6` and GitHub in its own copy of the tree: it re-ran the line C and D tests (`-count=1`), mutated the product code six times and saw each go red by a named assertion and none by a timeout (the streamed-digest comparison at `complete`, the upload's `Content-Digest` comparison, the engine's own source hash, `CheckTransport` accepting everything, the warning dropped, `server_tls_key` out of `config.SecretBearingKeys`), recounted `func Test` per directory, listed the 15 deleted test lines, ran `run`, `serve`, `plan` and `analyze` against a rootless http-worker file (each refuses), and checked the merge rule of PRs #159 and #160: "VERDICT: none false". LOW, recorded (D14) |
 
 ## Decisions taken
 
@@ -173,6 +173,16 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g12-b
 - D13 (2026-10-03): no minor release is cut by this goal (T37 optional): the release is goal 15's,
   and the owner's queue item #219 is worded for "the next release".
 
+- D14 (2026-10-03): what the report's adversarial review left, all LOW and none acted on: the
+  line C test shows "the worker has no mount" by its configuration and by the node's own ffmpeg
+  log, not by OS isolation (one host, one uid) - queue #219 is the run on a real second host; the
+  hub's streamed-digest comparison does not apply after a ranged read or a restart, where the
+  engine's own hash is the one source check (documented in `docs/design/nodes.md#http-mode`, held
+  by its own fixture); `CLAUDE.md` is at 199 of its 200 lines; one test file uses a private-range
+  example address where the documents use RFC 5737 ones. The session died once during this
+  review and was relaunched by the supervisor ("Supervisor actions"); the review was resumed and
+  nothing was lost.
+
 ## Proposals awaiting the owner
 
 Carried from goal 11, unchanged: hardware encoders on a node; which lease endings count against a
@@ -187,8 +197,15 @@ New in this goal:
 - A lease's mode is not durable (D7): a server restart mid-download costs that node the
   download, never the file a failure.
 
+## Supervisor actions
+
+- 2026-10-03T13:49:59Z relaunched dead session 742ef52d-c2be-48cb-92bd-62d2ad74f9de in window holdfast-g12 with --resume (try 1 of 2)
+- 2026-10-03T13:52:46Z re-issued the goal in the relaunched session
+
 ## Resume here
 
 Both PRs are merged (#159 at `f48d4e0`, #160 at `e679d0a`); no branch, worktree or open PR of
-this goal remains (#156 and #108 to #110 are not this goal's). Queue #219 is filed. Next: the
-adversarial review of the report (5.2), `goals check`, the COMPLETE line.
+this goal remains (#156 and #108 to #110 are not this goal's). Queue #219 is filed. The
+adversarial review found none false. Goal complete.
+
+COMPLETE (goal 12): 2026-10-03
