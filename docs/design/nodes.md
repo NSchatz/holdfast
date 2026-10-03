@@ -65,6 +65,15 @@ cacheable" (section 15.5.11), and a cached "this lease is gone" must never answe
 heartbeats stop for one TTL expires; the server then removes the working file **that lease
 recorded** and nothing else, and the job is offered again at the next epoch.
 
+**A lease removes its working file only while the engine is waiting on it.** The path is the
+lease's for exactly as long as an engine call in this process is attached to it. A lease that
+ends later than that - a recovered lease the engine did not take back, or one whose engine call
+left while the ledger could not end the row - no longer owns the path: the engine may already
+have written its next attempt at the same name, so that late ending unlinks nothing. A lease
+nothing waits on also takes no upload and no completion, and its heartbeats do not extend it.
+A grant is refused when its working file is a live lease's working file or a live lease's
+source.
+
 ## The upload
 
 `PUT /api/node/v1/leases/{id}/output` is admitted only when all of these hold, in this order:
@@ -128,9 +137,9 @@ A node asks for work with a bounded long-poll (30 s, **ASSUMED**), answered `204
 graceful shutdown never waits one out. The caps - live leases across every node
 (`node_max_leases`, 4), per node (`node_max_leases_per_node`, 1) and uploads in flight
 (`node_max_transfers`, 2), all **ASSUMED** - answer `503` with `Retry-After` and a typed reason,
-and are enforced again inside the grant transaction. `node_gate_slots` (1, **ASSUMED**) bounds
-how many node outputs the server gates at once; it is declared here and read by the engine's
-hand-off. A node whose build version is not the server's is answered `409` naming both
+and are enforced again inside the grant transaction. `node_gate_slots` (1, **ASSUMED**) is
+declared and validated in this change and enforced by nothing yet: the engine wiring that
+follows is what holds the number of node outputs gated at once to it. A node whose build version is not the server's is answered `409` naming both
 versions. Not `426`: RFC 9110 section 15.5.22 says "The server MUST send an Upgrade header field
 in a 426 response to indicate the required protocol(s)", and no protocol is on offer.
 
@@ -145,14 +154,23 @@ Lease rows survive. At start, before anything is granted:
   said: the server's downtime is not the node's silence. A heartbeat inside the grace is `200`
   and one after it `410`.
 - every lease that was `uploaded` and not completed is ended. Its output is **never gated after
-  the restart**: the recorded working file is removed and the job is leased again from the
-  start, at the next epoch.
+  the restart**, and the recovery itself removes the recorded working file; the job is leased
+  again from the start, at the next epoch. This is the one file a restart removes on a lease
+  row's word, and a deliberate departure from leaving every working file to the startup sweep:
+  that sweep holds back a full-length file in the target codec with no job record as a possibly
+  stranded replacement, which is exactly what a complete, never-gated upload looks like. The
+  lease row is the record that it is not one, and the recovery runs before any grant and any
+  engine work, so nothing else can have written at that path.
+- every other working file a lease recorded before the restart is left to the startup sweep,
+  exactly as a killed local encode's is. Taking a lease back, abandoning it, or letting its
+  grace run out removes no file.
 - a recovered lease is taken back only by a re-derived job with the same path, the same
   argument-list digest and the same source size and modification time. Any other job ends it.
   Until the engine has taken a lease back, the node can heartbeat it - without stretching its
   grace - and nothing else; one the engine never takes back runs out after its grace.
 
-Until this recovery has run every lease endpoint answers `503`.
+Until this recovery has run every lease endpoint answers `503`, and no lease is expired: an
+expiry read before the grace was given is one the server's own downtime ran out.
 
 ## What is kept
 

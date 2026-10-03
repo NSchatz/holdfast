@@ -353,7 +353,8 @@ included - is **401**. Every refusal past the credential check is JSON,
 
 Every call on one lease also answers **404** `unknown_lease` for an id no lease carries, **500**
 `internal` when the ledger could not record it, and **503** `not_ready` until the server has
-recovered its leases after a start. Every **410** carries `Cache-Control: no-store`. No endpoint
+recovered its leases after a start. An upload or a completion on a lease the server is not
+waiting on is **503** `not_ready` too. Every **410** carries `Cache-Control: no-store`. No endpoint
 here restores, requeues, resolves or re-opens anything.
 
 ### The webhook intake - `POST /api/webhook/sonarr` and `POST /api/webhook/radarr`
