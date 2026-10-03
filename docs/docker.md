@@ -92,13 +92,38 @@ that already owns the media and the question never arises, which is the same adv
 paragraph above gives for a different reason.
 
 The modification time is carried from the source unless `preserve_mtime` is false. It
-defaults to true, because resetting it makes a first pass over a library look to Plex and
+defaults to `true`, because resetting it makes a first pass over a library look to Plex and
 Jellyfin like the whole library arrived at once: "Recently Added", every date-based sort and
 every smart collection built on one moves with it, and nothing puts it back. Set
 `preserve_mtime: false` if you would rather the replacement's mtime say when the bytes were
 actually written. Either way the file's identity still moves, because a swap always makes
 the file smaller - so a resume reads the replacement as a new file and never as the source
 it already processed.
+
+Neither setting is free, and each one hides or moves something:
+
+| | `preserve_mtime: true` (the default) | `preserve_mtime: false` |
+|---|---|---|
+| the replacement's modification time | the source's | when holdfast wrote the replacement |
+| a media server's "Recently Added" and date-based sorts | do not move | move with every swap; a first pass reads as the whole library arriving at once |
+| a tool that detects change by modification time alone | does not see the swap, although every byte is different | sees every swap |
+| a tool that compares size as well | sees every swap | sees every swap |
+| `holdfast restore` inside the undo window | returns the original with the original's modification time | returns the original with the original's modification time |
+| after the undo window closes (at once when `undo_window_hours` is 0) | the source's time is still on the file | the source's time is gone for good |
+
+The size row is holdfast's own invariant and not a statement about any particular tool: a
+swap happens only when the output is strictly smaller than the source, so a file's size
+changes on every swap under either setting. Whether a given scanner or backup reads the
+size is for that tool's documentation to say. The restore row holds because the retained
+original is the source file itself, kept under a second name and never rewritten
+([undo.md](undo.md)).
+
+The default was kept at `true` by the owner's decision (2026-09-29), with the change-detection
+cost above known: an install that never set the key behaves as it always has. So that the
+choice is not silent, `holdfast validate` prints one `note:` line stating the effective
+value of `preserve_mtime`, whether it is the default or was set (in the file or by
+`HOLDFAST_PRESERVE_MTIME`), and what that value costs; `run` and `serve` log the same line
+at startup. A value that is not `true` or `false` refuses to start.
 
 ACLs and xattrs are not carried. POSIX ACLs, SELinux labels and every other extended
 attribute on the source are left behind: the replacement gets whatever your filesystem gives

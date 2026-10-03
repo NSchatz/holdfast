@@ -519,6 +519,11 @@ type Config struct {
 	// new file. With this key on the size is the whole of that guarantee, which is why the
 	// engine asserts it rather than assuming it.
 	PreserveMtime *bool `yaml:"preserve_mtime"`
+	// preserveMtimeDefaulted records that Load filled preserve_mtime from the DEFAULT
+	// layer: neither the file nor HOLDFAST_PRESERVE_MTIME wrote it. The resolved value
+	// cannot say so - the default layer leaves the pointer non-nil - and Notices() owes
+	// the operator which of the two it was.
+	preserveMtimeDefaulted bool
 
 	// StateDir holds the job store (jobs.db) + heartbeat (relative paths are
 	// resolved by callers).
@@ -952,6 +957,38 @@ func (c *Config) DeinterlaceFilter() (deinterlace.Filter, bool) {
 // the SHIPPED default rather than as the struct zero.
 func (c *Config) PreserveMtimeEnabled() bool { return c.PreserveMtime == nil || *c.PreserveMtime }
 
+// PreserveMtimeExplicit reports whether the configuration file or HOLDFAST_PRESERVE_MTIME
+// wrote preserve_mtime, as against the shipped default supplying it. A Config built in Go
+// reads as explicit exactly when the field was set.
+func (c *Config) PreserveMtimeExplicit() bool {
+	return c.PreserveMtime != nil && !c.preserveMtimeDefaulted
+}
+
+// preserveMtimeNotice is the ONE statement of the effective preserve_mtime choice, made for
+// every configuration: the key has no silent setting, because each value hides a swap from
+// something - a preserved time from a tool that reads only the time, a fresh one from
+// nothing but at the cost of a media server's ordering. It is a NOTICE on this file's own
+// rule: no gate is weakened under either value. The default was kept at true by the
+// owner's decision; docs/docker.md#swap-metadata states both settings in full.
+func (c *Config) preserveMtimeNotice() string {
+	source := "the default: neither the configuration file nor " + envPrefix + "PRESERVE_MTIME sets it"
+	if c.PreserveMtimeExplicit() {
+		source = "set explicitly, by the configuration file or " + envPrefix + "PRESERVE_MTIME; the default is true"
+	}
+	if c.PreserveMtimeEnabled() {
+		return preserveMtimeKey + " is true (" + source + ") - a swapped file KEEPS ITS SOURCE'S MODIFICATION TIME, " +
+			"so a tool that detects change by modification time alone WILL NOT SEE A SWAP, although every byte of " +
+			"the file is different. A tool that compares size as well sees every swap, because a swap always " +
+			"makes the file strictly smaller. Set " + preserveMtimeKey + ": false to publish each replacement " +
+			"with a fresh modification time instead; docs/docker.md#swap-metadata states what each setting costs."
+	}
+	return preserveMtimeKey + " is false (" + source + ") - a swapped file gets a FRESH MODIFICATION TIME, " +
+		"so a media server's \"Recently Added\" and its date-based sorts MOVE WITH EVERY SWAP, and a first pass " +
+		"over a library reads as the whole library arriving at once. Once a file's undo window has closed " +
+		"nothing puts the source's time back. Set " + preserveMtimeKey + ": true to carry the source's time " +
+		"onto each replacement instead; docs/docker.md#swap-metadata states what each setting costs."
+}
+
 // ContainerMatchesSource reports whether ContainerExt is the "match the source"
 // sentinel ("source"/"auto"/"") rather than a forced extension.
 func (c *Config) ContainerMatchesSource() bool { return containerMatchesSource(c.ContainerExt) }
@@ -1233,6 +1270,24 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
+	// preserve_mtime is a BOOLEAN, and the weakly typed decoder below would read `3` as
+	// true without a word - on the knob
+	// that decides what a media server and a backup see of every swap. Checked against the
+	// value the file or the environment CARRIED, for queue_order's reason.
+	//
+	// A key written with NO value (a YAML null) is the exception and is not a value at all:
+	// it has always loaded as the default, an existing configuration must keep deciding what
+	// it decided, and so it reads as unset - the default, and stated as the default.
+	preserveMtimeWritten := false
+	if explicitTop[preserveMtimeKey] {
+		if raw := carriedValue(preserveMtimeKey, k, kf, ke); raw != nil {
+			if err := requireBool(raw, preserveMtimeKey, path); err != nil {
+				return nil, err
+			}
+			preserveMtimeWritten = true
+		}
+	}
+
 	// max_height is a WHOLE NUMBER OF PIXELS this build must be able to target, and the
 	// decoders below would read 1080.5 as 1080, "1080" as 1080 and `true` as 1 without a
 	// word - three resolutions the operator did not write, on the knob that decides how many
@@ -1365,6 +1420,7 @@ func Load(path string) (*Config, error) {
 	// one every other cgroup reading of this process takes (cpuquota.RootEnv).
 	c.WorkersAuto = workersAuto
 	c.coresPerWorkerSet = explicitTop[coresPerWorkerKey]
+	c.preserveMtimeDefaulted = !preserveMtimeWritten
 	if c.WorkersAuto {
 		c.autoPlan = resolveAutoWorkers(c.EffectiveCoresPerWorker(), os.Getenv(cpuquota.RootEnv), numCPU())
 	}
@@ -1497,6 +1553,22 @@ func requireWholeRows(raw any, key, path string) error {
 	}
 	return fmt.Errorf("%s must be a whole number of rows (0 disables retention and keeps every terminal row): "+
 		"%#v in %s is not one", key, raw, path)
+}
+
+// requireBool refuses a RAW layered value that is not a boolean, naming the key. A YAML
+// boolean arrives as a bool and an environment override as a string, so both spellings of
+// a genuine boolean are accepted; a number, a word or a list is refused rather than coerced.
+func requireBool(raw any, key, path string) error {
+	switch v := raw.(type) {
+	case bool:
+		return nil
+	case string:
+		if _, err := strconv.ParseBool(v); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s must be true or false: %#v in %s (or in %s%s) is neither",
+		key, raw, path, envPrefix, strings.ToUpper(key))
 }
 
 // isWholeNumber reports whether a RAW layered value is a genuine whole number. An
@@ -1914,6 +1986,9 @@ func (c *Config) Notices() []string {
 			"taken (a second hard link to the same data), but the space a swap reclaimed is not "+
 			"returned to the filesystem until the window closes.")
 	}
+	// What a swap does to the file's modification time, stated for EVERY configuration and
+	// exactly once: see preserveMtimeNotice.
+	n = append(n, c.preserveMtimeNotice())
 	// A target bitrate is not a weakened gate - every no-loss check still runs and a
 	// rejected encode still leaves the source untouched - but it does mean the
 	// quality knob an operator can still see in their config file is not what the
