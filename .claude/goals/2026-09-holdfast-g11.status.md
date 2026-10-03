@@ -74,11 +74,12 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g11-b
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | Durable lease rows in `internal/store`: id, job, node, epoch, expiry, state, temp, reserved bytes, digests | TODO |
-| 3.2 | `internal/node`: the lease state machine (grant, renew, expire, re-grant at a higher epoch, complete, fail), the caps, the digest-checked upload | TODO |
-| 3.3 | `/api/node/v1` behind `requireNodeToken`; `node_token` by reference in `config.SecretBearingKeys`; 403 on every other group | TODO |
-| 3.4 | Fixtures: expired-lease upload (410, bytes discarded), stale epoch, duplicate upload, digest mismatch, a 404 body offered as media, 411/413, the caps | TODO |
-| 3.5 | `make api-schema-diff`: additions only, `.api-schema-breaks.yaml` still `[]` | TODO |
+| 3.1 | Durable lease rows in `internal/store`: id, job, node, epoch, expiry, state, temp, reserved bytes, digests | DONE (PR #157, `7b434e1`): schema v25, `store.LeaseLedger`; `TestLease_*` |
+| 3.2 | `internal/node`: the lease state machine (grant, renew, expire, re-grant at a higher epoch, complete, fail), the caps, the digest-checked upload | DONE (PR #157): `TestNodeLease_*`, `TestNodeFixture_*`; mutation-diff 100.00% against the 70% floor (killed 229, lived 0); gate exit 0 in 2768 s (`internal/engine` 2281.6 s, `cmd/holdfast` 881.5 s, `internal/node` 5.0 s); CI green (`build`, `package`, `mutation`); 0 fix rounds (the review's fixes went in before the first gate) |
+| 3.3 | `/api/node/v1` behind `requireNodeToken`; `node_token` by reference in `config.SecretBearingKeys`; 403 on every other group | DONE (PR #157): `TestNodeToken_CannotCallAControlOrReadEndpoint`, `TestNodeToken_OtherTokensCannotCallNodeEndpoints`, `TestNodeToken_UnsetAnswers403NamingTheKey`, `TestSecretKeys_NodeTokenIsSecretBearingAndRefusesALiteral`, `TestServe_RefusesANodeTokenThatResolvesToAnotherServerToken` |
+| 3.4 | Fixtures: expired-lease upload (410, bytes discarded), stale epoch, duplicate upload, digest mismatch, a 404 body offered as media, 411/413, the caps | DONE (PR #157): `TestNodeFixture_UploadOnAnExpiredLeaseIs410AndLeavesNoFile`, `..._AStaleEpochAfterARegrantIs410`, `..._ADuplicateUploadIs200AndRewritesNothing`, `..._ADigestMismatchIsRefusedAndTheTempDeleted`, `..._A404BodyOfferedAsMediaIsRefused`, `..._AFreeSpaceRefusalAtUploadStartIs503`, `..._AServerRestartKeepsLiveLeases` and the rest in `internal/node` |
+| 3.5 | `make api-schema-diff`: additions only, `.api-schema-breaks.yaml` still `[]` | DONE (PR #157): 19 additions, 0 breaks |
+| 3.6 | Adversarial review of the branch before its gate | DONE (PR #157, `f44d94c`, `52dcd2b`): no HIGH, 2 MED, 8 LOW, all fixed; the proven ones are permanent tests in `internal/node/regress_test.go`. Not tested: a failing `fsync` or `close` on the upload (answered 500 and logged) |
 
 ## Phase 4 - The worker, the engine seam and the server re-gate (track `holdfast-g11/worker`)
 
@@ -144,13 +145,28 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g11-b
 - D10 (2026-10-03): PR #156 (`speed/gate`) is another session's and was open at this goal's start;
   this goal touches none of its branch or files (§0.13).
 
+- D11 (2026-10-03): PR #157's own decisions are in `docs/design/nodes.md#leases` and its PR body: a
+  lease removes its working file only while the engine waits on it (a lease that ends late removes
+  nothing); `Recover` itself removes the working file of an `uploaded` lease it ends, the one
+  departure from "leave it to the startup sweep" (the row is the record, and a full-length ungated
+  temp would otherwise be held as a stray replacement); an unknown lease id is 404, a digest
+  mismatch 400, a stalled upload 408; a failed free-space lookup refuses nothing, as the engine's
+  own check does; terminal lease rows older than 7 days (`ASSUMED`) are pruned except each path's
+  newest.
+- D12 (2026-10-03): the 22 `*_test.go` lines PR #157 deleted are the "newest migration" fixtures
+  following the migrations to v25 (`cmd/holdfast/export_test.go`, `internal/store/migrate_test.go`,
+  `readonly_test.go`, `resolution_migrate_test.go`: wind-back `DROP` statements, the newest step's
+  table name, comments). No assertion is weaker; the review checked each line.
+- D13 (2026-10-03): the `holdfast-g11/worker` branch was started on the protocol branch before
+  #157 merged (to save hours); it takes `origin/main` by the checked merge of goal 10's D10.
+
 ## Proposals awaiting the owner
 
 - Hardware encoders on a node (D4): a node's own start-time probe would have to gate the job.
 
 ## Resume here
 
-Phase 3: the `holdfast-g11/protocol` builder agent is working in `/cache/wt/holdfast/g11-protocol`
-(branch `holdfast-g11/protocol`). Next: adversarial review of its branch, the gate
-(`/cache/tmp/holdfast-g11/gate.sh <worktree> <log>`), the PR, CI, merge; then the
-`holdfast-g11/worker` track (phase 4).
+PR #157 (protocol) is merged at `7b434e1`. The `holdfast-g11/worker` builder agent is finishing in
+`/cache/wt/holdfast/g11-worker` (branch `holdfast-g11/worker`, stacked on the old protocol
+branch). Next: merge `origin/main` into it (D13), a fresh adversarial review, the gate
+(`/cache/tmp/holdfast-g11/gate.sh <worktree> <log>`), the PR, CI, merge; then phase 5.
