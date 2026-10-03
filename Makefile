@@ -104,7 +104,18 @@ TEST_TIMEOUT ?= 90m
 # The packages `test` runs: every package unless a caller narrows it (only tier-fast does).
 TEST_PKGS ?= ./...
 
+# The suite runs the REAL ffmpeg and ffprobe, never a version manager's shim in front of
+# them: scripts/ffmpeg-dir.sh names the directory of the binaries a shim on PATH would
+# exec, only when their whole `-version` output is identical to what the shim runs, and
+# that directory goes first on PATH for the suite. The engine suite calls the two tools
+# thousands of times in series, and a shim start is roughly 30 ms each on the gate's host.
+# When the script prints nothing (the binaries are already first on PATH, as in CI, or
+# there is no ffmpeg at all) PATH is untouched, so a missing ffmpeg still fails the suite
+# loudly: this can make the gate faster and can never make it skip.
 test:
+	@d="$$(./scripts/ffmpeg-dir.sh)"; \
+	if [ -n "$$d" ]; then echo "ffmpeg: the suite runs $$d/ffmpeg and $$d/ffprobe (the binaries the shim on PATH runs)"; PATH="$$d:$$PATH"; export PATH; fi; \
+	echo "go test -race -covermode=atomic -timeout $(TEST_TIMEOUT) $(TEST_PKGS)"; \
 	go test -race -covermode=atomic -timeout $(TEST_TIMEOUT) $(TEST_PKGS)
 
 # --- the web UI (web/) ----------------------------------------------------------
