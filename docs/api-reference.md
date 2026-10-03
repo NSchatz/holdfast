@@ -11,7 +11,7 @@ per-field reference `README.md` points at rather than restates.
 |---|---|---|
 | `GET /` | - | a plain-text page naming the endpoints and carrying the AGPL section 13 source offer. holdfast ships no frontend yet (a web UI is to ship on this API - decided 2026-09-29 by the owner (T14, T18)). Never gated: it holds no library datum. A request whose `Accept` header names `text/html` is answered, on a build that embeds the web UI's shell, with that page instead, carrying the same offer ([design](design/web-ui.md#root)) |
 | `GET /assets/*` | - | the static files the web UI's page names (its script and stylesheet), by exact name; `404` for anything else and on a build that embeds no UI. Never gated: they hold no library datum |
-| `GET /api/summary` | read | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** + `bytes_held_by_undo_window` (the figure the SSE snapshot and the `/metrics` gauge report) + the **per-root sizing figures** under `roots` and `roots_unattributed` (see *Sizing a run* below). |
+| `GET /api/summary` | read | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** + `bytes_held_by_undo_window` (the figure the SSE snapshot and the `/metrics` gauge report) + the **per-root sizing figures** under `roots` and `roots_unattributed` (see *Sizing a run* below). With `dry_run: false` the per-status counts report `would-transcode` rows inside `pending` |
 | `GET /api/queue` | read | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
 | `GET /api/history?limit=N` | read | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
 | `GET /api/events` | read | SSE: a fresh snapshot on every state change |
@@ -589,6 +589,17 @@ Two properties are load-bearing and neither is negotiable:
 - **It is terminal, but re-claimable.** Unlike `done` and `skipped`, a recorded decision does not exclude
   the file from a later run: set `dry_run: false`, run again, and exactly the files that list named are
   the files that get transcoded. Two dry runs over an unchanged file still report **one** candidate.
+- **Under `dry_run: false` it is reported as `pending`.** A daemon serving with `dry_run: false` over a
+  ledger an earlier dry run wrote counts those rows inside `pending` on the three per-status surfaces - the
+  `summary` map of `GET /api/summary`, the same map on the SSE snapshot, and `holdfast_queue_depth{state}` -
+  and reports no `would-transcode` key or label value there. The row is work a run will claim, exactly as a
+  `pending` row is, and a dry run's conclusion sitting beside real states said nothing about what the engine
+  would do. The total is conserved: `pending` is the pending rows plus the `would-transcode` rows, and a
+  ledger with neither reports no `pending` key at all. **Only the report changes.** The ledger row keeps its
+  `would-transcode` status and its recorded decision; `/api/queue`, `/api/history`, `holdfast export` and the
+  `outcomes` aggregate still show it as the row it is; and a run that claims the file passes it through
+  every skip guard again before any encode, so a file a guard now refuses ends `skipped` and is not encoded.
+  Under `dry_run: true` all three surfaces report `would-transcode` as its own state.
 
 **Every terminal row carries all of this per file** - size before → after and percent reclaimed, the
 encoder, the encode duration, and the VMAF pair with its model, its pooling and its luma-only blind spot -
@@ -979,7 +990,7 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   | `holdfast_vmaf_score` | pooled harmonic-mean VMAF of accepted outputs | the AVERAGE fidelity being accepted. A fall toward `min_vmaf` says the encodes are getting worse and the floor is about to start rejecting them |
   | `holdfast_vmaf_min` | the WORST (sub)sampled frame's VMAF on accepted outputs | whether encodes are locally broken. The mean hides local damage, so a falling worst frame under a steady mean is the signal nothing else carries. Approaching `vmaf_min_pool` (60 by default) means files are about to be rejected |
   | `holdfast_vmaf_chroma` | the worst frame's chroma PSNR, **in dB** (not a 0-100 VMAF) | whether the COLOUR survived. The VMAF model is luma-only, so this is the only series that sees a flattened or desaturated encode. Around 40 dB is healthy; a fall toward `vmaf_min_chroma` (30 dB by default) is colour damage |
-  | `holdfast_queue_depth{state}` | jobs in each status, read from the store at scrape time | live queue depth and ledger growth. A `pending` that only climbs means work is arriving faster than it is being done |
+  | `holdfast_queue_depth{state}` | jobs in each status, read from the store at scrape time. With `dry_run: false` there is no `would-transcode` state: those rows are counted in `pending`, as they are in the summary | live queue depth and ledger growth. A `pending` that only climbs means work is arriving faster than it is being done |
   | `holdfast_bytes_held_by_undo_window` | bytes the undo window is still HOLDING, read at scrape time | why free space has not gone up. A retained original is a second link to the source's bytes, so reclaimed space is not returned to the filesystem until the window releases it. Falls as originals age out |
   | `holdfast_health_sweep_files_checked_total{result}` | files the library health sweep fully decoded and recorded, by result (`ok`, `corrupt`, `unreadable`; each pre-created at `0`) | the sweep's progress, and its findings as they arrive. A rise in `corrupt` is damage on disk the encode pipeline never looked for. Flat while a sweep is due means it is waiting on the run window, the load cap or a pause |
   | `holdfast_health_sweep_corrupt_files` | files the newest FINISHED health sweep found corrupt, read at scrape time | the damage the library holds as of that sweep. Absent until a sweep has finished: nobody having looked is not zero. Alert on any rise |
@@ -991,9 +1002,12 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   happened**: under `dry_run: true` holdfast applies every guard and encodes, swaps and deletes nothing, so
   that series is "how many files a real run would transcode" and not "how many it did". Every one of those
   series is pre-created, so each reads `0` before its first event and an alert can be written against the
-  candidate count before the first dry run. The same value appears as a `holdfast_queue_depth{state}`
-  series, where it is counted as itself and **not** inside `probing`: that state means claimed and not yet
-  decided.
+  candidate count before the first dry run. Under `dry_run: true` the same value appears as a
+  `holdfast_queue_depth{state}` series, where it is counted as itself and **not** inside `probing`: that
+  state means claimed and not yet decided. Under `dry_run: false` the gauge has no `would-transcode` state
+  and counts those rows inside `pending`, because a run will claim them; the ledger row keeps its status,
+  and `holdfast_files_total{outcome="would-transcode"}` is unchanged - it counts the decisions this process
+  took, so on a live engine it does not move.
 
   The `guard` label set is the skip vocabulary enumerated under [the recorded outcome](#the-recorded-outcome---the-proof-a-swap-was-safe),
   plus `unclassified` for a reason this build does not recognise. The `gate` label set is

@@ -1415,6 +1415,10 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 
 	ctrl := server.NewController(ctx, eng.RunOneshot, log)
 	hub := server.NewHub(reads, ctrl, log)
+	// The per-status counts report under THIS process's dry_run: a live engine counts the
+	// rows an earlier dry run recorded as would-transcode inside pending, on the summary,
+	// the stream and (below) the queue-depth gauge alike. There is no reload of it in serve.
+	hub.SetLiveEngine(!cfg.DryRun)
 	ctrl.SetOnChange(hub.Trigger) // a pause/scan-state flip broadcasts to SSE clients
 
 	// Observability + host-fair scheduling (TRANSCODE-8), all optional and additive.
@@ -1426,6 +1430,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	var mx *metrics.Metrics
 	if cfg.MetricsEnable {
 		mx = metrics.New(st, log)
+		mx.SetLiveEngine(!cfg.DryRun)
 		observers = append(observers, mx.Observe)
 		metricsHandler = mx.Handler()
 	}

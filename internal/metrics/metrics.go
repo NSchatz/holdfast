@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -56,7 +57,20 @@ type Metrics struct {
 	// advance and nothing the engine meets on disk can move it.
 	guards map[string]bool
 	gates  map[string]bool
+
+	// queue is the queue-depth collector, held so SetLiveEngine can reach it.
+	queue *queueCollector
 }
+
+// SetLiveEngine says whether the process publishing this metric set runs with
+// `dry_run: false`. Under a live engine `holdfast_queue_depth` reports a `would-transcode`
+// row inside `state="pending"` and carries no `would-transcode` sample
+// (store.ReportedCounts, the rule GET /api/summary reports under), because the row is work
+// a run will claim. The ledger is not touched, and `holdfast_files_total` is unaffected.
+//
+// It is a setter so that New, and every caller that never calls this, reports each status
+// exactly as the ledger holds it. `holdfast serve` is the one caller that opts in.
+func (m *Metrics) SetLiveEngine(live bool) { m.queue.live.Store(live) }
 
 // New builds the metric set over st (used for the on-scrape gauges) and registers the
 // standard Go/process collectors alongside the transcoder's own.
@@ -152,7 +166,8 @@ func New(st store.Store, log *slog.Logger) *Metrics {
 	// a collector returns on a store error and emits nothing more, so a pair of gauges
 	// behind one of them would hide each other on any read failure. Registered separately,
 	// the read that failed costs exactly the series it would have filled.
-	m.reg.MustRegister(newQueueCollector(st, log))
+	m.queue = newQueueCollector(st, log)
+	m.reg.MustRegister(m.queue)
 	m.reg.MustRegister(newUndoWindowCollector(st, log))
 	m.reg.MustRegister(newHealthCollector(st, log))
 	m.reg.MustRegister(collectors.NewGoCollector())
@@ -310,6 +325,8 @@ type queueCollector struct {
 	st   store.Store
 	log  *slog.Logger
 	desc *prometheus.Desc
+	// live is Metrics.SetLiveEngine's value; the zero value reports every status as itself.
+	live atomic.Bool
 }
 
 func newQueueCollector(st store.Store, log *slog.Logger) *queueCollector {
@@ -318,7 +335,7 @@ func newQueueCollector(st store.Store, log *slog.Logger) *queueCollector {
 		log: log,
 		desc: prometheus.NewDesc(
 			"holdfast_queue_depth",
-			"Current number of jobs in each status (pending/probing/encoding/verifying/done/skipped/failed/would-transcode/indeterminate/applied-despite-error), read from the store at scrape time.",
+			"Current number of jobs in each status (pending/probing/encoding/verifying/done/skipped/failed/would-transcode/indeterminate/applied-despite-error), read from the store at scrape time. would-transcode is its own state only while dry_run is true; with dry_run false those rows are counted in pending, because a run will claim them.",
 			[]string{"state"}, nil),
 	}
 }
@@ -336,7 +353,7 @@ func (c *queueCollector) Collect(ch chan<- prometheus.Metric) {
 			"dependency", "job store", "read", "Summary", "err", err)
 		return
 	}
-	for st, n := range sum {
+	for st, n := range store.ReportedCounts(sum, c.live.Load()) {
 		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(n), string(st))
 	}
 }

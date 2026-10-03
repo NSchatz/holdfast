@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net"
@@ -10,12 +11,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
+	"github.com/NSchatz/holdfast/internal/store"
 )
 
 func TestDispatch(t *testing.T) {
@@ -683,5 +688,168 @@ func TestValidate_PrintsTheStreamSelectionInForce(t *testing.T) {
 	entries, err := os.ReadDir(tv)
 	if err != nil || len(entries) != 1 || entries[0].Name() != "ep.mkv" {
 		t.Errorf("the library root is not as it was (%v, err=%v)", entries, err)
+	}
+}
+
+var s0172QueueDepth = regexp.MustCompile(`(?m)^holdfast_queue_depth\{state="([^"]*)"\} (\S+)$`)
+
+// TestS0172_AC13_ServeCarriesDryRunToTheSummaryAndTheGauge grades [AC-13] of S0172: the
+// `dry_run` setting reaches the per-status surfaces through the REAL `serve` assembly.
+// One ledger, holding the would-transcode rows an earlier dry run recorded, is served
+// twice - from a configuration with `dry_run: false` and from one with `dry_run: true` -
+// and GET /api/summary and /metrics give the live reading the first time (no
+// would-transcode key or sample, pending = P + N) and the dry reading the second
+// (would-transcode N beside pending P).
+//
+// The library root is empty, so neither daemon's scan finds a file to claim: what moves
+// between the two readings is the setting and nothing else. The rows are read back from
+// the ledger after each daemon stops, still would-transcode.
+func TestS0172_AC13_ServeCarriesDryRunToTheSummaryAndTheGauge(t *testing.T) {
+	if _, err := exec.LookPath(envOr("HOLDFAST_FFMPEG", "ffmpeg")); err != nil {
+		t.Fatalf("ffmpeg is not on PATH, and serve does not start without it: %v", err)
+	}
+	const p, n = 2, 3
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "media")
+	state := filepath.Join(dir, "state")
+	for _, d := range []string{lib, state} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dbPath := filepath.Join(state, "jobs.db")
+
+	// The ledger an earlier dry run left: N would-transcode rows, P pending, one done.
+	seed := func() {
+		t.Helper()
+		st, err := store.Open(dbPath)
+		if err != nil {
+			t.Fatalf("store.Open: %v", err)
+		}
+		defer func() { _ = st.Close() }()
+		ctx := context.Background()
+		claim := func(path string) {
+			t.Helper()
+			if ok, err := st.Claim(ctx, path, "1:1", "w0", 3, store.DecisionInputs{}); err != nil || !ok {
+				t.Fatalf("Claim(%s): ok=%v err=%v", path, ok, err)
+			}
+		}
+		for i := 0; i < p; i++ {
+			claim(filepath.Join(lib, "pending"+strconv.Itoa(i)+".mkv"))
+		}
+		if _, err := st.RecoverStale(ctx); err != nil {
+			t.Fatalf("RecoverStale: %v", err)
+		}
+		for i := 0; i < n; i++ {
+			path := filepath.Join(lib, "candidate"+strconv.Itoa(i)+".mkv")
+			claim(path)
+			if err := st.Finish(ctx, path, "1:1", store.WouldTranscode, &store.Outcome{SourceCodec: "h264"}, 3); err != nil {
+				t.Fatalf("Finish(%s): %v", path, err)
+			}
+		}
+		done := filepath.Join(lib, "done.mkv")
+		claim(done)
+		if err := st.Finish(ctx, done, "1:1", store.Done, nil, 3); err != nil {
+			t.Fatalf("Finish(done): %v", err)
+		}
+	}
+	ledger := func() map[store.Status]int {
+		t.Helper()
+		st, err := store.Open(dbPath)
+		if err != nil {
+			t.Fatalf("store.Open: %v", err)
+		}
+		defer func() { _ = st.Close() }()
+		sum, err := st.Summary(context.Background())
+		if err != nil {
+			t.Fatalf("Summary: %v", err)
+		}
+		return sum
+	}
+	seed()
+	stored := map[store.Status]int{store.Pending: p, store.WouldTranscode: n, store.Done: 1}
+	if got := ledger(); !reflect.DeepEqual(got, stored) {
+		t.Fatalf("the seeded ledger holds %v, want %v", got, stored)
+	}
+
+	// serve reads the surfaces of one daemon started with dryRun and stops it.
+	serve := func(dryRun bool) (summary, depth map[string]int) {
+		t.Helper()
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := ln.Addr().String()
+		_ = ln.Close()
+		cfgPath := filepath.Join(dir, "config-"+strconv.FormatBool(dryRun)+".yaml")
+		body := "library_roots:\n  - " + lib + "\nstate_dir: " + state + "\nserver_addr: " + addr +
+			"\ndry_run: " + strconv.FormatBool(dryRun) + "\n"
+		if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.DryRun != dryRun {
+			t.Fatalf("the loaded configuration has dry_run %v, want %v", cfg.DryRun, dryRun)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan int, 1)
+		var stderr bytes.Buffer
+		go func() { done <- runServer(ctx, cfg, discardLog(), &stderr) }()
+		base := "http://" + addr
+		waitHTTP(t, base+"/api/summary", 30*time.Second)
+
+		var got struct {
+			Summary map[string]int `json:"summary"`
+		}
+		if err := json.Unmarshal([]byte(httpGet(t, base+"/api/summary")), &got); err != nil {
+			t.Fatalf("decode /api/summary: %v", err)
+		}
+		depth = map[string]int{}
+		for _, m := range s0172QueueDepth.FindAllStringSubmatch(httpGet(t, base+"/metrics"), -1) {
+			v, err := strconv.ParseFloat(m[2], 64)
+			if err != nil {
+				t.Fatalf("holdfast_queue_depth{state=%q} is not a number: %q", m[1], m[2])
+			}
+			depth[m[1]] = int(v)
+		}
+
+		cancel()
+		select {
+		case code := <-done:
+			if code != 0 {
+				t.Fatalf("runServer(dry_run=%v) exit code = %d, want 0: %s", dryRun, code, stderr.String())
+			}
+		case <-time.After(60 * time.Second):
+			t.Fatalf("runServer(dry_run=%v) did not shut down after context cancel", dryRun)
+		}
+		return got.Summary, depth
+	}
+
+	live := map[string]int{"pending": p + n, "done": 1}
+	summary, depth := serve(false)
+	if !reflect.DeepEqual(summary, live) {
+		t.Errorf("dry_run: false - /api/summary's summary = %v, want the live reading %v", summary, live)
+	}
+	if !reflect.DeepEqual(depth, live) {
+		t.Errorf("dry_run: false - holdfast_queue_depth = %v, want the live reading %v", depth, live)
+	}
+	if got := ledger(); !reflect.DeepEqual(got, stored) {
+		t.Fatalf("after the live daemon the ledger holds %v, want it untouched at %v", got, stored)
+	}
+
+	dry := map[string]int{"pending": p, "would-transcode": n, "done": 1}
+	summary, depth = serve(true)
+	if !reflect.DeepEqual(summary, dry) {
+		t.Errorf("dry_run: true - /api/summary's summary = %v, want the dry reading %v", summary, dry)
+	}
+	if !reflect.DeepEqual(depth, dry) {
+		t.Errorf("dry_run: true - holdfast_queue_depth = %v, want the dry reading %v", depth, dry)
+	}
+	if got := ledger(); !reflect.DeepEqual(got, stored) {
+		t.Errorf("after the dry daemon the ledger holds %v, want it untouched at %v", got, stored)
 	}
 }

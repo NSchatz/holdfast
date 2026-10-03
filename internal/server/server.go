@@ -427,17 +427,13 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "summary", err)
 		return
 	}
-	counts := make(map[string]int, len(sum))
-	for st, n := range sum {
-		counts[string(st)] = n
-	}
 	held, roots, unattributed := s.rootSizing(r.Context())
 	// The same whole-ledger figure set the stream publishes, from the same cache and
 	// under the same refresh interval: a client that polls sees what a client that
 	// subscribes sees, and polling this endpoint cannot make the figures cost more than
 	// one refresh per interval however often it is called.
 	writeJSON(w, http.StatusOK, controlState{
-		Summary:                counts,
+		Summary:                s.hub.reportedCounts(sum),
 		BytesReclaimedSession:  s.hub.BytesReclaimed(),
 		BytesReclaimedLifetime: s.hub.ReclaimedLifetime(),
 		Paused:                 s.ctrl.Paused(),
