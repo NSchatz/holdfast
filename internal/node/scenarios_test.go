@@ -526,7 +526,18 @@ func TestNodeFixture_AServerRestartKeepsLiveLeases(t *testing.T) {
 		t.Errorf("the library directory holds %s, want %s", got, want)
 	}
 
-	// Adopt: the same job, re-derived, under a NEW working file name.
+	// Adopt: the same job, re-derived, under a NEW working file name. Whatever sits at the
+	// name recorded before the restart is not Adopt's to remove.
+	prior := kept.Temp + ".prior"
+	if err := os.WriteFile(prior, []byte("left by the dead server"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.st.UpdateLease(context.Background(), a.LeaseID, func(cur Lease) (Lease, error) {
+		cur.Temp = prior
+		return cur, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	rederived := kept
 	rederived.Temp = filepath.Join(f.dir, "kept.__transcoding__.1.mkv.holdfast-part")
 	adopted := &engineCall{done: make(chan struct{})}
@@ -561,8 +572,13 @@ func TestNodeFixture_AServerRestartKeepsLiveLeases(t *testing.T) {
 	if row := f.row(b.LeaseID); row.State != store.LeaseExpired || row.Reason != string(ReasonNotAdopted) {
 		t.Errorf("the lease of the moved job is %s (%s), want expired, not adopted", row.State, row.Reason)
 	}
-	if exists(changed.Temp) {
-		t.Error("the moved job's recorded working file was not removed")
+	// Nothing was attached to that lease, so ending it removes no file: the partial upload
+	// the dead server left is the engine's startup sweep's.
+	if !exists(changed.Temp) {
+		t.Error("ending a lease nothing was attached to removed the file at its recorded path")
+	}
+	if err := os.Remove(changed.Temp); err != nil {
+		t.Fatal(err)
 	}
 	is410(t, "a heartbeat on the lease of the moved job", f.heartbeat(b.LeaseID, b.Epoch, 0.1))
 
@@ -583,6 +599,9 @@ func TestNodeFixture_AServerRestartKeepsLiveLeases(t *testing.T) {
 	}
 	if exists(kept.Temp) {
 		t.Error("the upload landed in the working file recorded before the restart")
+	}
+	if got, _ := os.ReadFile(prior); string(got) != "left by the dead server" {
+		t.Errorf("Adopt touched the file at the path the lease recorded before the restart: %q", got)
 	}
 	if r := f.complete(a.LeaseID, a.Epoch, output, srcDigest); r.status != http.StatusOK {
 		t.Fatalf("the completion on the adopted lease answered %d %s", r.status, r.body)
@@ -624,8 +643,8 @@ func TestNodeFixture_AnAdoptedLeaseThatRunsOutReturnsTheExpiry(t *testing.T) {
 	if row := f.row(b.LeaseID); row.State != store.LeaseExpired || row.Reason != string(ReasonNotAdopted) {
 		t.Errorf("the abandoned lease is %s (%s)", row.State, row.Reason)
 	}
-	if exists(two.Temp) {
-		t.Error("the abandoned lease's working file was not removed")
+	if got, err := os.ReadFile(two.Temp); err != nil || string(got) != "partial" {
+		t.Errorf("Abandon touched the file at the lease's recorded path: %q, %v", got, err)
 	}
 	if err := f.hub.Abandon(context.Background(), b.LeaseID); err != nil {
 		t.Errorf("abandoning an ended lease returned %v, want nil", err)

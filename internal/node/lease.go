@@ -55,6 +55,8 @@ var (
 	ErrNotUploaded = errors.New("node: no output has been admitted on this lease")
 	// ErrLeaseHeld is a grant of a path that already has a live lease.
 	ErrLeaseHeld = errors.New("node: the path already has a live lease")
+	// ErrTempHeld is a grant whose working file is a live lease's working file or source.
+	ErrTempHeld = errors.New("node: the working file belongs to a live lease")
 	// ErrGlobalCap and ErrNodeCap are a grant refused by node_max_leases and by
 	// node_max_leases_per_node.
 	ErrGlobalCap = errors.New("node: the cap on live leases is reached")
@@ -99,6 +101,11 @@ func decideGrant(l Lease, live []Lease, c caps, now time.Time, ttl time.Duration
 	for _, o := range live {
 		if o.Path == l.Path {
 			return Lease{}, fmt.Errorf("%w: lease %s of node %s at epoch %d", ErrLeaseHeld, o.ID, o.Node, o.Epoch)
+		}
+		// Two live leases never share a working file, and a working file is never a
+		// leased source: an upload would otherwise be written over another job's bytes.
+		if o.Temp == l.Temp || o.Path == l.Temp {
+			return Lease{}, fmt.Errorf("%w: %q is held by lease %s of node %s", ErrTempHeld, l.Temp, o.ID, o.Node)
 		}
 		if o.Node == l.Node {
 			onNode++

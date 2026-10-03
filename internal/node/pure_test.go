@@ -178,11 +178,11 @@ func TestNodeLease_StateMachineAgainstAFakeClock(t *testing.T) {
 // TestNodeLease_AGrantIsHeldToThePathAndBothCaps.
 func TestNodeLease_AGrantIsHeldToThePathAndBothCaps(t *testing.T) {
 	live := []Lease{
-		{ID: "x1", Path: "/lib/x.mkv", Node: "node-a", Epoch: 3},
-		{ID: "y1", Path: "/lib/y.mkv", Node: "node-b", Epoch: 1},
+		{ID: "x1", Path: "/lib/x.mkv", Node: "node-a", Epoch: 3, Temp: "/lib/x.part"},
+		{ID: "y1", Path: "/lib/y.mkv", Node: "node-b", Epoch: 1, Temp: "/lib/y.part"},
 	}
 	ask := func(path, node string, c caps) error {
-		_, err := decideGrant(Lease{ID: "new", Path: path, Node: node}, live, c, t0, ttl)
+		_, err := decideGrant(Lease{ID: "new", Path: path, Node: node, Temp: "/lib/new.part"}, live, c, t0, ttl)
 		return err
 	}
 	if err := ask("/lib/x.mkv", "node-c", caps{9, 9}); !errors.Is(err, ErrLeaseHeld) {

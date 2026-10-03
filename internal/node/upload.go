@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -58,7 +59,9 @@ func (h *Hub) serveUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errBadRequest, "an empty body is not an output")
 		return
 	}
-	digest, err := CanonicalDigest(r.Header.Get("Content-Digest"))
+	// Every Content-Digest line is read as one list, as a field sent on several lines is:
+	// two lines each carrying a sha-256 member are two members, and refused as such.
+	digest, err := CanonicalDigest(strings.Join(r.Header.Values("Content-Digest"), ","))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, errBadDigest, "Content-Digest: "+err.Error())
 		return
@@ -115,11 +118,14 @@ func (h *Hub) serveUpload(w http.ResponseWriter, r *http.Request) {
 
 	got, sum, readErr := h.receive(w, r, f, declared)
 	if readErr == nil {
-		readErr = f.Sync()
+		if err := f.Sync(); err != nil {
+			readErr = fmt.Errorf("%w: sync: %w", errWrite, err)
+		}
 	}
-	closeErr := f.Close()
-	if readErr == nil {
-		readErr = closeErr
+	// A failed sync or close is the server's failure to keep the bytes, never the node's
+	// failure to send them.
+	if err := f.Close(); err != nil && readErr == nil {
+		readErr = fmt.Errorf("%w: close: %w", errWrite, err)
 	}
 	if readErr != nil {
 		h.discard(u, lease.Temp)

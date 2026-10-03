@@ -465,7 +465,8 @@ func (h *Hub) takeLocked(t *Ticket) bool {
 // Encode grants the lease for job to the ticket's node - the durable row first, then the
 // poll is answered - and blocks until the lease ends. A nil error means the output was
 // admitted and completed: job.Temp holds exactly the bytes whose length and sha-256 the
-// node declared, fsynced, and the Result carries the figures. Otherwise the error says why:
+// node declared, fsynced, and the Result carries the figures; a nil error never comes with
+// the working file removed. Otherwise the error says why:
 // a *LeaseError names the node, the epoch and the reason of a lease that ended (and the
 // working file has been removed), and any other error means no lease was granted. Either
 // way the ticket is used.
@@ -539,15 +540,20 @@ func (h *Hub) Encode(ctx context.Context, t *Ticket, job Job, progress func(frac
 		// this lease's id, so it is ended now rather than left to run out.
 		h.end(ctx, lease.ID, ReasonPollGone)
 	}
-	return h.await(ctx, lease.ID, lease.Temp, w)
+	return h.await(ctx, lease, w)
 }
 
 // Adopt re-attaches a lease Recover returned to the job the engine re-derived after a
 // restart, then blocks exactly as Encode does. The job is the leased one only when its
 // path, its argument list and its source's size and modification time are the lease's;
-// otherwise the lease is ended, its recorded working file removed, and a *LeaseError with
-// ReasonNotAdopted returned. The lease's working file becomes job.Temp.
+// otherwise the lease is ended and a *LeaseError with ReasonNotAdopted returned. The
+// lease's working file becomes job.Temp. Adopt removes no file: whatever sits at the path
+// the lease recorded before the restart is the engine's startup sweep's, as a killed local
+// encode's working file is. Before Recover has run it returns ErrNotRecovered.
 func (h *Hub) Adopt(ctx context.Context, leaseID string, job Job, progress func(fraction float64)) (Result, error) {
+	if !h.isRecovered() {
+		return Result{}, ErrNotRecovered
+	}
 	if err := job.validate(); err != nil {
 		return Result{}, err
 	}
@@ -558,9 +564,7 @@ func (h *Hub) Adopt(ctx context.Context, leaseID string, job Job, progress func(
 		h.life.Unlock()
 		return Result{}, fmt.Errorf("%w: lease %s is already attached to a job", ErrBadJob, leaseID)
 	}
-	var old string
 	lease, err := h.o.Ledger.UpdateLease(ctx, leaseID, func(cur Lease) (Lease, error) {
-		old = cur.Temp
 		return decideAdopt(cur, job, h.o.Now())
 	})
 	if err != nil {
@@ -573,17 +577,12 @@ func (h *Hub) Adopt(ctx context.Context, leaseID string, job Job, progress func(
 			return Result{}, err
 		}
 		// Not the leased job, or a lease whose grace ran out before the engine came back
-		// for it: it is ended here, and its recorded working file goes with it.
+		// for it: it is ended here. Nothing was attached, so no file is removed.
 		ended, endErr := h.end(ctx, leaseID, reason)
 		if endErr != nil || ended.State.Live() || ended.State == store.LeaseCompleted {
 			return Result{}, err
 		}
 		return Result{}, fmt.Errorf("%w: %w", leaseErrorOf(ended), err)
-	}
-	if old != lease.Temp {
-		// The working file the lease recorded before the restart is no longer the one an
-		// upload lands in. It is this lease's own, and nothing else's.
-		h.removeTemp(old)
 	}
 	h.mu.Lock()
 	h.live[lease.ID] = lease.Node
@@ -591,7 +590,7 @@ func (h *Hub) Adopt(ctx context.Context, leaseID string, job Job, progress func(
 	h.mu.Unlock()
 	h.life.Unlock()
 	h.o.Log.Info("node lease adopted after a restart", "node", lease.Node, "lease", lease.ID, "epoch", lease.Epoch)
-	return h.await(ctx, lease.ID, lease.Temp, w)
+	return h.await(ctx, lease, w)
 }
 
 // attached reports whether an engine call is waiting on the lease. A lease nothing waits
@@ -604,9 +603,11 @@ func (h *Hub) attached(id string) bool {
 	return ok
 }
 
-// Abandon ends a lease Recover returned that the engine will not take back, and removes
-// the working file it recorded. An engine that neither adopts nor abandons a recovered
-// lease leaves it to run out after its one TTL of grace.
+// Abandon ends a lease Recover returned that the engine will not take back. It removes no
+// file: the path the lease recorded before the restart is the engine's startup sweep's,
+// and by now may hold the engine's own next attempt. An engine that neither adopts nor
+// abandons a recovered lease leaves it to run out after its one TTL of grace, which
+// removes nothing either.
 func (h *Hub) Abandon(ctx context.Context, leaseID string) error {
 	_, err := h.end(ctx, leaseID, ReasonNotAdopted)
 	return err
@@ -614,8 +615,9 @@ func (h *Hub) Abandon(ctx context.Context, leaseID string) error {
 
 // Recover is called once at start, before any grant. It returns the leases still live in
 // the ledger, having given each one TTL of grace from now, and ends every lease that was
-// uploaded but not completed: its output is never gated after the restart, so its recorded
-// working file is removed and the job is leased again from the start. Until Recover has
+// uploaded but not completed: its output is never gated after the restart, so Recover
+// removes its recorded working file itself and the job is leased again from the start. A
+// granted lease's working file is left where it is. Until Recover has
 // run every lease endpoint answers 503, and until Ready the acquire endpoint does.
 func (h *Hub) Recover(ctx context.Context) ([]Lease, error) {
 	h.life.Lock()
@@ -628,8 +630,17 @@ func (h *Hub) Recover(ctx context.Context) ([]Lease, error) {
 	var kept []Lease
 	for _, l := range live {
 		if l.State == store.LeaseUploaded {
-			if _, err := h.endLocked(ctx, l.ID, ReasonRestart); err != nil {
+			ended, err := h.endLocked(ctx, l.ID, ReasonRestart)
+			if err != nil {
 				return nil, err
+			}
+			// The one file a restart removes itself. The row is the record that this
+			// path holds a node's complete, never-gated upload, and Recover runs before
+			// any grant or any engine work, so nothing else can have written there. Left
+			// in place, the startup sweep would find a full-length file in the target
+			// codec with no job record and hold it back as a stranded replacement.
+			if ended.State == store.LeaseExpired {
+				h.removeTemp(ended.Temp)
 			}
 			continue
 		}
@@ -651,7 +662,7 @@ func (h *Hub) Recover(ctx context.Context) ([]Lease, error) {
 }
 
 // Run looks for expired leases every SweepEvery, and prunes old terminal rows, until ctx
-// ends. A lease an engine call is waiting on is also swept by that call, so Run is what
+// ends. It expires nothing until Recover has run. A lease an engine call is waiting on is also swept by that call, so Run is what
 // expires the leases nothing waits on: the ones a restart recovered and nobody adopted.
 func (h *Hub) Run(ctx context.Context) {
 	sweep := time.NewTicker(h.o.SweepEvery)
@@ -684,7 +695,7 @@ func (h *Hub) Prune(ctx context.Context) {
 }
 
 // await blocks until the lease ends or ctx does.
-func (h *Hub) await(ctx context.Context, id, temp string, w *wait) (Result, error) {
+func (h *Hub) await(ctx context.Context, lease Lease, w *wait) (Result, error) {
 	tick := time.NewTicker(h.o.SweepEvery)
 	defer tick.Stop()
 	for {
@@ -694,36 +705,45 @@ func (h *Hub) await(ctx context.Context, id, temp string, w *wait) (Result, erro
 		case <-tick.C:
 			h.sweep(ctx)
 		case <-ctx.Done():
-			return h.cancel(id, temp, w)
+			return h.cancel(lease, w)
 		case <-h.o.BaseCtx.Done():
-			return h.cancel(id, temp, w)
+			return h.cancel(lease, w)
 		}
 	}
 }
 
 // cancel ends a lease whose engine call is ending, and returns what the lease came to: a
 // lease that completed in the same instant is still a completed lease.
-func (h *Hub) cancel(id, temp string, w *wait) (Result, error) {
+func (h *Hub) cancel(lease Lease, w *wait) (Result, error) {
 	// The caller's context is done, and the row must still be ended.
 	ctx, stop := context.WithTimeout(context.Background(), 10*time.Second)
 	defer stop()
-	row, err := h.end(ctx, id, ReasonCanceled)
-	if err != nil {
-		// The ledger could not end the row. The engine is leaving all the same, so the
-		// lease is detached - no upload is taken on a lease nothing waits on, and its
-		// heartbeats stop extending it - and its working file is removed here.
-		h.life.Lock()
-		h.mu.Lock()
-		delete(h.waits, id)
-		h.mu.Unlock()
-		h.removeTemp(temp)
-		h.life.Unlock()
-		w.finish(outcome{err: fmt.Errorf("%w: %w", &LeaseError{LeaseID: id, Reason: ReasonCanceled}, err)})
-	} else {
+	row, err := h.end(ctx, lease.ID, ReasonCanceled)
+	if err == nil {
 		w.finish(h.outcomeOf(row, w))
+		out := <-w.done
+		return out.res, out.err
 	}
-	out := <-w.done
-	return out.res, out.err
+	// The ledger could not end the row. The engine is leaving all the same.
+	h.life.Lock()
+	defer h.life.Unlock()
+	// Every settlement runs under this lock, so one that got in between the failed
+	// ending and here has already delivered its outcome: a lease that completed is still
+	// a completed lease, and its working file is the engine's to gate.
+	select {
+	case out := <-w.done:
+		return out.res, out.err
+	default:
+	}
+	// Still unsettled: the lease is detached - no upload is taken on a lease nothing
+	// waits on, its heartbeats stop extending it, and whenever its row does end, that
+	// ending removes nothing - and the working file it owned until now is removed here.
+	h.mu.Lock()
+	delete(h.waits, lease.ID)
+	h.mu.Unlock()
+	h.removeTemp(lease.Temp)
+	return Result{}, fmt.Errorf("%w: %w", &LeaseError{LeaseID: lease.ID, Node: lease.Node,
+		Epoch: lease.Epoch, Reason: ReasonCanceled}, err)
 }
 
 // outcomeOf is what a terminal row means to the engine call waiting on it.
@@ -762,18 +782,27 @@ func (h *Hub) applyLocked(ctx context.Context, id string, decide func(Lease) (Le
 }
 
 // settleLocked is what follows a lease's terminal transition. h.life is held.
+//
+// The working file is removed only while the lease is ATTACHED: an engine call in this
+// process is waiting on it, so the file at that path is this lease's and nothing else's.
+// A lease nothing waits on - one a restart recovered and the engine did not take back, or
+// one whose engine call left while the ledger could not end the row - no longer owns the
+// path: the engine may have written its next attempt there, so its late ending unlinks
+// nothing.
 func (h *Hub) settleLocked(row Lease) {
-	if row.State != store.LeaseCompleted {
-		h.removeTemp(row.Temp)
-		h.o.Log.Warn("node lease ended without an output", "node", row.Node, "lease", row.ID,
-			"epoch", row.Epoch, "state", string(row.State), "reason", row.Reason)
-	}
 	h.mu.Lock()
 	w := h.waits[row.ID]
 	delete(h.waits, row.ID)
 	delete(h.live, row.ID)
 	h.notifyLocked()
 	h.mu.Unlock()
+	if row.State != store.LeaseCompleted {
+		if w != nil {
+			h.removeTemp(row.Temp)
+		}
+		h.o.Log.Warn("node lease ended without an output", "node", row.Node, "lease", row.ID,
+			"epoch", row.Epoch, "state", string(row.State), "reason", row.Reason, "attached", w != nil)
+	}
 	if w != nil {
 		w.finish(h.outcomeOf(row, w))
 	}
@@ -781,7 +810,8 @@ func (h *Hub) settleLocked(row Lease) {
 
 // removeTemp removes one lease's recorded working file, and disowns the upload writing it
 // if there is one. It is the only removal the Hub makes outside an upload's own cleanup,
-// and it is only ever handed the path a lease row recorded. h.life is held.
+// it is only ever handed the path a lease row recorded, and its callers call it only for a
+// lease that still owns that path. h.life is held.
 func (h *Hub) removeTemp(temp string) {
 	h.mu.Lock()
 	if u := h.uploads[temp]; u != nil {
@@ -816,6 +846,11 @@ func (h *Hub) endLocked(ctx context.Context, id string, reason Reason) (Lease, e
 func (h *Hub) sweep(ctx context.Context) {
 	h.life.Lock()
 	defer h.life.Unlock()
+	// Before Recover has given the restart's grace, every expiry in the ledger is one the
+	// server's own downtime ran out. Nothing is expired on it.
+	if !h.isRecovered() {
+		return
+	}
 	live, err := h.o.Ledger.LiveLeases(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -834,6 +869,12 @@ func (h *Hub) sweep(ctx context.Context) {
 			h.o.Log.Warn("expiring a node lease failed", "lease", l.ID, "err", err)
 		}
 	}
+}
+
+func (h *Hub) isRecovered() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.recovered
 }
 
 // newLeaseID is 16 random bytes in hex: unguessable, and unique per grant.

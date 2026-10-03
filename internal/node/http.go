@@ -568,22 +568,43 @@ func (h *Hub) serveComplete(w http.ResponseWriter, r *http.Request) {
 	if !h.recoveredOr503(w) {
 		return
 	}
-	h.mu.Lock()
-	if wt := h.waits[id]; wt != nil {
-		wt.mu.Lock()
-		wt.encodeSec = req.EncodeSec
-		wt.mu.Unlock()
-	}
-	h.mu.Unlock()
 	row, err := h.apply(r.Context(), id, func(cur Lease) (Lease, error) {
-		return decideComplete(cur, req.Epoch, h.o.Now(), outDigest, req.OutputBytes, srcDigest)
+		next, err := decideComplete(cur, req.Epoch, h.o.Now(), outDigest, req.OutputBytes, srcDigest)
+		if err == nil && !h.attached(id) {
+			// Nothing waits on this lease, so nothing would gate its output: it is not
+			// recorded as completed.
+			return cur, errUnattached
+		}
+		if err == nil {
+			// Only a completion the decision accepted reports an encode time, and it is
+			// noted before the settlement that hands the engine its Result.
+			h.noteEncodeSeconds(id, req.EncodeSec)
+		}
+		return next, err
 	})
+	if errors.Is(err, errUnattached) {
+		h.unavailable(w, errNotReady, "the server is not waiting on this lease")
+		return
+	}
 	if err != nil && !errors.Is(err, errAlready) {
 		h.leaseRefusal(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, CompleteResponse{State: string(row.State), OutputBytes: row.OutputBytes,
 		OutputDigest: row.OutputDigest, SourceDigest: row.SourceDigest})
+}
+
+// noteEncodeSeconds records the encode time an accepted completion reported, for the
+// engine call waiting on the lease.
+func (h *Hub) noteEncodeSeconds(id string, sec float64) {
+	h.mu.Lock()
+	wt := h.waits[id]
+	h.mu.Unlock()
+	if wt != nil {
+		wt.mu.Lock()
+		wt.encodeSec = sec
+		wt.mu.Unlock()
+	}
 }
 
 // serveFail is POST /leases/{id}/fail: the node ends its lease with a typed reason.
