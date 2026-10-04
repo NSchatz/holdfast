@@ -180,7 +180,7 @@ RUN set -eu; \
 
 # --- hardware runtime: pinned Debian trixie packages, verified by hash --------
 # The userspace VAAPI and QSV need inside the container, per the approved P3 option (a)
-# (.claude/goals/2026-09-holdfast-research/proposal-amd-image.md): libva, libva-drm and
+# (https://github.com/NSchatz/holdfast/blob/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals/2026-09-holdfast-research/proposal-amd-image.md): libva, libva-drm and
 # libdrm (the pinned ffmpeg dlopens them through implib-gen shims and ABORTS, exit 134,
 # when one is missing), Intel's full-feature iHD VA driver and libmfx-gen (the QSV
 # runtime for Tiger Lake and newer), and Mesa's radeonsi VA driver for AMD, each with the
@@ -519,7 +519,7 @@ ENV HOME=/home/nonroot
 # Read 2026-09-30:
 #   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/docker-specialized.html
 #   https://github.com/moby/moby/blob/master/daemon/devices_nvidia_linux.go (injectNVIDIARuntimeHook)
-#   .claude/goals/2026-09-holdfast-research/verify-hw-encode.md claim 9 (the CDI path)
+#   https://github.com/NSchatz/holdfast/blob/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals/2026-09-holdfast-research/verify-hw-encode.md claim 9 (the CDI path)
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 EXPOSE 8080
 USER nonroot:nonroot

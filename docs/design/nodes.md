@@ -631,5 +631,5 @@ Read 2026-10-03.
   `Config.MinVersion`: "By default, TLS 1.2 is currently used as the minimum. TLS 1.0 is the
   minimum supported by this package. The server-side default can be reverted to TLS 1.0 by
   including the value "tls10server=1" in the GODEBUG environment variable."
-- The approved proposal this implements: `.claude/goals/2026-09-holdfast-research/proposal-node-protocol.md`
+- The approved proposal this implements: [`.claude/goals/2026-09-holdfast-research/proposal-node-protocol.md`](https://github.com/NSchatz/holdfast/blob/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals/2026-09-holdfast-research/proposal-node-protocol.md)
   (option (a): rules 1 to 9 and 11, and rule 10's TLS stance).
