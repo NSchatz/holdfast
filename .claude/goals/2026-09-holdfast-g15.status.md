@@ -58,7 +58,7 @@ run on `main`.
 
 | # | Item | State |
 |---|---|---|
-| 2.1 | Every P1 row (20 specs and PR #94) is DONE or a listed follow-up, with the count | TODO |
+| 2.1 | Every P1 row (20 specs and PR #94) is DONE or a listed follow-up, with the count | DONE (read at `b720162`): 21 of 21 rows DONE in the earlier ledgers, 0 follow-ups: PR #94 (S0159) as #100, S0151 #104, S0162 #121, S0163 #111, S0164 #143, S0165 #128, S0166 #102, S0167 and S0169 to S0172 #167, S0168 and S0180 #112, S0173 #107, S0174 #142, S0175 #165, S0176 #103, S0177 #105, S0178 #152 (the statement half, as approved), S0179 #153 (merged into goal 10); each PR is MERGED on GitHub (`gh pr list --state merged`) |
 
 ## Phase 3 - Docs (track `holdfast-g15/docs`)
 
@@ -129,6 +129,25 @@ run on `main`.
   attribution reminder; a PR body ends with the session's "Generated with Claude Code" line (§0.3).
 - D5 (2026-10-04): usage is at 83% of the seven-day window (the bound is 95%), so this goal runs
   at most two build agents beside the session and one reviewer at the end, below the 4 allowed.
+
+- D6 (2026-10-04): PR #171's first CI run (37164247250) was red in `build` on one test,
+  `TestView_ARecoveredLeaseNamesANodeWhoseModeIsNotKnown` in `internal/node` ("Recover: <nil>, 0
+  kept"), which goal 14 added and a prose change cannot reach. Cause, shown here by widening the
+  window with a 200 ms sleep (red 3 of 3): the fixture stopped the first hub and then closed the
+  ledger, and a stopping hub ends its lease as cancelled in the engine call's goroutine, so that
+  write raced the close. The fix is on the PR's branch (fix round 1 of 3, §0.3): the restart is
+  the killed process the sibling fixtures use (`f.srv.Close()`, no `f.stop()`); no assertion
+  changes; green at `-race -count=200` and with the same window widened. It rides the docs PR
+  and not one of its own because a release run executes the same suite, so the release needs it
+  on `main` first, and a second PR is a second 21-minute run. The one deleted `*_test.go` line
+  of this goal is that `f.stop()`.
+- D7 (2026-10-04): `crane` is installed rootless as `mise use -g aqua:google/go-containerregistry`
+  (0.22.1; Apache-2.0, https://github.com/google/go-containerregistry/blob/main/LICENSE, read
+  2026-10-04). It is a tool of this session, not a dependency of the repository. It answers
+  `ghcr.io/nschatz/holdfast:v0.3.0` with the digest `docs/release.md` records.
+- D8 (2026-10-04): the homelab PR changes the image pin, comments and the runbook only. Every
+  key `v0.4.0` adds stays unset there, each as a commented block or a named refusal: turning one
+  on in the one delete-capable deployment is the owner's decision, not a release bump's.
 
 ## Requests
 
