@@ -1,0 +1,142 @@
+# Goal 15 ledger - finale: release, docs and the program report
+
+- Brief: `.claude/goals/2026-09-holdfast.md` §0, §4 and §19 (spec v1.1, the `/goals:spec` skill,
+  read at 1.1.6 from the plugin's 1.5.0 directory); goal file
+  `.claude/goals/2026-09-holdfast-g15.goal.txt`. Amended by `.claude/goals/CHECKPOINT-T.approved`
+  and by `.claude/goals/AMENDMENT-2026-10-03-owner-2026-09-holdfast.md` (CI is the whole gate: no
+  gate, tier, whole-package or `-race` suite or mutation run on this host; line C reads CI on
+  `origin/main`'s head).
+- Started: 2026-10-03 23:59Z, from `/workspace/holdfast` in the maker container, by the `/goal`
+  condition.
+- Goal-start SHA: `1507a2b428c0f29f8e5d249e483d13bb43e89b6e` (`git rev-parse origin/main` before
+  any work).
+- Earlier ledgers: `2026-09-holdfast-g1.status.md` to `2026-09-holdfast-g14.status.md` (ends
+  `COMPLETE (goal 14): 2026-10-03`). The owner's queue at start (`goals needs list`): the open
+  holdfast items are queue #50 to #56, #202 to #204 and #219. No request is addressed to holdfast
+  (`goals request list`).
+- Precondition, as checked:
+
+```
+$ git fetch origin && git rev-parse origin/main
+1507a2b428c0f29f8e5d249e483d13bb43e89b6e
+$ git grep -n "COMPLETE (goal 14)" origin/main -- .claude/goals/2026-09-holdfast-g14.status.md
+origin/main:.claude/goals/2026-09-holdfast-g14.status.md:240:COMPLETE (goal 14): 2026-10-03
+$ echo "$GOFLAGS $GOMAXPROCS"
+-p=4 12
+$ goals admit --agents 4
+usage: five_hour 20% ... ok
+usage: seven_day 83% ... ok
+decision: admit a goal
+agents: 4 of 4 allowed (requested)
+```
+
+## Baselines
+
+No gate runs on this host (the owner, 2026-10-03), so the gate's baseline is CI's own last green
+run on `main`.
+
+| What | Value | Source |
+|---|---|---|
+| CI on `main`, last green run at start | run 37162014945 on `d688105`: `build` and `package` green, 23:30:51Z to 23:55:18Z (24m27s) | `gh run list --branch main` |
+| CI on the goal-start SHA `1507a2b` | run 37163421432, in progress at start | `gh run list --branch main` |
+| `func Test` count, all packages | 2145 | `rg -c '^func Test' -g '*_test.go'` |
+| `docs/design/swap.md`, `docs/design/quality-gate.md` lines | 66, 80 | `wc -l` |
+| `CLAUDE.md` lines | 208 (over the 200 of T51 since #170; row 3.3) | `wc -l` |
+| Tags | `v0.3.0`, `v0.2.0`, `v0.1.0`; the next minor is `v0.4.0` | `git tag --sort=-v:refname` |
+| `testdata/hw-reports/` | `README.md` only: no report has arrived | `ls testdata/hw-reports/` |
+| Usage headroom | five_hour 20%, seven_day 83%; 4 of 4 agents allowed | `goals admit --agents 4` |
+
+## Phase 1 - Start-up
+
+| # | Item | State |
+|---|---|---|
+| 1.1 | Precondition checked (header above) | DONE (`1507a2b`): goal 14's COMPLETE line is on `origin/main` |
+| 1.2 | Ledger created as the goal's first commit, straight to `main` | DONE (the commit that adds this file) |
+| 1.3 | Baselines | DONE (`1507a2b`): the table above; CI's last green run stands in for a local gate (the 2026-10-03 amendment) |
+
+## Phase 2 - Triage rows (line B)
+
+| # | Item | State |
+|---|---|---|
+| 2.1 | Every P1 row (20 specs and PR #94) is DONE or a listed follow-up, with the count | TODO |
+
+## Phase 3 - Docs (track `holdfast-g15/docs`)
+
+| # | Item | State |
+|---|---|---|
+| 3.1 | `README.md` describes every shipped area and its default | TODO |
+| 3.2 | `docs/comparison.md` updated to what ships | TODO |
+| 3.3 | `CLAUDE.md` Layout complete and under 200 lines | TODO |
+| 3.4 | Every `docs/design/` anchor linked | TODO |
+| 3.5 | Goal 14's D15 note on `docs/docker.md` (what the UI shows before a read token is typed) | TODO |
+
+## Phase 4 - The gate on CI (line C)
+
+| # | Item | State |
+|---|---|---|
+| 4.1 | `build` and `package` green on `origin/main`'s head: run link, result, wall-clock | TODO |
+
+## Phase 5 - Release (line D, foundation)
+
+| # | Item | State |
+|---|---|---|
+| 5.1 | The dry-run dispatch on `main`, green, `publish` skipped, artifacts read | TODO |
+| 5.2 | The tag `v0.4.0` pushed and its release run green | TODO |
+| 5.3 | The pull confirmed with `crane digest` (crane installed rootless through mise) | TODO |
+| 5.4 | The compose pin, the API schema baseline and `docs/release.md`'s record committed (track `holdfast-g15/release-record`) | TODO |
+
+## Phase 6 - homelab (line E)
+
+| # | Item | State |
+|---|---|---|
+| 6.1 | A PR in the owner's private homelab repository, never merged, bringing its holdfast deployment and env example up to the release and the new keys | TODO |
+| 6.2 | Its item in the owner's queue | TODO |
+
+## Phase 7 - Hardware reports (line G)
+
+| # | Item | State |
+|---|---|---|
+| 7.1 | `testdata/hw-reports/` re-checked: what arrived, what is still with the owner | TODO |
+
+## Phase 8 - The program report (line F)
+
+| # | Item | State |
+|---|---|---|
+| 8.1 | `docs/program-report-2026-09-holdfast.md` with its sections | TODO |
+
+## Phase 9 - Report
+
+| # | Item | State |
+|---|---|---|
+| 9.1 | Gate integrity counted from the goal-start SHA (line H) | TODO |
+| 9.2 | Hygiene: repos clean and pushed, no open PR of this goal, the queue current (line I) | TODO |
+| 9.3 | Adversarial review of the report (line J) | TODO |
+
+## Decisions taken
+
+- D1 (2026-10-04): tracks. `holdfast-g15/docs` carries §19 item 2 and merges before the release,
+  so the release ships the documents that describe it. `holdfast-g15/release-record` carries what
+  can only be written after the tag (the compose pin, the API schema baseline, the record in
+  `docs/release.md`) and the program report, which cites the release. The homelab PR follows the
+  release, since it pins the released digest. T52: two PRs here, not one per item.
+- D2 (2026-10-04): §19 item 3 (a fresh-clone gate on this host) is replaced by line C as the
+  2026-10-03 amendment rewrote it: the gate is CI on `origin/main`'s head. Nothing larger than one
+  focused test runs here in this goal.
+- D3 (2026-10-04): a push to `main` cancels the CI run in progress on the older head (seen on
+  `7bcfbcd`, `d51c9a2`). Ledger commits are therefore batched at phase boundaries, and none is
+  pushed while a run this goal needs (the pre-release run, the last run for line C) is in flight.
+- D4 (2026-10-04): commits carry no trailer (T38, `CLAUDE.md`), which wins over the session's
+  attribution reminder; a PR body ends with the session's "Generated with Claude Code" line (§0.3).
+- D5 (2026-10-04): usage is at 83% of the seven-day window (the bound is 95%), so this goal runs
+  at most two build agents beside the session and one reviewer at the end, below the 4 allowed.
+
+## Requests
+
+Filed: none. Addressed to holdfast: none open at start.
+The owner's queue: open holdfast items at start are queue #50 to #56, #202 to #204 and #219.
+
+## Resume here
+
+Phase 1 is done. Next: open the worktree `/cache/wt/holdfast/g15-docs` on `holdfast-g15/docs` for
+phase 3, verify the P1 rows against the earlier ledgers for row 2.1, and draft the program report.
+Nothing is merged yet; no tag is pushed.
