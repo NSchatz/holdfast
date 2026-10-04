@@ -58,17 +58,17 @@ run on `main`.
 
 | # | Item | State |
 |---|---|---|
-| 2.1 | Every P1 row (20 specs and PR #94) is DONE or a listed follow-up, with the count | TODO |
+| 2.1 | Every P1 row (20 specs and PR #94) is DONE or a listed follow-up, with the count | DONE (read at `b720162`): 21 of 21 rows DONE in the earlier ledgers, 0 follow-ups: PR #94 (S0159) as #100, S0151 #104, S0162 #121, S0163 #111, S0164 #143, S0165 #128, S0166 #102, S0167 and S0169 to S0172 #167, S0168 and S0180 #112, S0173 #107, S0174 #142, S0175 #165, S0176 #103, S0177 #105, S0178 #152 (the statement half, as approved), S0179 #153 (merged into goal 10); each PR is MERGED on GitHub (`gh pr list --state merged`) |
 
 ## Phase 3 - Docs (track `holdfast-g15/docs`)
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | `README.md` describes every shipped area and its default | TODO |
-| 3.2 | `docs/comparison.md` updated to what ships | TODO |
-| 3.3 | `CLAUDE.md` Layout complete and under 200 lines | TODO |
-| 3.4 | Every `docs/design/` anchor linked | TODO |
-| 3.5 | Goal 14's D15 note on `docs/docker.md` (what the UI shows before a read token is typed) | TODO |
+| 3.1 | `README.md` describes every shipped area and its default | DONE (PR #171, `c95dbb9`; CI run 37165455933 green on `5135101` (`build` 24m19s, `package` 4m25s), `mutation` green (run 37165455936); 1 fix round (D6)): two new sections (encoders and hardware; how much runs at once) and the defaults added to the gate, health sweep, audio, sidecar, node and priority paragraphs, each read from `internal/config` (`defaultLayer()` in `config.go`, `hardware.go`, `workers.go`, `audio.go`, `nodes.go`, `priority.go`, `watch.go`); corrected: six read endpoints, four credentials |
+| 3.2 | `docs/comparison.md` updated to what ships | DONE (PR #171, `c95dbb9`): holdfast's side only (priority queue, per-library profiles, hardware selection, audio rules, tokens, web UI, nodes); no claim about another product added or changed; `docs/migration.md`'s NVENC quality row follows |
+| 3.3 | `CLAUDE.md` Layout complete and under 200 lines | DONE (PR #171, `c95dbb9`): 198 lines (`wc -l`); every package under `internal/` and `cmd/` has its line, plus one for the remaining scripts; the CI rule stated without a date; no rule or rationale bullet removed |
+| 3.4 | Every `docs/design/` anchor linked | DONE (PR #171, `c95dbb9`): 68 explicit anchors in `docs/design/*.md`, each linked from `README.md`, `CLAUDE.md` or a file under `docs/`; 29 had no inbound link before |
+| 3.5 | Goal 14's D15 note on `docs/docker.md` (what the UI shows before a read token is typed) | DONE (PR #171, `c95dbb9`): no library datum until a token is typed; the version and endpoint count from the ungated `/api/schema` and each view's `401` are shown; the read-gated list names all six endpoints |
 
 ## Phase 4 - The gate on CI (line C)
 
@@ -80,8 +80,8 @@ run on `main`.
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | The dry-run dispatch on `main`, green, `publish` skipped, artifacts read | TODO |
-| 5.2 | The tag `v0.4.0` pushed and its release run green | TODO |
+| 5.1 | The dry-run dispatch on `main`, green, `publish` skipped, artifacts read | DONE (run 37166751433 on `c95dbb9`, `workflow_dispatch`, 01:01:43Z to 01:27:34Z, green): the plan line reads `publish=false  version=0.0.0-dev-c95dbb9`; the gate, both image builds and both smokes ran; the `publish` job is `skipped`; artifact `release-dist-0.0.0-dev-c95dbb9` holds both tarballs and `SHA256SUMS` (`sha256sum -c` OK), each tarball `holdfast`, `LICENSE`, `NOTICE`. CI on the same commit: run 37166745058 green (`build`, `package`; 01:01:36Z to 01:26:11Z) |
+| 5.2 | The tag `v0.4.0` pushed and its release run green | DOING: annotated `v0.4.0` on `c95dbb9` pushed 01:28Z; release run 37168110898 in progress |
 | 5.3 | The pull confirmed with `crane digest` (crane installed rootless through mise) | TODO |
 | 5.4 | The compose pin, the API schema baseline and `docs/release.md`'s record committed (track `holdfast-g15/release-record`) | TODO |
 
@@ -130,6 +130,25 @@ run on `main`.
 - D5 (2026-10-04): usage is at 83% of the seven-day window (the bound is 95%), so this goal runs
   at most two build agents beside the session and one reviewer at the end, below the 4 allowed.
 
+- D6 (2026-10-04): PR #171's first CI run (37164247250) was red in `build` on one test,
+  `TestView_ARecoveredLeaseNamesANodeWhoseModeIsNotKnown` in `internal/node` ("Recover: <nil>, 0
+  kept"), which goal 14 added and a prose change cannot reach. Cause, shown here by widening the
+  window with a 200 ms sleep (red 3 of 3): the fixture stopped the first hub and then closed the
+  ledger, and a stopping hub ends its lease as cancelled in the engine call's goroutine, so that
+  write raced the close. The fix is on the PR's branch (fix round 1 of 3, §0.3): the restart is
+  the killed process the sibling fixtures use (`f.srv.Close()`, no `f.stop()`); no assertion
+  changes; green at `-race -count=200` and with the same window widened. It rides the docs PR
+  and not one of its own because a release run executes the same suite, so the release needs it
+  on `main` first, and a second PR is a second 21-minute run. The one deleted `*_test.go` line
+  of this goal is that `f.stop()`.
+- D7 (2026-10-04): `crane` is installed rootless as `mise use -g aqua:google/go-containerregistry`
+  (0.22.1; Apache-2.0, https://github.com/google/go-containerregistry/blob/main/LICENSE, read
+  2026-10-04). It is a tool of this session, not a dependency of the repository. It answers
+  `ghcr.io/nschatz/holdfast:v0.3.0` with the digest `docs/release.md` records.
+- D8 (2026-10-04): the homelab PR changes the image pin, comments and the runbook only. Every
+  key `v0.4.0` adds stays unset there, each as a commented block or a named refusal: turning one
+  on in the one delete-capable deployment is the owner's decision, not a release bump's.
+
 ## Requests
 
 Filed: none. Addressed to holdfast: none open at start.
@@ -137,6 +156,13 @@ The owner's queue: open holdfast items at start are queue #50 to #56, #202 to #2
 
 ## Resume here
 
-Phase 1 is done. Next: open the worktree `/cache/wt/holdfast/g15-docs` on `holdfast-g15/docs` for
-phase 3, verify the P1 rows against the earlier ledgers for row 2.1, and draft the program report.
-Nothing is merged yet; no tag is pushed.
+Phases 1 to 3 are done (PR #171 merged as `c95dbb9`). The tag `v0.4.0` is pushed on `c95dbb9`
+and its release run 37168110898 is in flight: it is irreversible, never re-push or move the tag.
+Next, when it is green: `crane digest ghcr.io/nschatz/holdfast:v0.4.0`; then on the worktree
+`/cache/wt/holdfast/g15-release` (branch `holdfast-g15/release-record`, which already holds the
+re-recorded `docs/test-mass.md`, the `v0.4.0` `docs/api-schema.json` taken on the tag, and the
+program report with `<<...>>` placeholders) set the compose pin, record the release in
+`docs/release.md`, fill the placeholders, PR, CI, merge. Then the homelab PR from
+`/cache/wt/homelab/holdfast-g15` (branch `holdfast-g15/release-v0.4.0`, edits made, the digest is
+the placeholder `@@DIGEST@@`) and its queue item. The report draft is
+`/cache/tmp/holdfast-g15/program-report-draft.md`.
