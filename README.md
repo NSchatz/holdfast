@@ -14,9 +14,10 @@ reproducible from git, not hidden in a UI database.
 > library roots - skip guards → same-directory temp encode → the full verify gate → atomic swap → delete
 > - proven by a real-ffmpeg fixture suite that reds on the specific regression. Colour/HDR preservation,
 > the VMAF perceptual gate, a crash-safe queue and worker pool, hardware/AV1 encoders, the REST/SSE API,
-> observability, host-fair scheduling and a multi-arch non-root image are built on top of it. The plan of
-> record is the program brief, [`.claude/goals/2026-09-holdfast.md`](.claude/goals/2026-09-holdfast.md) -
-> decided 2026-09-29 by the owner (T2, T8). A minor `v*` tag is cut by that program or by the owner -
+> observability, host-fair scheduling and a multi-arch non-root image are built on top of it. Work
+> arrives as tasks from the owner's agent harness; the plan of record was the program brief,
+> [`.claude/goals/2026-09-holdfast.md`](https://github.com/NSchatz/holdfast/blob/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals/2026-09-holdfast.md) (pinned) -
+> decided 2026-09-29 by the owner (T2, T8). A minor `v*` tag is cut by that harness or by the owner -
 > decided 2026-09-29 by the owner (T37) - and renaming the repository or flipping its visibility stays
 > the owner's act: [`docs/release.md`](docs/release.md) is the ordered runbook and says which of its steps
 > can be undone.
@@ -571,9 +572,10 @@ for a human review (`.github/dependabot.yml`).
 life as a Bash script inside a private homelab repo. That predecessor already proved the no-loss contract
 (verify-then-swap-then-delete, HDR-aware, crash-safe) against a real-ffmpeg fixture suite; this project
 ports it to Go and grows it into a production application (persistent queue, worker pool, hardware-encoder
-matrix, observability). The plan of record and the research behind it are the program brief and its
-research in [`.claude/goals/`](.claude/goals/) - decided 2026-09-29 by the owner (T2, T8); the umbrella's
-spec pipeline no longer plans holdfast, and its `S0NNN` numbers stay in the history.
+matrix, observability). The plan of record and the research behind it were the program brief and its
+research in [`.claude/goals/`](https://github.com/NSchatz/holdfast/tree/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals) (pinned) - decided 2026-09-29 by the owner (T2, T8); work now
+arrives as tasks from the owner's agent harness. The umbrella's spec pipeline no longer plans holdfast,
+and its `S0NNN` numbers stay in the history.
 
 ## License
 

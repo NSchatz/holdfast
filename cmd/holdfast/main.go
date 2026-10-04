@@ -6,9 +6,9 @@
 // `run` performs a single oneshot scan of the configured library roots (the
 // TRANSCODE-1 data-safety core: skip guards → same-dir temp encode → verify → atomic
 // swap → delete). The persistent queue + worker pool (TRANSCODE-5), colour/HDR
-// (TRANSCODE-3), VMAF (TRANSCODE-4), and the HTTP API (TRANSCODE-7) build on it. The
-// plan of record is the program brief, .claude/goals/2026-09-holdfast.md, and no longer
-// a roadmap in the umbrella - decided by the owner (T2, T8).
+// (TRANSCODE-3), VMAF (TRANSCODE-4), and the HTTP API (TRANSCODE-7) build on it. Work
+// arrives as tasks from the owner's agent harness, no longer from a roadmap in the
+// umbrella - decided by the owner (T2, T8).
 package main
 
 import (

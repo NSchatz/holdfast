@@ -137,7 +137,7 @@ Go 1.25+. The gate is `make check`, and the `check:` target IS its definition -
 read the target rather than any prose about it (`make tier-full` is `check`; `make tier-fast` its quick subset). The Makefile owns the tool pins
 and CI invokes the same target, so a PR, a release and a human run the identical thing.
 
-**CI is where the gate runs, and the only place** (`.claude/goals/AMENDMENT-2026-10-03-owner-2026-09-holdfast.md`). On
+**CI is where the gate runs, and the only place** ([`AMENDMENT-2026-10-03-owner-2026-09-holdfast.md`](https://github.com/NSchatz/holdfast/blob/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals/AMENDMENT-2026-10-03-owner-2026-09-holdfast.md)). On
 the development host no gate, tier, whole-package or `-race` suite or mutation run happens: push the branch, open the
 PR, and read CI (`build`, `package`, `mutation`; `ci.yml` also runs nightly on main). A PR merges when those checks are
 green on its branch with main merged in, with the run's link in the PR body. While working, one focused test (one
@@ -176,9 +176,10 @@ tool proves its unhappy paths.
   time, so the rule carries no copy of what it guards.
 - Conventional Commits.
 - Plain hyphens only - no en or em dashes, anywhere.
-- No dates and no narrated history in this file. Git holds that, and the plan of
-  record is the program brief `.claude/goals/2026-09-holdfast.md`, not a roadmap in
-  the umbrella - decided by the owner (T2, T8).
+- No dates and no narrated history in this file. Git holds that. Work arrives as tasks
+  from the owner's agent harness, not from a roadmap in the umbrella (decided by the owner,
+  T2, T8); the retired program's brief, goal files and ledgers are pinned at
+  https://github.com/NSchatz/holdfast/tree/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals.
 
 ## References
 

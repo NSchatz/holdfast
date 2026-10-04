@@ -13,9 +13,9 @@ device, no client has spoken to a live service, and no worker has run on a secon
 queue items that record this, and the one goal 15 adds, are listed under NEEDS-OWNER. The program
 ends with the minor release `v0.4.0`.
 
-Sources are cited inline: "ledger gN" is `.claude/goals/2026-09-holdfast-g<N>.status.md`, a row is
+Sources are cited inline: "ledger gN" is [`.claude/goals/2026-09-holdfast-g<N>.status.md`](https://github.com/NSchatz/holdfast/tree/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals), a row is
 a row of one of its phase tables, and "D<n>" is an entry of its "Decisions taken". The brief is
-`.claude/goals/2026-09-holdfast.md`.
+[`.claude/goals/2026-09-holdfast.md`](https://github.com/NSchatz/holdfast/blob/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals/2026-09-holdfast.md).
 
 ## The release
 
@@ -50,7 +50,7 @@ and the goals program's amendments to this program, not a goal's work, and are l
   plain `flock`. PR #97 (`26d88b1`).
 - The owner's reversals R1 to R6 recorded in the files whose rules they change, and the T34
   cleanup. PR #98 (`213258f`).
-- Proposals P1 to P6 under `.claude/goals/2026-09-holdfast-research/`, and the `docs/test-mass.md`
+- Proposals P1 to P6 under [`.claude/goals/2026-09-holdfast-research/`](https://github.com/NSchatz/holdfast/tree/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals/2026-09-holdfast-research), and the `docs/test-mass.md`
   record. PR #99 (`d4d70a6`).
 - Six branches and one tag deleted on GitHub, exactly T35's list (ledger g1 rows 5.1 to 5.3).
 
@@ -217,7 +217,7 @@ P1 has 21 rows: the 20 carried specs (S0151, S0162 to S0180) and PR #94 (ledger 
 is merged above: PR #94 as #100; S0151 #104; S0162 #121; S0163 #111; S0164 #143; S0165 #128;
 S0166 #102; S0167, S0169, S0170, S0171 and S0172 #167; S0168 and S0180 #112; S0173 #107; S0174
 #142; S0175 #165; S0176 #103; S0177 #105; S0178 #152; S0179 #153. Two are narrower than their
-spec by the owner's approval (`.claude/goals/CHECKPOINT-T.approved`): S0178 built only its
+spec by the owner's approval ([`.claude/goals/CHECKPOINT-T.approved`](https://github.com/NSchatz/holdfast/blob/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals/CHECKPOINT-T.approved)): S0178 built only its
 statement half, and S0176's second half is a pull request in the owner's private homelab
 repository that the owner merges (queue #50).
 
@@ -370,7 +370,7 @@ holds the two files equal.
 ### CI is the whole gate
 
 On 2026-10-03 the owner decided that holdfast's gate is pull-request CI alone
-(`.claude/goals/AMENDMENT-2026-10-03-owner-2026-09-holdfast.md`, merged as PR #170, `1507a2b`). A
+([`.claude/goals/AMENDMENT-2026-10-03-owner-2026-09-holdfast.md`](https://github.com/NSchatz/holdfast/blob/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals/AMENDMENT-2026-10-03-owner-2026-09-holdfast.md), merged as PR #170, `1507a2b`). A
 pull request merges when `build`, `package` and `mutation` are green on the branch merged up to
 `origin/main`. No gate, tier, whole-package or `-race` suite, mutation run or UI build runs on
 the development host; one focused test is the inner loop. Every pull request of goals 1 to 14 had
@@ -382,7 +382,7 @@ gate, and its baseline is CI's last green run on `main` (ledger g15 baseline, D2
 Twelve steps are open, each physically impossible for an agent (brief §0.6). The order is safety
 first, then what unblocks the most: the hardware paths first, because the pixel formats and
 quality defaults a hardware job runs with are `ASSUMED` until a device has run them; then the live
-services; then the second host; then the homelab pull requests, which change nothing in holdfast.
+services; then the second host; then the pull requests in the owner's private homelab repository, which change nothing in holdfast.
 `ls testdata/hw-reports/ testdata/client-reports/` lists only each directory's `README.md` on
 2026-10-04, so no report has arrived. The exact commands for queue #51 to #56 are in the old list
 (`git show 22ae917:.claude/goals/NEEDS-OWNER.md`, rows 2 to 7) and in each queue item.
@@ -412,7 +412,7 @@ purpose once done (ledger g6, "NEEDS-OWNER (this goal)").
 ## Proposals awaiting the owner
 
 P1 to P6 are decided: the owner approved them at Checkpoint T on 2026-09-29
-(`.claude/goals/CHECKPOINT-T.approved`), each as its recommendation says.
+([`.claude/goals/CHECKPOINT-T.approved`](https://github.com/NSchatz/holdfast/blob/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals/CHECKPOINT-T.approved)), each as its recommendation says.
 
 | Proposal | Approved as |
 |---|---|
