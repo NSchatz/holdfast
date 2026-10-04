@@ -257,7 +257,11 @@ func TestView_ARecoveredLeaseNamesANodeWhoseModeIsNotKnown(t *testing.T) {
 	f := newFixture(t, nil)
 	a, _ := f.grant("node-a", f.job("one", 4000))
 	dbPath := f.dbPath
-	f.stop()
+	// The restart is a KILLED process: the server and the ledger go, and the hub is not
+	// stopped first. A stopping hub ends its lease as cancelled, in the engine call's own
+	// goroutine, and that write raced the ledger's close - where it won, there was no live
+	// lease left to recover (it did, on a loaded CI runner).
+	f.srv.Close()
 	if err := f.st.Close(); err != nil {
 		t.Fatal(err)
 	}
