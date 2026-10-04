@@ -604,7 +604,7 @@ fi
 #          here with a root `postinstall` probe: under pnpm 11.27.1, 12.6.0 and 12.8.1 an
 #          .npmrc carrying `ignore-scripts=true` did NOT stop the script, and
 #          `ignoreScripts: true` in pnpm-workspace.yaml did
-#          (.claude/goals/2026-09-holdfast-research/verify-nodes-clients-spa.md, claim 3).
+#          (https://github.com/NSchatz/holdfast/blob/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals/2026-09-holdfast-research/verify-nodes-clients-spa.md, claim 3).
 #          An .npmrc is therefore NOT a decision for a pnpm project, whatever it says:
 #          accepting one would be a green check on a line nothing reads.
 #          Required, at the top level of the file:
