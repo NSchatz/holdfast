@@ -274,14 +274,14 @@ the read surface has. `server_read_token`, below, is how you give it one of its 
 **Reverse-proxy posture.** Read this before you give holdfast a hostname.
 
 With `server_read_token` unset - the shipped default - the read API (`/api/summary`,
-`/api/queue`, `/api/history`, `/api/events`) is **unauthenticated**. Nothing in this daemon
+`/api/queue`, `/api/history`, `/api/events`, `/api/health`, `/api/nodes`) is **unauthenticated**. Nothing in this daemon
 checks a credential for it; it is protected by the loopback bind and by nothing else. Put a
 proxy in front and that bind protects nothing, so the proxy's own authentication becomes
 **the only barrier** in front of every media path in your library. Configure forward auth
 (Authelia, oauth2-proxy, whatever your proxy calls it) on the route before the hostname
 resolves, not after.
 
-Point `server_read_token` at a secret and those four endpoints require an
+Point `server_read_token` at a secret and those six endpoints require an
 `Authorization: Bearer` credential of their own, so the proxy in front of them becomes
 **defence in depth** rather than the only barrier: a proxy misconfiguration stops being
 total exposure of every path in your library. It is a second, independent key - it buys
@@ -302,7 +302,10 @@ carry the Corresponding Source offer. The page and its files are the same for ev
 and are still served with no credential when a read token is set: they hold no library datum
 for a credential to protect. Every figure and every media path the web UI shows it reads from
 `/api/summary`, `/api/queue`, `/api/history`, `/api/health` and `/api/nodes`, which the key
-does gate, so with a read token set the web UI shows nothing until a token is typed into it.
+does gate, so with a read token set the web UI shows no library datum until a token is typed into
+it: the page still shows the version and the endpoint count it reads from `/api/schema`, which
+describes the surface and is never gated, and each view shows the server's `401` in place of
+its figures.
 It keeps that token in the page's memory only - no storage, no cookie, no URL - and a reload
 asks again ([docs/design/web-ui.md](design/web-ui.md#token)). `serve` says so at startup rather than leaving you to find it, and
 `validate` says what it can see of it: a token that is not set in the file or in its own
