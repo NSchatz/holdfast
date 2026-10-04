@@ -9,9 +9,10 @@ It ran as 15 goals from 2026-09-29 to 2026-10-04. Goals 1 to 14 merged 59 pull r
 1200 to 2145 (ledger g1 baseline; `rg -c '^func Test' -g '*_test.go'` at goal 15's start). Every
 new transformation is off until configured, so an existing configuration decides as it did before
 (brief §1, I5). What no agent could do is still open: no hardware encoder has run on a real
-device, no client has spoken to a live service, and no worker has run on a second host. The eleven
-queue items that record this, and the one goal 15 adds, are listed under NEEDS-OWNER. The program
-ends with the minor release `v0.4.0`.
+device, no client has spoken to a live service, and no worker has run on a second host. The ten
+open queue items that record this, and the one goal 15 adds, are listed under NEEDS-OWNER. The
+program ends with the minor release `v0.4.0`, and "The closing record" below states the gate on
+`main`'s head, the hardware-report status and gate integrity since goal 15's start.
 
 Sources are cited inline: "ledger gN" is [`.claude/goals/2026-09-holdfast-g<N>.status.md`](https://github.com/NSchatz/holdfast/tree/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals), a row is
 a row of one of its phase tables, and "D<n>" is an entry of its "Decisions taken". The brief is
@@ -30,10 +31,10 @@ area above is in it. Each run below is on `c95dbb9`, the squash commit of PR #17
 | The release run | run 37168110898, tag push, green end to end, 01:28:21Z to 01:57:57Z (29m36s): `build` (the full gate, both images, both smokes) and every step of `publish` |
 | The image (step 8) | `ghcr.io/nschatz/holdfast:v0.4.0` and `:latest` both answer `sha256:019f4a722222428f95d285d96c63c9e2d15882c7d0941681d6f19b8cc9288c8b` to `crane digest` (crane 0.22.1, no credentials, no Docker daemon); the index lists `linux/amd64` and `linux/arm64` |
 | The GitHub release | tag `v0.4.0`, cut by the workflow: `holdfast_v0.4.0_linux_amd64.tar.gz`, `holdfast_v0.4.0_linux_arm64.tar.gz`, `SHA256SUMS` (`gh api repos/NSchatz/holdfast/releases/tags/v0.4.0`) |
-| The compose pin and the baseline (step 9) | `docker-compose.yml` pins `v0.4.0` by that digest and `docs/api-schema.json` records 36 endpoints at `holdfast v0.4.0` (23 at `v0.3.0`), taken on the tag; both are in the pull request that carries this report, whose squash commit ledger g15 row 5.4 names |
+| The compose pin and the baseline (step 9) | `docker-compose.yml` pins `v0.4.0` by that digest and `docs/api-schema.json` records 36 endpoints at `holdfast v0.4.0` (23 at `v0.3.0`), taken on the tag; both are in the pull request that first carried this report, PR #172 (`d3d1266`; ledger g15 row 5.4) |
 
 Run URLs are `https://github.com/NSchatz/holdfast/actions/runs/<id>`. The gate on `main`'s head
-at the goal's end is ledger g15 row 4.1.
+at the program's end is under "The closing record" below.
 
 ## What was built
 
@@ -214,12 +215,37 @@ and the goals program's amendments to this program, not a goal's work, and are l
 ### The triage rows (P1)
 
 P1 has 21 rows: the 20 carried specs (S0151, S0162 to S0180) and PR #94 (ledger g1 row P1). Each
-is merged above: PR #94 as #100; S0151 #104; S0162 #121; S0163 #111; S0164 #143; S0165 #128;
-S0166 #102; S0167, S0169, S0170, S0171 and S0172 #167; S0168 and S0180 #112; S0173 #107; S0174
-#142; S0175 #165; S0176 #103; S0177 #105; S0178 #152; S0179 #153. Two are narrower than their
-spec by the owner's approval ([`.claude/goals/CHECKPOINT-T.approved`](https://github.com/NSchatz/holdfast/blob/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals/CHECKPOINT-T.approved)): S0178 built only its
+is merged above.
+
+| Row | Status | Merged as |
+|---|---|---|
+| PR #94 (S0159) | DONE | PR #100 |
+| S0151 | DONE | PR #104 |
+| S0162 | DONE | PR #121 |
+| S0163 | DONE | PR #111 |
+| S0164 | DONE | PR #143 |
+| S0165 | DONE | PR #128 |
+| S0166 | DONE | PR #102 |
+| S0167 | DONE | PR #167 |
+| S0168 | DONE | PR #112 |
+| S0169 | DONE | PR #167 |
+| S0170 | DONE | PR #167 |
+| S0171 | DONE | PR #167 |
+| S0172 | DONE | PR #167 |
+| S0173 | DONE | PR #107 |
+| S0174 | DONE | PR #142 |
+| S0175 | DONE | PR #165 |
+| S0176 | DONE | PR #103; its second half is the homelab pull request the owner merged (queue #50, closed) |
+| S0177 | DONE | PR #105 |
+| S0178 | DONE | PR #152, the statement half only, as approved |
+| S0179 | DONE | PR #153 |
+| S0180 | DONE | PR #112 |
+
+Two are narrower than their spec by the owner's approval
+([`.claude/goals/CHECKPOINT-T.approved`](https://github.com/NSchatz/holdfast/blob/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals/CHECKPOINT-T.approved)): S0178 built only its
 statement half, and S0176's second half is a pull request in the owner's private homelab
-repository that the owner merges (queue #50).
+repository, which the owner merged on 2026-10-03; the owner closed its queue item, #50, on
+2026-10-04.
 
 ### Pull requests that amended the program
 
@@ -260,12 +286,14 @@ The ledgers counted with `git grep -c '^func Test' <sha> -- '*_test.go'` up to g
 | 12 | 1958 | 2004 | ledger g12 baseline, row 5.1 |
 | 13 | 2004 | 2033 | ledger g13 baseline, row 5.1 |
 | 14 | 2033 | 2145 | ledger g14 baseline, row 4.1 |
-| 15 | 2145 | 2145 | ledger g15 baseline, row 9.1: goal 15 added and removed no test function |
+| 15 | 2145 | 2145 | ledger g15 baseline; "The closing record" below, counted at `a06bd51`: goal 15 added and removed no test function |
 
 Every goal's gate-integrity row also records that no package's count fell and gives a reason for
 each deleted `*_test.go` line: 8 lines in goal 1, 93 in goal 2, 0 in goal 3, 15 in goal 4, 70 in
 goal 5, 41 in goal 6, 16 in goal 7, 17 in goal 8, 34 in goal 9, 1 in goal 10, 23 in goal 11, 15
-in goal 12, 10 in goal 13 and 27 in goal 14 (the same rows as the table above).
+in goal 12, 10 in goal 13 and 27 in goal 14 (the same rows as the table above). Goal 15's ledger
+stopped before its gate-integrity row was filled; its count, 1 line, is under "The closing
+record" below.
 
 ### The web UI's unit tests
 
@@ -377,14 +405,78 @@ the development host; one focused test is the inner loop. Every pull request of 
 merged under both the local gate and CI before the change (ledger g14 D16); goal 15 ran no local
 gate, and its baseline is CI's last green run on `main` (ledger g15 baseline, D2).
 
+## The closing record
+
+Goal 15's ledger was stopped on 2026-10-04 with three rows unfilled: the gate on `main`'s head
+(row 4.1), the hardware-report re-check (row 7.1) and gate integrity (row 9.1). This section is
+those three records, read on 2026-10-04 at `origin/main`'s head `a06bd51` (the squash commit of
+PR #173, which retired the goal-program files and changed no Go file). The goal-start SHA is
+`1507a2b` (ledger g15 header).
+
+### The gate on `main`'s head
+
+| | |
+|---|---|
+| Run | [37178056937](https://github.com/NSchatz/holdfast/actions/runs/37178056937), `ci.yml`, the push of `a06bd51` to `main` |
+| Head SHA | `a06bd515e9fb4763cc3ffa852d89e0082b66280d` |
+| Conclusion | `success` |
+| `build` | `success`, 04:48:27Z to 05:03:54Z (15m27s) |
+| `package` | `success`, 04:48:28Z to 04:52:23Z (3m55s) |
+| Wall-clock | 2026-10-04 04:48:25Z to 05:03:55Z (15m30s), the run's creation to its last update |
+
+`gh run view 37178056937 -R NSchatz/holdfast --json headSha,conclusion,jobs,createdAt,updatedAt`
+prints these values. `mutation` is a pull-request check and has no job in a push run.
+
+### Hardware reports
+
+```
+$ ls testdata/hw-reports/
+README.md
+```
+
+NEEDS-OWNER: no hardware report has arrived, so no hardware path has run on a real device. Every
+`--encoder` path `docs/hardware-reports.md` documents is without a report:
+
+| Path | Queue |
+|---|---|
+| `--encoder nvenc`, and `nvenc --hw-decode` | #52 |
+| `--encoder qsv` | #53 |
+| `--encoder h264_qsv --pixel-format yuv420p` | #53 |
+| `--encoder vaapi` on the Intel host | #54 |
+| `--encoder vaapi` on the AMD host | #55 |
+| `--encoder amf` (a host install; the image cannot carry AMF) | #56 |
+
+The queue items ask for more than the document's examples, and none of that has a report either:
+`--hw-decode` for `qsv`, `vaapi` and `amf`; `h264_nvenc` (and `av1_nvenc` where the card has it)
+in #52; `av1_qsv` in #53; `h264_vaapi` and `av1_vaapi` in #54 and #55; `h264_amf` and `av1_amf`
+in #56. The start-time probe on each GPU host is queue #51. `ls testdata/client-reports/` also
+lists only `README.md` (queue #202 to #204).
+
+### Gate integrity, `1507a2b..a06bd51`
+
+- **Deleted test lines: 1.** `git diff 1507a2b a06bd51 -- '*_test.go' | grep -c '^-[^-]'` prints
+  `1`. The line is `f.stop()` in `internal/node/view_test.go`, in
+  `TestView_ARecoveredLeaseNamesANodeWhoseModeIsNotKnown`. Reason: the fixture stopped the hub
+  and then closed the ledger, and a stopping hub ends its lease as cancelled in another
+  goroutine, so that write raced the close and the test went red on a loaded CI runner (run
+  37164247250, PR #171's first). The line became `f.srv.Close()`, the killed-process restart the
+  sibling fixtures use, with a comment saying why. No assertion changed (ledger g15 D6; PR #171,
+  `c95dbb9`).
+- **`func Test` per package: none lower.** `git grep -c '^func Test' <sha> -- '*_test.go'`,
+  summed by directory, gives 2145 in 39 directories at `1507a2b` and 2145 in 39 directories at
+  `a06bd51`, and the two per-directory lists are identical.
+- **The two invariant documents: 0 lines removed.**
+  `git diff 1507a2b a06bd51 -- docs/design/swap.md docs/design/quality-gate.md | grep -c '^-[^-]'`
+  prints `0`.
+
 ## NEEDS-OWNER
 
-Twelve steps are open, each physically impossible for an agent (brief §0.6). The order is safety
+Eleven steps are open, each physically impossible for an agent (brief §0.6). The order is safety
 first, then what unblocks the most: the hardware paths first, because the pixel formats and
 quality defaults a hardware job runs with are `ASSUMED` until a device has run them; then the live
 services; then the second host; then the pull requests in the owner's private homelab repository, which change nothing in holdfast.
 `ls testdata/hw-reports/ testdata/client-reports/` lists only each directory's `README.md` on
-2026-10-04, so no report has arrived. The exact commands for queue #51 to #56 are in the old list
+2026-10-04, so no report has arrived ("The closing record" above names each hardware path). The exact commands for queue #51 to #56 are in the old list
 (`git show 22ae917:.claude/goals/NEEDS-OWNER.md`, rows 2 to 7) and in each queue item.
 
 | Queue | What to do | Why an agent cannot |
@@ -399,8 +491,11 @@ services; then the second host; then the pull requests in the owner's private ho
 | #203 | The same with `--service sonarr`. | T49. |
 | #204 | The same with `--service radarr`. | T49. |
 | #219 | Run one `holdfast worker` on a real second host against the owner's server, once in `mapped` mode and once in `http` mode (`docs/docker.md#worker-nodes`). | A real second host is outside every goal (T49; ledger g11 D19, ledger g12 row 4.4). |
-| #50 | End this item: the pull request it names (S0176's second half, the runbook's one-shot commands given the service's `TZ`) was merged by the owner on 2026-10-03 (`gh pr view`), and the item is still open in the queue. What is left of it is to compare the restore lines' time offsets with the service's, and to say so to a session. | Merging a homelab pull request is the owner's (T32), and only the owner's word ends a queue item. |
 | #274 | Review the pull request goal 15 opened in the owner's private homelab repository (it moves the deployment's pin to `v0.4.0` by digest, adds comments only to its configuration and leaves every new key unset), run that repository's `make ci`, merge it, then apply it on the host by hand. | T32; that repository's gate needs Docker, and holdfast is deployed there by hand only. |
+
+Queue #50 (S0176's second half, a pull request in the owner's private homelab repository) is
+no longer open: the owner merged that pull request on 2026-10-03 and closed the item on
+2026-10-04.
 
 What each answer changes, in short: #52 to #56 calibrate the `ASSUMED` `quality.<key>` defaults
 (`internal/encoder/quality.go`), the order `encoder: auto` tries, and the upload formats
@@ -511,7 +606,7 @@ a finding it left for the owner. None blocks anything.
 | The old branch of PR #94, `sdd/S0159-holdfast-bounded-run-temp-sweep`, is still on GitHub at `9b016d4`. Its work is merged as PR #100; the owner may delete it (I12; it is not in T35's list). | ledger g2 row 2.2 and "Proposals awaiting the owner" |
 | Dependabot's open pull requests #108 (the Go image), #109 (Go modules) and #110 (GitHub Actions). #108 is red by design until `ARG GO_IMAGE` and every workflow's `GO_VERSION` move with it. No agent merges or closes them, by S0151 as approved. | ledger g2 D of 2026-09-29; ledger g12 D6 |
 | Dependabot's open pull requests #162 (the Node image), #163 (the distroless base) and #164 (the `web/` packages), the same rule. | ledger g13 D13 |
-| PR #156 (`speed/gate`, a faster local gate) is another session's and still open. The program touched none of it. | ledger g10 D11, g11 D10, g12 D6, g14 D14 |
+| PR #156 (`speed/gate`, a faster local gate) is another session's. It was closed unmerged on 2026-10-04 (`gh pr view 156`), after the program stopped; its branch is still on GitHub at `863203e`. The program touched none of it. | ledger g10 D11, g11 D10, g12 D6, g14 D14 |
 | `docs/test-mass.md`'s measurement block is re-recorded at the release commit (40683 production lines, 104684 test lines, 2.57 to 1 at `c95dbb9`; `scripts/test-mass.sh -check` agrees). The check is still wired into nothing, so the block trails the tree again at the next change to a Go file. | ledger g2, "Proposals awaiting the owner"; ledger g15 row 5.4 |
 | The image copies the build stage's zone database over the base's own (2026b under 2026c at goal 2's pins). | ledger g2 D of 2026-09-29 |
 | The homelab census reading `plan --json`'s `roots` stays an item for the owner's private homelab repository (S0180). | ledger g2, "Proposals awaiting the owner" |
