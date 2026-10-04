@@ -39,11 +39,14 @@ data-loss class ([#355](https://github.com/HaveAGitGat/Tdarr/issues/355),
 and fixes the trust gaps:
 
 - **Never replace before verify.** Encode to a same-directory temp; the source is replaced only by an
-  **atomic same-filesystem rename**, and only after the output passes *every* gate: correct codec,
-  duration/packet parity, strictly smaller, per-type stream-count parity, full decode-integrity, and a
-  **VMAF** perceptual-quality check - its **average** (`min_vmaf`), its **worst frame**
-  (`vmaf_min_pool`) *and* its **colour** (`vmaf_min_chroma`, which the luma-only VMAF model cannot
-  see at all). The comparison is made in one pixel format holdfast **names and records**, not one
+  **atomic same-filesystem rename** ([docs/design/swap.md](docs/design/swap.md#swap-invariant)), and
+  only after the output passes *every* gate: correct codec,
+  duration/packet parity, strictly smaller, per-type stream-count parity, **output fidelity** (the bit
+  depth, chroma, colour tags and HDR10 metadata the job's plan declares -
+  [docs/design/encode-plan.md](docs/design/encode-plan.md#fidelity)), full decode-integrity, and a
+  **VMAF** perceptual-quality check - its **average** (`min_vmaf`, default `95`), its **worst frame**
+  (`vmaf_min_pool`, default `60`) *and* its **colour** (`vmaf_min_chroma`, default `30`, which the
+  luma-only VMAF model cannot see at all). The comparison is made in one pixel format holdfast **names and records**, not one
   ffmpeg negotiated. Any failure leaves the source byte-for-byte untouched.
 - **The source can't be swapped out from under a running encode.** The source's `size:mtime` is
   re-checked immediately before the swap: if something else (Plex, an *arr, you) rewrote or replaced it
@@ -61,12 +64,18 @@ and fixes the trust gaps:
 - **The quality gate bounds the worst frame, not just the average.** An average hides local damage -
   Netflix says so outright - so a short destroyed segment inside an otherwise-clean encode passes a
   mean-only gate, and passes every structural check too (it decodes fine and carries the right duration,
-  packets and streams). All three floors are **on by default**. An output that cannot be *measured* is
-  rejected, not assumed good.
-- **A library health sweep that only reports.** Off by default; with `health_sweep_interval_hours`
-  set, `serve` fully decodes every source on that schedule, inside the run window and below the
-  encodes, resumes after a restart, and reports each file `ok`, `corrupt` or `unreadable` over the
-  read API (`GET /api/health`), the `holdfast_health_sweep_*` metrics and a notification. It
+  packets and streams). All three floors are **on by default** (`vmaf_enable: true`, every frame
+  scored: `vmaf_subsample: 1`). An output that cannot be *measured* is rejected, not assumed good
+  ([docs/design/quality-gate.md](docs/design/quality-gate.md#vmaf-pooling)).
+- **A library health sweep that only reports.** Off by default (`health_sweep_interval_hours: 0`);
+  with the interval set, `serve` fully decodes [every source a scan would
+  offer](docs/design/health-sweep.md#which-files) on [that
+  schedule](docs/design/health-sweep.md#schedule), inside the run window and below the encodes, one
+  decode at a time (`health_sweep_workers`, default `1`), [resumes after a
+  restart](docs/design/health-sweep.md#resume), and reports each file [`ok`, `corrupt` or
+  `unreadable`](docs/design/health-sweep.md#classify) over the read API (`GET /api/health`), the
+  `holdfast_health_sweep_*` metrics and a notification
+  ([what is reported where](docs/design/health-sweep.md#reporting)). It
   **never moves, renames, deletes or repairs a file**: what to do about one is the operator's call
   ([docs/design/health-sweep.md](docs/design/health-sweep.md#health-sweep)).
 - **Radarr, Sonarr and Plex are told, and a file being played is left alone.** Off by default.
@@ -74,7 +83,10 @@ and fixes the trust gaps:
   Sonarr series that owns the file's directory to rescan (`RescanMovie`, `RescanSeries`) and asks
   Plex for a partial scan of that directory - once each, off the encode workers, and a failed
   request is a warning that changes nothing about the job. With Plex configured, a file Plex is
-  playing is not started and not swapped until it stops; the hold only delays, and it fails open.
+  playing is not started and not swapped until it stops; [the hold only
+  delays](docs/design/media-clients.md#play-hold), and it fails open. Each target has its own
+  [path map](docs/design/media-clients.md#path-maps) (`radarr_path_map`, `sonarr_path_map`,
+  `plex_path_map`), since each usually sees the library under different mounts.
   Read the re-download warning first
   ([docs/post-swap-hook.md](docs/post-swap-hook.md#x265-warning),
   [docs/design/media-clients.md](docs/design/media-clients.md#media-clients)).
@@ -83,14 +95,15 @@ and fixes the trust gaps:
   every imported, upgraded or renamed file through the same targeted scan `POST /api/scan` feeds -
   no script and no shim. The credential is one of its own that can only queue a file, sent as the
   connection's Password or an `Authorization` header and never in the URL
-  ([docs/docker.md](docs/docker.md#telling-holdfast-about-one-file-sonarr--radarr)).
+  ([docs/docker.md](docs/docker.md#telling-holdfast-about-one-file-sonarr--radarr),
+  [docs/design/media-clients.md](docs/design/media-clients.md#webhook-intake)).
 - **Config-as-code.** YAML, validated, in git - not clickops that vanishes on rebuild.
 - **Open source** (AGPL-3.0).
 
 ### We are not the only tool that verifies before it replaces
 
 We are not, and the field is described rather than dismissed: **Alchemist** works the same axis and is
-ahead of holdfast on six capabilities, **FileFlows** and **Unmanic** work this ground too, and the one
+ahead of holdfast on four capabilities, **FileFlows** and **Unmanic** work this ground too, and the one
 claim holdfast makes for itself is narrow - its verify gate is default-on, layered and fails closed.
 **[docs/comparison.md](docs/comparison.md)** has all of it, each claim checked against that project's
 own licence text or project page.
@@ -136,16 +149,19 @@ measured at. Keys: [docs/profiles.md](docs/profiles.md#resolution-rules).
 <a id="crop-posture"></a>
 
 **Black bars are cropped on request, and kept otherwise.** `crop` is **off by default**. Set
-`crop: auto` on a root and each source's bars are found by sampling it at ten points and cut away
-before encoding, so **the replacement is no longer the same content as the source**: those rows
+`crop: auto` on a root and each source's bars are found by [sampling it at ten
+points](docs/design/crop.md#detection) and cut away before encoding, so **the replacement is no longer the same content as the source**: those rows
 are gone and the swap deletes the original. It is cut only where the samples agree and the area
 removed is black on **every frame**; a Dolby Vision source is cut only to the active area its own
 RPU names, with that metadata zeroed and gated in the replacement. Samples that disagree (a mixed
 aspect ratio), bars with anything in them, an RPU that disagrees with the picture, and every case
 it cannot decide encode the whole frame, and the row says why. No floor moves: the gate scores the encode against the source put
 through the **same crop**, and a crop gate holds the output to the declared size and the removed
-area to black. Key: [docs/profiles.md](docs/profiles.md#crop); the reasoning:
-[docs/design/crop.md](docs/design/crop.md).
+area to black ([the crop gate](docs/design/crop.md#crop-gate); a cropped Dolby Vision output also
+passes [the L5 gate](docs/design/crop.md#l5-gate)). Where a root also sets `deinterlace` or
+`max_height`, [the filters run in one fixed order](docs/design/crop.md#order). Key:
+[docs/profiles.md](docs/profiles.md#crop); the reasoning:
+[docs/design/crop.md](docs/design/crop.md#crop).
 
 <a id="audio-posture"></a>
 
@@ -160,14 +176,19 @@ one; `audio_loudness: ebu_r128` normalises the re-encoded and added tracks to EB
 A layout the codec cannot carry (7.1 into AC-3 or E-AC-3) is copied, and the row says why. Every
 transformed track passes its own gates before the swap - decoded length, channel count and layout,
 sample rate, a full decode of every audio stream, and loudness within tolerance - and the whole file
-must still be strictly smaller. Keys: [docs/profiles.md](docs/profiles.md#audio); the reasoning:
-[docs/design/audio.md](docs/design/audio.md).
+must still be strictly smaller. The defaults, each from the build: `audio_reencode: off`,
+`audio_downmix: off`, `audio_loudness: off`, `keep_original_audio: false`, no `audio_codec`, and the
+four per-layout bitrates (`audio_mono_kbps`, `audio_stereo_kbps`, `audio_51_kbps`, `audio_71_kbps`)
+at `0`, which is the codec's own default. Keys: [docs/profiles.md](docs/profiles.md#audio); the
+reasoning: [what is re-encoded](docs/design/audio.md#reencode),
+[loudness](docs/design/audio.md#loudness) and [the audio gates](docs/design/audio.md#audio-gates).
 
-Text subtitles can also be copied out beside a replacement: with `subtitle_sidecars: text`, each
+Text subtitles can also be copied out beside a replacement (`subtitle_sidecars`, default `off`): with `subtitle_sidecars: text`, each
 carried SubRip, ASS and WebVTT stream is written, unconverted, to `<name>.<lang>[.forced].<ext>`
 once the swap has committed, never over an existing file and only after it parses back complete;
 the embedded streams stay in the replacement, and picture-based and `mov_text` subtitles are skipped
-with a reason. See [docs/design/subtitles.md](docs/design/subtitles.md#sidecars).
+with a reason. See [docs/design/subtitles.md](docs/design/subtitles.md#sidecars) and
+[the parse-back gate](docs/design/subtitles.md#sidecar-gate).
 
 <a id="worker-nodes"></a>
 
@@ -188,6 +209,19 @@ or loopback: a worker refuses a plain `http://` server on any other host unless
 ([docs/design/nodes.md](docs/design/nodes.md#transport)). A complete deployment, both modes, is in
 **[docs/docker.md](docs/docker.md#worker-nodes)**.
 
+The caps a node deployment runs under, at their shipped defaults (each read only once `node_token`
+is set): a lease lives `node_lease_ttl_sec: 60` seconds without a heartbeat, at most
+`node_max_leases: 4` are live across every node and `node_max_leases_per_node: 1` on one,
+`node_max_transfers: 2` source streams and uploads are in flight at once, and the server gates
+`node_gate_slots: 1` node output at a time ([the gate slots](docs/design/nodes.md#gate-slots)). A
+worker runs `worker_slots: 1` encode at once. The server's built-in TLS is off until
+`server_tls_cert` and `server_tls_key` are both written. The rest of the reasoning: [the one seam a
+node job differs at](docs/design/nodes.md#seam), [http mode](docs/design/nodes.md#http-mode), [what
+the worker does](docs/design/nodes.md#worker) and [the command lines it
+refuses](docs/design/nodes.md#refused-plan), [how a lease that ended without an output is
+read](docs/design/nodes.md#endings), and [what a server restart does with live
+leases](docs/design/nodes.md#restart).
+
 The limits, stated rather than hidden: only a plan whose command line is self-contained on another
 host is leased - a software encoder, software decode, no loudness-normalised track, no dynamic-HDR
 carriage - and every other job, hardware encodes included, is encoded by the server
@@ -199,16 +233,21 @@ proof. To use more of ONE machine, raising `workers` (default 1) is still the le
 <a id="dynamic-hdr-carried"></a>
 
 **Dolby Vision profile 8.1 and HDR10+ are carried through libx265, and only through it.** On the `cpu`
-encoder a profile 8.1 source keeps its RPU (`-dolbyvision 1`, with the VBV ceiling and mastering display
-x265 requires) and an HDR10+ source keeps its SMPTE2094-40 metadata (extracted by `hdr10plus_tool`,
-validated against the source's frame count, written back by x265), by default. holdfast converts Dolby Vision
+encoder a [profile 8.1](docs/design/dynamic-hdr.md#profile-8) source keeps its RPU (`-dolbyvision 1`,
+with [the VBV ceiling](docs/design/dynamic-hdr.md#vbv) and mastering display
+x265 requires) and an [HDR10+](docs/design/dynamic-hdr.md#hdr10-plus) source keeps its SMPTE2094-40
+metadata (extracted by `hdr10plus_tool`,
+validated against the source's frame count, written back by x265), by default; a source carrying
+[both](docs/design/dynamic-hdr.md#both) keeps both. holdfast converts Dolby Vision
 profile 7 only on request: `dolby_vision_p7: convert` rewrites it to 8.1 with `dovi_tool` before the
-encode, discarding the enhancement layer, and the default skips it. Profile 5 stays skipped, and so does
+encode, discarding the enhancement layer, and the default (`dolby_vision_p7: skip`) skips it
+([profile 7](docs/design/dynamic-hdr.md#profile-7)). Profile 5 stays skipped, and so does
 any other profile. Every other encoder skips such a source, as does a remux-only root, because only
 libx265 is shown to carry the metadata. The perceptual gate compares pixels and an RPU is not pixels, so
-the swap waits on gates of its own: the output's DOVI configuration record must name the planned profile
+the swap waits on [gates of its own](docs/design/dynamic-hdr.md#gates): the output's DOVI configuration record must name the planned profile
 and compatibility id, and every frame must carry its RPU and its HDR10+ metadata. A source whose metadata
-cannot be read, or whose tool is not installed, is skipped by name, never encoded flat. One limit is
+cannot be read, or whose [tool](docs/design/dynamic-hdr.md#tools) is not installed, is skipped by name, never encoded flat
+([what its skips record](docs/design/dynamic-hdr.md#rows)). One limit is
 stated rather than hidden: an HEVC source is skipped as already at the cpu encoder's target codec before
 any of this is asked, and every Dolby Vision profile 7 and 8 source is HEVC
 ([docs/design/dynamic-hdr.md](docs/design/dynamic-hdr.md#reach)).
@@ -335,14 +374,87 @@ both default to empty, exclude wins over include, and none of the three is reach
 moves the encode's **working file** elsewhere and nothing else - the accepted result is still copied
 back beside the source and finalized by the same atomic rename: **[docs/scratch.md](docs/scratch.md)**.
 
+### Encoders, and hardware where it works
+
+`encoder` defaults to `cpu` (libx265, HEVC), at `crf: 22`, `preset: slow`, `pixel_format: auto`
+(the source's chroma kept, bit depth floored at 10) and `container_ext: source` (the output keeps
+the source's container). `svtav1` (AV1) and `x264` (H.264) are the other software encoders. A file
+is taken only where re-encoding can pay: a source below `min_bitrate_kbps: 2500` is skipped, as is
+one with more than one hard link (`skip_hardlinked: true`), and a failure a later attempt could
+answer differently is retried `max_failures: 3` times before the file is parked. The replacement
+keeps the source's modification time (`preserve_mtime: true`).
+
+Every job's encode is declared once, as a plan the command line and every gate read
+([docs/design/encode-plan.md](docs/design/encode-plan.md#encode-plan)); the plan names [the pixel
+format the encoder is handed](docs/design/encode-plan.md#explicit-pixel-format) from the encoder's
+own list, and the output replaces its source only when it carries what the plan declares.
+
+Hardware encoders are opt-in, and none runs on a guess. `nvenc`, `qsv`, `vaapi` and `amf` write
+HEVC, and each has an H.264 and an AV1 sibling (`h264_nvenc`, `av1_qsv` and the rest -
+[docs/profiles.md](docs/profiles.md)). At start, every encoder the configuration can reach is put through [a
+real encode at each bit depth](docs/design/hardware.md#probe), on [the render node this host
+assigned it](docs/design/hardware.md#detection), and one that does not come out faithful is not
+used. Four keys decide the rest, each off or absent by default:
+
+- **`encoder: auto`** chooses per job the first HEVC hardware encoder that passed the probe, in the
+  order `nvenc`, `qsv`, `vaapi`, `amf` ([docs/design/hardware.md](docs/design/hardware.md#auto)). It
+  is never the default: a configuration that does not say `auto` runs exactly the encoder it names.
+- **`hw_fallback`** (default `skip`) decides a job whose hardware is missing or fails: `skip` leaves
+  the source as it is, and `software` hands it to the software encoder of the same codec. Nothing
+  falls back to CPU unless a root says so
+  ([docs/design/hardware.md](docs/design/hardware.md#fallback)).
+- **`hw_decode`** (default `software`) may be set to `hardware` to decode on the encoder's vendor
+  hardware; every frame comes back to system memory first, so the filters, the encoder and every
+  gate see the frames a software decode would
+  ([docs/design/hardware.md](docs/design/hardware.md#decode)).
+- **`quality.<encoder>`** sets a hardware encoder's quality on that encoder's own scale; absent, the
+  job's `crf` is passed as it always was
+  ([docs/design/encode-plan.md](docs/design/encode-plan.md#encoder-quality),
+  [docs/profiles.md](docs/profiles.md)).
+
+`amf` is refused at start in the container image, which cannot carry AMD's runtime, and works on a
+host install; on AMD hardware the image runs `vaapi`
+([docs/design/hardware.md](docs/design/hardware.md#amf)). CI has no GPU, so every hardware path is
+proven there on stand-ins; the evidence from a real device is a redacted hardware report the owner
+runs and commits ([docs/hardware-reports.md](docs/hardware-reports.md)). Passing a GPU to the
+container: [docs/docker.md](docs/docker.md#gpu-passthrough).
+
+### How much runs at once, and when
+
+`workers` (default `1`) is how many files are in flight. `workers: auto` sizes the pool once, at
+load, from the CPU quota the process really has: `max(1, floor(quota / cores_per_worker))`, with
+`cores_per_worker` defaulting to `16`. `x265_cpus` (default `0`) leaves one libx265 encode sized
+from the same quota, and the perceptual gate's threads are divided across the gates that may score
+at once ([docs/design/quality-gate.md](docs/design/quality-gate.md#gate-threading)). An encode
+that grows toward the container's memory limit fails fast instead of sitting at the limit
+([docs/encode-memory.md](docs/encode-memory.md)). How these meet a container's `cpus:` limit:
+**[docs/docker.md](docs/docker.md#workers-cpus-and-max-load)**.
+
+`serve` scans once at start and on demand; `scan_interval_sec` (default `0`) adds a rescan every
+that many seconds, and a library root carrying `watch: true` (absent, so off, by default) also
+offers a new file as soon as its size has held still for `watch_settle_sec` (default `60`) -
+through the same guards, gates and swap as a scanned one ([docs/profiles.md](docs/profiles.md)).
+Three host-fair holds, all off by default, only ever delay the hand-out of new files and never
+interrupt an encode in flight: a daily `run_window` (unset: always), a per-core load cap `max_load`
+(`0`: none), and a pause while Tautulli reports an active stream (`tautulli_url` with a
+`tautulli_api_key` reference; unset). Prometheus metrics are on (`metrics_enable: true`, at
+`/metrics`), and notifications are off until `notify_url` carries a reference
+([docs/api-reference.md](docs/api-reference.md)).
+
+`holdfast run` has three bounds for a first pass: `--file` carries exactly one file to a terminal
+outcome, `--limit N` stops offering files once N have reached one, and `--limit-encodes N` stops
+once N have reached an encode. `--queue-order` overrides the configured order for that run alone.
+
 ### The order files are offered in
 
 `queue_order` picks which candidate a scan offers its workers first: `path` (the default, the
 library's own traversal, the only order that streams), `largest`, `smallest`, `newest`, `oldest`, or
-`savings_per_hour` - the source whose encode is estimated to reclaim the most bytes per hour of encode
+[`savings_per_hour`](docs/design/queue-order.md#savings-per-hour) - the source whose encode is
+estimated to reclaim the most bytes per hour of encode
 plus verify work, which probes every candidate once before the first is offered. That estimate is an
 ordering key and nothing more: it is published nowhere, in keeping with there being no per-file
-estimated saving. A `priority` on a library root, a resolution rule or an encode profile orders ahead
+estimated saving. A [`priority`](docs/design/queue-order.md#priority) on a library root, a resolution rule or an
+encode profile (a whole number from -1000 to 1000, default `0`) orders ahead
 of it, higher first. Both decide **sequence only** - never which files are offered, never any guard,
 gate or recorded decision input, so changing either re-opens no row:
 **[docs/design/queue-order.md](docs/design/queue-order.md#queue-order)**.
@@ -373,13 +485,18 @@ re-encoding; `holdfast requeue` is the LOCAL lever for the rest - **[docs/requeu
 ### Web API (`serve`)
 
 `holdfast serve` runs a REST API + [SSE](https://developer.mozilla.org/docs/Web/API/Server-sent_events)
-live stream, and **the web UI is embedded in the binary and served at `/` to a browser**. It shows the
+live stream, and **the web UI is embedded in the binary and served at `/` to a browser**
+([docs/design/web-ui.md](docs/design/web-ui.md#embed); it is built by [one pinned
+toolchain](docs/design/web-ui.md#toolchain)). There is no key that turns it on or off: it is part of
+`serve`, on the same `server_addr` (default `127.0.0.1:8080`). It shows the
 summary and savings, the queue with each file's priority, the history with status filters and paging,
 the health sweep's results and the worker nodes, and it drives the controls the API already offers and
-no others: pause, resume, a library scan, a scan of named paths and the withheld paths, with a token
-held in the page's memory only. **The HTTP JSON API remains the full interface**: the web UI calls
+no others ([the controls](docs/design/web-ui.md#controls)): pause, resume, a library scan, a scan
+of named paths and the withheld paths, with a token
+[held in the page's memory only](docs/design/web-ui.md#token). **The HTTP JSON API remains the full interface**: the web UI calls
 nothing a script cannot, and every request to the root path that does not ask for HTML gets the
-plain-text page naming the endpoints ([docs/design/web-ui.md](docs/design/web-ui.md#views)). It is
+plain-text page naming the endpoints ([the views](docs/design/web-ui.md#views), [the two
+representations of `/`](docs/design/web-ui.md#root)). It is
 a **read-and-control** surface on top of the config-as-code engine: the YAML file stays the source of
 truth and the SQLite store stays the source of job state. The API can only **read the store, start a
 scan, and pause/resume the feeding of new files** - it never touches a media file, so the data-safety
@@ -393,8 +510,8 @@ Every endpoint, what it answers and which of them need a token:
 
 Fail-safes: the server **binds `127.0.0.1` by default**. With `server_read_token` unset -
 the shipped default - that bind is the whole of what protects the read endpoints, so a
-reverse proxy in front of them is the only barrier there is; set it and the five `/api`
-reads require a bearer token of their own, which makes the proxy defence in depth instead.
+reverse proxy in front of them is the only barrier there is; set it and the six `/api`
+reads (`summary`, `queue`, `history`, `events`, `health`, `nodes`) require a bearer token of their own, which makes the proxy defence in depth instead.
 It does **not** gate the root path or `/metrics`, neither of which carries a library datum
 (the reverse-proxy posture is in [docs/docker.md](docs/docker.md), and it is worth
 reading before you give holdfast a hostname);
@@ -404,8 +521,8 @@ the mutating endpoints require a bearer token, reached **by reference**
 are **disabled entirely when no token is configured**; the Sonarr/Radarr webhook intake takes a
 third credential of its own (`webhook_token`) that authorises nothing else, and is likewise disabled
 without it; pause only ever
-*delays* work - it never interrupts an encode or the atomic swap. **Known limitation:** three
-single-value tokens and no per-user accounts; the queue/history endpoints are capped at the most recent rows, not the whole ledger -
+*delays* work - it never interrupts an encode or the atomic swap. **Known limitation:** four
+single-value credentials (read, control, webhook, node) and no per-user accounts; the queue/history endpoints are capped at the most recent rows, not the whole ledger -
 but they now say what they were capped *against*, and `holdfast export` gives you the whole thing.
 
 ### The record, and what to read for it
@@ -417,7 +534,8 @@ and pixel format both streams were converted to before scoring, and the chroma
 measurement that says whether the COLOUR survived.
 
 An in-flight job reports how far it has got. The whole-ledger figures say what
-they are computed over and mark what they cannot cover. The ledger can be bounded
+they are computed over and mark what they cannot cover: a figure that could not be read is
+`null`, never a zero ([docs/design/ledger-totals.md](docs/design/ledger-totals.md#null-is-not-zero)). The ledger can be bounded
 (`history_retention_rows`, off by default) and exported (`holdfast export`).
 
 Every field, every figure and the exact semantics: **[`docs/api-reference.md`](docs/api-reference.md)**.
@@ -440,6 +558,12 @@ make image-smoke  # build it, then drive a REAL encode inside it and assert the 
 
 The Go test suite drives **real ffmpeg**: it fails loudly if `ffmpeg`/`ffprobe` (or `libvmaf`) are
 missing rather than skipping, because a skipped safety proof is a false green.
+
+This repository's own pull requests are gated in CI, which runs that same `check` target, the image
+smoke gate and a mutation-score floor ([docs/mutation-testing.md](docs/mutation-testing.md)).
+Dependabot proposes pin updates weekly - GitHub Actions, the Docker base images, the Go modules and
+the web UI's packages - and nothing merges on its own: each proposal runs the same gate and waits
+for a human review (`.github/dependabot.yml`).
 
 ## Provenance
 
