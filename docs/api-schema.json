@@ -1,7 +1,7 @@
 {
   "schema": "holdfast.http-surface",
   "schema_version": "1",
-  "holdfast_version": "v0.3.0",
+  "holdfast_version": "v0.4.0",
   "endpoints": [
     {
       "method": "GET",
@@ -262,6 +262,308 @@
         },
         {
           "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/health",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "enabled",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "interval_hours",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "state",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "waiting",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "next_due_at",
+                "required": true,
+                "type": {
+                  "kind": "integer",
+                  "nullable": true
+                }
+              },
+              {
+                "name": "current",
+                "required": true,
+                "type": {
+                  "kind": "object",
+                  "nullable": true,
+                  "fields": [
+                    {
+                      "name": "id",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "started_at",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "finished_at",
+                      "required": true,
+                      "type": {
+                        "kind": "integer",
+                        "nullable": true
+                      }
+                    },
+                    {
+                      "name": "checked",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "ok",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "corrupt",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "unreadable",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "problems",
+                      "required": true,
+                      "type": {
+                        "kind": "array",
+                        "nullable": true,
+                        "elem": {
+                          "kind": "object",
+                          "fields": [
+                            {
+                              "name": "path",
+                              "required": true,
+                              "type": {
+                                "kind": "string"
+                              }
+                            },
+                            {
+                              "name": "result",
+                              "required": true,
+                              "type": {
+                                "kind": "string"
+                              }
+                            },
+                            {
+                              "name": "reason",
+                              "required": true,
+                              "type": {
+                                "kind": "string"
+                              }
+                            },
+                            {
+                              "name": "checked_at",
+                              "required": true,
+                              "type": {
+                                "kind": "integer"
+                              }
+                            },
+                            {
+                              "name": "size",
+                              "required": true,
+                              "type": {
+                                "kind": "integer"
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "name": "problems_truncated",
+                      "required": true,
+                      "type": {
+                        "kind": "boolean"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "last_completed",
+                "required": true,
+                "type": {
+                  "kind": "object",
+                  "nullable": true,
+                  "fields": [
+                    {
+                      "name": "id",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "started_at",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "finished_at",
+                      "required": true,
+                      "type": {
+                        "kind": "integer",
+                        "nullable": true
+                      }
+                    },
+                    {
+                      "name": "checked",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "ok",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "corrupt",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "unreadable",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "problems",
+                      "required": true,
+                      "type": {
+                        "kind": "array",
+                        "nullable": true,
+                        "elem": {
+                          "kind": "object",
+                          "fields": [
+                            {
+                              "name": "path",
+                              "required": true,
+                              "type": {
+                                "kind": "string"
+                              }
+                            },
+                            {
+                              "name": "result",
+                              "required": true,
+                              "type": {
+                                "kind": "string"
+                              }
+                            },
+                            {
+                              "name": "reason",
+                              "required": true,
+                              "type": {
+                                "kind": "string"
+                              }
+                            },
+                            {
+                              "name": "checked_at",
+                              "required": true,
+                              "type": {
+                                "kind": "integer"
+                              }
+                            },
+                            {
+                              "name": "size",
+                              "required": true,
+                              "type": {
+                                "kind": "integer"
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "name": "problems_truncated",
+                      "required": true,
+                      "type": {
+                        "kind": "boolean"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
           "media_type": "text/plain; charset=utf-8",
           "body": {
             "kind": "text"
@@ -638,6 +940,250 @@
                         "type": {
                           "kind": "string"
                         }
+                      },
+                      {
+                        "name": "audio_tracks",
+                        "required": true,
+                        "type": {
+                          "kind": "array",
+                          "nullable": true,
+                          "elem": {
+                            "kind": "object",
+                            "fields": [
+                              {
+                                "name": "source_index",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer"
+                                }
+                              },
+                              {
+                                "name": "output_index",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "action",
+                                "required": true,
+                                "type": {
+                                  "kind": "string"
+                                }
+                              },
+                              {
+                                "name": "reason",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "codec",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "layout",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "sample_rate",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "bitrate_kbps",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "loudness",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "measured_lufs",
+                                "required": true,
+                                "type": {
+                                  "kind": "number",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "achieved_lufs",
+                                "required": true,
+                                "type": {
+                                  "kind": "number",
+                                  "nullable": true
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "name": "subtitle_sidecars",
+                        "required": true,
+                        "type": {
+                          "kind": "array",
+                          "nullable": true,
+                          "elem": {
+                            "kind": "object",
+                            "fields": [
+                              {
+                                "name": "index",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer"
+                                }
+                              },
+                              {
+                                "name": "codec",
+                                "required": true,
+                                "type": {
+                                  "kind": "string"
+                                }
+                              },
+                              {
+                                "name": "language",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "forced",
+                                "required": true,
+                                "type": {
+                                  "kind": "boolean"
+                                }
+                              },
+                              {
+                                "name": "path",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "skipped",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "detail",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "events",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "fonts_lost",
+                                "required": true,
+                                "type": {
+                                  "kind": "boolean"
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "name": "crop",
+                        "required": true,
+                        "type": {
+                          "kind": "object",
+                          "nullable": true,
+                          "fields": [
+                            {
+                              "name": "applied",
+                              "required": true,
+                              "type": {
+                                "kind": "boolean"
+                              }
+                            },
+                            {
+                              "name": "rect",
+                              "required": true,
+                              "type": {
+                                "kind": "string",
+                                "nullable": true
+                              }
+                            },
+                            {
+                              "name": "frame",
+                              "required": true,
+                              "type": {
+                                "kind": "string",
+                                "nullable": true
+                              }
+                            },
+                            {
+                              "name": "reason",
+                              "required": true,
+                              "type": {
+                                "kind": "string",
+                                "nullable": true
+                              }
+                            },
+                            {
+                              "name": "detail",
+                              "required": true,
+                              "type": {
+                                "kind": "string",
+                                "nullable": true
+                              }
+                            },
+                            {
+                              "name": "l5_zeroed",
+                              "required": true,
+                              "type": {
+                                "kind": "boolean"
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "name": "priority",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
                       }
                     ]
                   }
@@ -645,6 +1191,1990 @@
               },
               {
                 "name": "history_total",
+                "required": true,
+                "type": {
+                  "kind": "object",
+                  "fields": [
+                    {
+                      "name": "available",
+                      "required": true,
+                      "type": {
+                        "kind": "boolean"
+                      }
+                    },
+                    {
+                      "name": "unavailable",
+                      "required": true,
+                      "type": {
+                        "kind": "string"
+                      }
+                    },
+                    {
+                      "name": "covers",
+                      "required": true,
+                      "type": {
+                        "kind": "string"
+                      }
+                    },
+                    {
+                      "name": "cap",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "age_seconds",
+                      "required": true,
+                      "type": {
+                        "kind": "integer",
+                        "nullable": true
+                      }
+                    },
+                    {
+                      "name": "count",
+                      "required": true,
+                      "type": {
+                        "kind": "integer",
+                        "nullable": true
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "next_cursor",
+                "required": true,
+                "type": {
+                  "kind": "string",
+                  "nullable": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "rule",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "parameters",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "parameter",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "error",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/node/v1/leases",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "lease_id",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "epoch",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "ttl_sec",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "heartbeat_sec",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "mode",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "path",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "source_size",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "source_mtime_ns",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "encoder",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "pre",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "string"
+                  }
+                }
+              },
+              {
+                "name": "body",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "string"
+                  }
+                }
+              },
+              {
+                "name": "max_output_bytes",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 204,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 409,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 503,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/node/v1/leases/{id}/complete",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "state",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "output_bytes",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "output_digest",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "source_digest",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 404,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 409,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 410,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 503,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/node/v1/leases/{id}/fail",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "state",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 404,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 410,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 503,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/node/v1/leases/{id}/heartbeat",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "ttl_sec",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 404,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 410,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 503,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/node/v1/leases/{id}/output",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "state",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "output_bytes",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "output_digest",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 404,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 408,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 409,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 410,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 411,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 413,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 503,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/node/v1/leases/{id}/source",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/octet-stream",
+          "body": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "status": 206,
+          "media_type": "application/octet-stream",
+          "body": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 404,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 409,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 410,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 416,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 503,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "error",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "detail",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "server_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "worker_version",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/nodes",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "enabled",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "now",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "nodes",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "node",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mode",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "encoders",
+                        "required": true,
+                        "type": {
+                          "kind": "array",
+                          "nullable": true,
+                          "elem": {
+                            "kind": "string"
+                          }
+                        }
+                      },
+                      {
+                        "name": "waiting",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "cooling_until",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "leases_active",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "name": "leases",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "node",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "state",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "epoch",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "granted_at",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "updated_at",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "expires_at",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "ended_at",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "reason",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "source_bytes",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "output_bytes",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "name": "leases_total",
                 "required": true,
                 "type": {
                   "kind": "object",
@@ -1133,6 +3663,250 @@
                         "required": false,
                         "type": {
                           "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "audio_tracks",
+                        "required": true,
+                        "type": {
+                          "kind": "array",
+                          "nullable": true,
+                          "elem": {
+                            "kind": "object",
+                            "fields": [
+                              {
+                                "name": "source_index",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer"
+                                }
+                              },
+                              {
+                                "name": "output_index",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "action",
+                                "required": true,
+                                "type": {
+                                  "kind": "string"
+                                }
+                              },
+                              {
+                                "name": "reason",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "codec",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "layout",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "sample_rate",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "bitrate_kbps",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "loudness",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "measured_lufs",
+                                "required": true,
+                                "type": {
+                                  "kind": "number",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "achieved_lufs",
+                                "required": true,
+                                "type": {
+                                  "kind": "number",
+                                  "nullable": true
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "name": "subtitle_sidecars",
+                        "required": true,
+                        "type": {
+                          "kind": "array",
+                          "nullable": true,
+                          "elem": {
+                            "kind": "object",
+                            "fields": [
+                              {
+                                "name": "index",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer"
+                                }
+                              },
+                              {
+                                "name": "codec",
+                                "required": true,
+                                "type": {
+                                  "kind": "string"
+                                }
+                              },
+                              {
+                                "name": "language",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "forced",
+                                "required": true,
+                                "type": {
+                                  "kind": "boolean"
+                                }
+                              },
+                              {
+                                "name": "path",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "skipped",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "detail",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "events",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "fonts_lost",
+                                "required": true,
+                                "type": {
+                                  "kind": "boolean"
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "name": "crop",
+                        "required": true,
+                        "type": {
+                          "kind": "object",
+                          "nullable": true,
+                          "fields": [
+                            {
+                              "name": "applied",
+                              "required": true,
+                              "type": {
+                                "kind": "boolean"
+                              }
+                            },
+                            {
+                              "name": "rect",
+                              "required": true,
+                              "type": {
+                                "kind": "string",
+                                "nullable": true
+                              }
+                            },
+                            {
+                              "name": "frame",
+                              "required": true,
+                              "type": {
+                                "kind": "string",
+                                "nullable": true
+                              }
+                            },
+                            {
+                              "name": "reason",
+                              "required": true,
+                              "type": {
+                                "kind": "string",
+                                "nullable": true
+                              }
+                            },
+                            {
+                              "name": "detail",
+                              "required": true,
+                              "type": {
+                                "kind": "string",
+                                "nullable": true
+                              }
+                            },
+                            {
+                              "name": "l5_zeroed",
+                              "required": true,
+                              "type": {
+                                "kind": "boolean"
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "name": "priority",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
                         }
                       }
                     ]
@@ -2364,6 +5138,250 @@
                         "type": {
                           "kind": "string"
                         }
+                      },
+                      {
+                        "name": "audio_tracks",
+                        "required": true,
+                        "type": {
+                          "kind": "array",
+                          "nullable": true,
+                          "elem": {
+                            "kind": "object",
+                            "fields": [
+                              {
+                                "name": "source_index",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer"
+                                }
+                              },
+                              {
+                                "name": "output_index",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "action",
+                                "required": true,
+                                "type": {
+                                  "kind": "string"
+                                }
+                              },
+                              {
+                                "name": "reason",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "codec",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "layout",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "sample_rate",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "bitrate_kbps",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "loudness",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "measured_lufs",
+                                "required": true,
+                                "type": {
+                                  "kind": "number",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "achieved_lufs",
+                                "required": true,
+                                "type": {
+                                  "kind": "number",
+                                  "nullable": true
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "name": "subtitle_sidecars",
+                        "required": true,
+                        "type": {
+                          "kind": "array",
+                          "nullable": true,
+                          "elem": {
+                            "kind": "object",
+                            "fields": [
+                              {
+                                "name": "index",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer"
+                                }
+                              },
+                              {
+                                "name": "codec",
+                                "required": true,
+                                "type": {
+                                  "kind": "string"
+                                }
+                              },
+                              {
+                                "name": "language",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "forced",
+                                "required": true,
+                                "type": {
+                                  "kind": "boolean"
+                                }
+                              },
+                              {
+                                "name": "path",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "skipped",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "detail",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "events",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "fonts_lost",
+                                "required": true,
+                                "type": {
+                                  "kind": "boolean"
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "name": "crop",
+                        "required": true,
+                        "type": {
+                          "kind": "object",
+                          "nullable": true,
+                          "fields": [
+                            {
+                              "name": "applied",
+                              "required": true,
+                              "type": {
+                                "kind": "boolean"
+                              }
+                            },
+                            {
+                              "name": "rect",
+                              "required": true,
+                              "type": {
+                                "kind": "string",
+                                "nullable": true
+                              }
+                            },
+                            {
+                              "name": "frame",
+                              "required": true,
+                              "type": {
+                                "kind": "string",
+                                "nullable": true
+                              }
+                            },
+                            {
+                              "name": "reason",
+                              "required": true,
+                              "type": {
+                                "kind": "string",
+                                "nullable": true
+                              }
+                            },
+                            {
+                              "name": "detail",
+                              "required": true,
+                              "type": {
+                                "kind": "string",
+                                "nullable": true
+                              }
+                            },
+                            {
+                              "name": "l5_zeroed",
+                              "required": true,
+                              "type": {
+                                "kind": "boolean"
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "name": "priority",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
                       }
                     ]
                   }
@@ -3023,6 +6041,131 @@
                     }
                   ]
                 }
+              },
+              {
+                "name": "bytes_held_by_undo_window",
+                "required": true,
+                "type": {
+                  "kind": "integer",
+                  "nullable": true
+                }
+              },
+              {
+                "name": "roots",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "root",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "candidate_files",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "candidate_excluded",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "candidate_bytes",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "projection_basis_files",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "projected_savings_bytes",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "bytes_held_by_undo_window",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "free_bytes",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "name": "roots_unattributed",
+                "required": true,
+                "type": {
+                  "kind": "object",
+                  "fields": [
+                    {
+                      "name": "candidate_files",
+                      "required": true,
+                      "type": {
+                        "kind": "integer",
+                        "nullable": true
+                      }
+                    },
+                    {
+                      "name": "candidate_excluded",
+                      "required": true,
+                      "type": {
+                        "kind": "integer",
+                        "nullable": true
+                      }
+                    },
+                    {
+                      "name": "candidate_bytes",
+                      "required": true,
+                      "type": {
+                        "kind": "integer",
+                        "nullable": true
+                      }
+                    },
+                    {
+                      "name": "bytes_held_by_undo_window",
+                      "required": true,
+                      "type": {
+                        "kind": "integer",
+                        "nullable": true
+                      }
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -3046,6 +6189,2541 @@
           "media_type": "text/plain; charset=utf-8",
           "body": {
             "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/webhook/radarr",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 202,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 413,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 503,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/webhook/radarr",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 202,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 413,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 503,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/webhook/sonarr",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 202,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 413,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 503,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/webhook/sonarr",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 202,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 413,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 503,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "app",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "event_type",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "reason",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "mapped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/assets/*",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "*/*",
+          "body": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "status": 404,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
           }
         }
       ]
