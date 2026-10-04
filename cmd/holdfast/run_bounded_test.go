@@ -719,9 +719,16 @@ func startChild(t *testing.T, args ...string) *child {
 
 // waitFor polls until path exists, and fails if the child exits first: the case acts on
 // the moment the temp is there, never on a guess at how long that takes.
+//
+// The deadline is only a hang guard, so it is generous: a child that is getting there costs
+// no more for it, because the poll returns the moment the temp appears. Before its temp
+// exists the child (a -race binary) opens and migrates its store, runs its startup checks
+// and probes the source, all on the gate's TMPDIR, and with other gates saturating the
+// host's one disk that has taken more than the 2 minutes this once allowed: the `--limit`
+// case went red on "never appeared" with the child still alive and nothing wrong in the code.
 func (c *child) waitFor(t *testing.T, path string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Minute)
+	deadline := time.Now().Add(10 * time.Minute)
 	for {
 		if _, err := os.Lstat(path); err == nil {
 			return
