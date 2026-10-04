@@ -81,16 +81,16 @@ run on `main`.
 | # | Item | State |
 |---|---|---|
 | 5.1 | The dry-run dispatch on `main`, green, `publish` skipped, artifacts read | DONE (run 37166751433 on `c95dbb9`, `workflow_dispatch`, 01:01:43Z to 01:27:34Z, green): the plan line reads `publish=false  version=0.0.0-dev-c95dbb9`; the gate, both image builds and both smokes ran; the `publish` job is `skipped`; artifact `release-dist-0.0.0-dev-c95dbb9` holds both tarballs and `SHA256SUMS` (`sha256sum -c` OK), each tarball `holdfast`, `LICENSE`, `NOTICE`. CI on the same commit: run 37166745058 green (`build`, `package`; 01:01:36Z to 01:26:11Z) |
-| 5.2 | The tag `v0.4.0` pushed and its release run green | DOING: annotated `v0.4.0` on `c95dbb9` pushed 01:28Z; release run 37168110898 in progress |
-| 5.3 | The pull confirmed with `crane digest` (crane installed rootless through mise) | TODO |
-| 5.4 | The compose pin, the API schema baseline and `docs/release.md`'s record committed (track `holdfast-g15/release-record`) | TODO |
+| 5.2 | The tag `v0.4.0` pushed and its release run green | DONE (tag object `c6ca619a` on `c95dbb9`): release run 37168110898 green end to end, 01:28:21Z to 01:57:57Z, `build` and every step of `publish`; the GitHub release `v0.4.0` carries both tarballs and `SHA256SUMS` |
+| 5.3 | The pull confirmed with `crane digest` (crane installed rootless through mise) | DONE: `crane digest ghcr.io/nschatz/holdfast:v0.4.0` and `:latest` both print `sha256:019f4a722222428f95d285d96c63c9e2d15882c7d0941681d6f19b8cc9288c8b` (crane 0.22.1, no credentials); the index lists `linux/amd64` and `linux/arm64`; `crane pull --platform linux/amd64` wrote the image (D7) |
+| 5.4 | The compose pin, the API schema baseline and `docs/release.md`'s record committed (track `holdfast-g15/release-record`) | DONE (PR #172, `d3d1266`): `docker-compose.yml` pins `v0.4.0` by that digest; `docs/api-schema.json` records 36 endpoints at `holdfast v0.4.0`, taken on the tag; `docs/test-mass.md` re-recorded at `c95dbb9`; CI run 37169734040 green on `bf502da` (`build` 23m45s, `package` 4m10s), `mutation` green (run 37169734013); 0 fix rounds |
 
 ## Phase 6 - homelab (line E)
 
 | # | Item | State |
 |---|---|---|
-| 6.1 | A PR in the owner's private homelab repository, never merged, bringing its holdfast deployment and env example up to the release and the new keys | TODO |
-| 6.2 | Its item in the owner's queue | TODO |
+| 6.1 | A PR in the owner's private homelab repository, never merged, bringing its holdfast deployment and env example up to the release and the new keys | DONE (PR #249 in that repository, open, not merged; branch `holdfast-g15/release-v0.4.0`): the pin by digest, comments only in its configuration, every new key unset (D8); the released `v0.4.0` binary validates its configuration, exit 0 |
+| 6.2 | Its item in the owner's queue | DONE: queue #274 |
 
 ## Phase 7 - Hardware reports (line G)
 
@@ -102,7 +102,7 @@ run on `main`.
 
 | # | Item | State |
 |---|---|---|
-| 8.1 | `docs/program-report-2026-09-holdfast.md` with its sections | TODO |
+| 8.1 | `docs/program-report-2026-09-holdfast.md` with its sections | DONE (PR #172, `d3d1266`): sections The release, What was built, Tests and runtimes, NEEDS-OWNER, Proposals awaiting the owner, Follow-ups, Worker variables to remove |
 
 ## Phase 9 - Report
 
@@ -156,13 +156,30 @@ The owner's queue: open holdfast items at start are queue #50 to #56, #202 to #2
 
 ## Resume here
 
-Phases 1 to 3 are done (PR #171 merged as `c95dbb9`). The tag `v0.4.0` is pushed on `c95dbb9`
-and its release run 37168110898 is in flight: it is irreversible, never re-push or move the tag.
-Next, when it is green: `crane digest ghcr.io/nschatz/holdfast:v0.4.0`; then on the worktree
-`/cache/wt/holdfast/g15-release` (branch `holdfast-g15/release-record`, which already holds the
-re-recorded `docs/test-mass.md`, the `v0.4.0` `docs/api-schema.json` taken on the tag, and the
-program report with `<<...>>` placeholders) set the compose pin, record the release in
-`docs/release.md`, fill the placeholders, PR, CI, merge. Then the homelab PR from
-`/cache/wt/homelab/holdfast-g15` (branch `holdfast-g15/release-v0.4.0`, edits made, the digest is
-the placeholder `@@DIGEST@@`) and its queue item. The report draft is
-`/cache/tmp/holdfast-g15/program-report-draft.md`.
+STOPPED on 2026-10-04 at about 02:27Z, not finished: the goals session relayed that the owner is
+stopping every goal program to convert to a new harness. No GOAL REPORT was printed and this
+ledger has no COMPLETE line, on purpose. Nothing is half-done and no branch holds unpushed work.
+
+Done: PR #171 (`c95dbb9`, docs and the node test's race); the dry run 37166751433; the tag
+`v0.4.0` on `c95dbb9` and its green release run 37168110898 (irreversible: never move or re-push
+the tag); the digest `sha256:019f4a722222428f95d285d96c63c9e2d15882c7d0941681d6f19b8cc9288c8b`;
+PR #172 (`d3d1266`, the compose pin, the baseline, `docs/release.md`, test-mass, the program
+report); the homelab PR #249 (open, never merged) and queue #274. No PR of this goal is open in
+holdfast.
+
+Left, exactly:
+- Row 4.1: wait for CI on `origin/main`'s head (the push run after this ledger commit) and
+  record its link, result and wall-clock.
+- Row 7.1: `ls testdata/hw-reports/` showed only `README.md` at start; re-check, and the line
+  reads NEEDS-OWNER naming every hardware path (queue #51 to #56).
+- Row 9.1: gate integrity from `1507a2b`. As counted at `5e974b6`, before #172 (which changed
+  no Go file): 1 deleted `*_test.go` line (`f.stop()`, D6), `func Test` 2145 in 39 packages
+  with no package changed, 0 lines removed from the two design documents, 0 `co-authored-by`.
+  Re-count at the final head.
+- Row 9.2: hygiene. Queue #50's pull request was merged by the owner on 2026-10-03 and the item
+  is still open; the open holdfast items are #50 to #56, #202 to #204, #219 and #274. The
+  remote branches `holdfast-g15/docs` and `holdfast-g15/release-record` were still listed after
+  their squash merges: `git fetch --prune`, and delete them if they remain.
+- Row 9.3: the adversarial review of the report, then `goals check`, the COMPLETE line and the
+  GOAL REPORT.
+- The program report says the gate on `main`'s head at the goal's end is this ledger's row 4.1.
