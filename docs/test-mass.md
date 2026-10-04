@@ -18,35 +18,49 @@ against the tree, which is the failure a recorded number actually has.
 
 <!-- test-mass:begin - written by scripts/test-mass.sh; re-derive with scripts/test-mass.sh -check -->
 ```text
-commit 213258f058c416d60ac9d800028dc67958749bdb
+commit c95dbb9f00b4a2a9344c331cfbf1f834e67be860
 module github.com/NSchatz/holdfast
-production-lines 23474
-test-lines 56291
-test-to-production 2.40
-package cmd/holdfast 8304
-package internal/config 3543
-package internal/corpus 78
+production-lines 40683
+test-lines 104684
+test-to-production 2.57
+package cmd/holdfast 16332
+package internal/audio 949
+package internal/config 7100
+package internal/corpus 122
 package internal/cpuquota 312
+package internal/crop 901
 package internal/diskfree 81
-package internal/docscheck 673
-package internal/encoder 174
-package internal/engine 22424
+package internal/docscheck 729
+package internal/dynhdr 1093
+package internal/encoder 836
+package internal/engine 34360
 package internal/fsclass 139
-package internal/hdr 222
+package internal/hdr 554
+package internal/health 1026
 package internal/heapmeasure 105
-package internal/logging 34
+package internal/hwdevice 229
+package internal/logging 165
+package internal/mediaclient 1861
 package internal/memlimit 124
-package internal/metrics 874
-package internal/notify 383
-package internal/probe 707
+package internal/metrics 1152
+package internal/node 3752
+package internal/nodeworker 2151
+package internal/notify 453
+package internal/probe 937
+package internal/queuekey 172
 package internal/schedule 374
 package internal/secret 418
 package internal/secretscan 234
-package internal/server 5436
-package internal/sourceoffer 248
-package internal/startup 3034
-package internal/store 6584
-package internal/vmaf 1483
+package internal/server 11104
+package internal/sourceoffer 276
+package internal/startup 3580
+package internal/store 7977
+package internal/subtitle 573
+package internal/ui 279
+package internal/version 27
+package internal/vmaf 2156
+package scripts/clientreport 1284
+package scripts/hwreport 464
 package scripts/mutation-gate 303
 ```
 <!-- test-mass:end -->
