@@ -126,24 +126,32 @@ reasoning lives in the document, not in this file.
 - `scripts/hw-report.sh` + `scripts/hwreport` - the redacted hardware report the owner runs on a GPU host and
   commits under `testdata/hw-reports/`, and the test that proves no host identity survives in one.
 - `scripts/client-report.sh` + `scripts/clientreport` - the owner's redacted live check of Plex, Sonarr and Radarr, committed under `testdata/client-reports/`.
-- `scripts/` otherwise - `check-pins.sh` (the pins and the rename guard), `install-ffmpeg.sh` and `install-dynhdr-tools.sh` (the pinned tools),
+- `scripts/` otherwise - `pr-scope.sh` (what a pull request's CI runs), `check-pins.sh` (the pins and the rename guard), `install-ffmpeg.sh` and `install-dynhdr-tools.sh` (the pinned tools),
   `identity-scan.sh`, `govulncheck.sh`, `mutation.sh`, `api-schema`, `smoke-image.sh`, `test-mass.sh`, the release and compose-pin scripts, and a
   `*-selftest.sh` proving each gate still bites.
-- `Dockerfile`, `.github/workflows/ci.yml` - the multi-arch distroless image and the gate.
+- `Dockerfile`, `.github/workflows/ci.yml`, `.github/workflows/pr.yml` - the multi-arch distroless image, the nightly full gate and the changed-only PR checks.
 
 ## Build / test / gate
 
 Go 1.25+. The gate is `make check`, and the `check:` target IS its definition -
 read the target rather than any prose about it (`make tier-full` is `check`; `make tier-fast` its quick subset). The Makefile owns the tool pins
-and CI invokes the same target, so a PR, a release and a human run the identical thing.
+and CI invokes the same target, so the nightly run, a release and a human run the identical thing.
 
 **CI is where the gate runs, and the only place** ([`AMENDMENT-2026-10-03-owner-2026-09-holdfast.md`](https://github.com/NSchatz/holdfast/blob/2fd9d5986a101e4ae9d5394d2a42a3a158e3a4bf/.claude/goals/AMENDMENT-2026-10-03-owner-2026-09-holdfast.md)). On
 the development host no gate, tier, whole-package or `-race` suite or mutation run happens: push the branch, open the
-PR, and read CI (`build`, `package`, `mutation`; `ci.yml` also runs nightly on main). A PR merges when those checks are
-green on its branch with main merged in, with the run's link in the PR body. While working, one focused test (one
+PR, and read CI. A PR merges when its checks are green on its branch with main merged in, with the run's link in the
+PR body.
+
+**A PR runs only what its change touches, in 2 minutes or less** (`pr.yml`): `scripts/pr-scope.sh` picks the packages
+the diff touches and every package that depends on them, and each check or selftest whose inputs changed; the job
+prints its elapsed time and warns, never fails, past 2 minutes. internal/engine's real encodes never run on a PR (it
+is vetted only). A change to the Makefile, a workflow or `go.mod` runs every package and every check but the engine's.
+`mutation.yml` stays diff-scoped on every PR. **The full gate runs nightly on main** (`ci.yml`: `make check` with the
+engine suite, every selftest and the image smoke gate, plus `workflow_dispatch` to run it by hand); a red nightly
+run is fixed on main before anything else merges. While working, one focused test (one
 package, one `-run` filter) is the inner loop, not a gate.
 
-CI adds two things `check` deliberately does not: the config-schema self-test (proves `validate`
+The nightly run adds two things `check` deliberately does not: the config-schema self-test (proves `validate`
 reds on a bad config) and the image smoke gate (`scripts/smoke-image.sh`, needs Docker).
 
 The gate needs the pinned ffmpeg (`scripts/install-ffmpeg.sh`), and it is not

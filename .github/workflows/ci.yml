@@ -1,13 +1,11 @@
 name: CI
 
-# CI is the whole gate (the owner, 2026-10-03: "Holdfast and chorus NEED to use the public CI and
-# nothing local"): no tier runs on the development host. A PR merges when `build`, `package` and
-# `mutation` are green on its branch with main merged in; main is gated again on every push and
-# nightly (the full tier the goals supervisor used to run on the host).
+# THE FULL GATE, nightly on main and by hand (workflow_dispatch): `make check` with
+# internal/engine's real encodes, every selftest and the image smoke gate. CI is the only place
+# the gate runs (the owner, 2026-10-03: "Holdfast and chorus NEED to use the public CI and
+# nothing local"). A pull request does not wait for this: pr.yml runs only what its change
+# touches (the owner's rule: changed-only, 2 minutes). A red nightly run is fixed on main.
 on:
-  push:
-    branches: [main]
-  pull_request:
   schedule:
     - cron: '37 7 * * *'
   workflow_dispatch:
@@ -15,8 +13,8 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref; the nightly run has a group of its own, so a merge to main
-# never cancels it.
+# Cancel superseded runs on the same ref; the nightly run has a group of its own, so a dispatched
+# run never cancels it.
 concurrency:
   group: ci-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
   cancel-in-progress: true
@@ -143,8 +141,8 @@ jobs:
           done
           echo "config schema self-test OK (valid accepted; unknown-key, bad-value, daemon-level profile key and nested roots rejected)"
 
-  # The packaging gate. It runs on every PR the same script the release workflow runs
-  # before it pushes anything (scripts/smoke-image.sh), so the image a tag ships is the
+  # The packaging gate. It runs nightly (and on a PR that changes the image's inputs, pr.yml)
+  # the same script the release workflow runs before it pushes anything (scripts/smoke-image.sh), so the image a tag ships is the
   # image that has been gated all along.
   #
   # It does NOT check that the image built — that proves nothing about the engine. It
