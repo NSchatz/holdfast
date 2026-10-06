@@ -662,7 +662,8 @@ type Config struct {
 
 	// --- worker pool (TRANSCODE-5) ---
 
-	// Workers is the number of concurrent encode workers RunOneshot fans out to.
+	// Workers is how many files this process encodes itself at once, across every route
+	// that feeds the engine (the scan, targeted submissions and the watch).
 	// 0 (absent/default) means 1 - the original sequential behaviour. Raising it is an
 	// explicit opt-in. Use EffectiveWorkers() to read the resolved value.
 	//

@@ -119,12 +119,12 @@ func (p vmafThreadPlan) announce(log *slog.Logger) {
 
 // vmafThreadCount is the share a gate starting NOW asks for, and it is never below 1.
 //
-// The divisor is the larger of the configured workers and the files in flight. A oneshot
-// run never has more files in flight than workers, so it asks for exactly what the plan
-// states. The daemon runs more than one pool over the same engine - the scan's workers,
-// the submission queue's and the watch's, each `workers` wide - and when they have more
-// files in flight between them than one pool's width, every gate that starts divides the
-// quota by all of them rather than by the width of the pool it happens to come from.
+// The divisor is the larger of the configured workers and the files in flight. The scan's
+// workers, the submission queue's and the watch's share one engine-wide bound of `workers`
+// local jobs (holdLocalSlot), so local jobs alone never put more files in flight than
+// workers, and such a run asks for exactly what the plan states. A node's output is gated
+// on this server too, beside those, inside a node gate slot; when those put more files in
+// flight than workers, every gate that starts divides the quota by all of them.
 //
 // The floor of 1 is the same statement deriveVmafThreads makes on an unreadable quota,
 // applied where the count is READ: libvmaf reads 0 as its own default rather than as a

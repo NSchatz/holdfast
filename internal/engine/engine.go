@@ -467,6 +467,12 @@ type Engine struct {
 	// nodeGate is the node gate slots (node_gate_slots), built on first use.
 	nodeGate     *nodeGate
 	nodeGateOnce sync.Once
+	// localSlotPool is the engine-wide bound on local jobs, `workers` slots shared by every
+	// pool (localslots.go), built on first use.
+	localSlotPool  chan struct{}
+	localSlotsOnce sync.Once
+	// pausePoll, when positive, replaces DefaultPausePoll, so a test need not wait it out.
+	pausePoll time.Duration
 	// nodeAttempts remembers, per path, the node attempts that failed in this process, for
 	// the one record that names them when the retry bound parks the file.
 	nodeAttemptsMu   sync.Mutex
@@ -647,8 +653,10 @@ type Engine struct {
 	readDirFn func(dir string) ([]os.DirEntry, error)
 
 	// Paused, when non-nil and returning true, tells scanOnce to stop feeding NEW files to
-	// workers this pass. It is checked between files only: an in-flight encode is NEVER
-	// interrupted, and paused work is left pending for the next scan after resume.
+	// workers this pass, and holds a targeted submission's or the watch's file waiting before
+	// it starts (holdLocalSlot). It is checked between files only: an in-flight encode is
+	// NEVER interrupted, paused scan work is left pending for the next scan after resume, and
+	// a waiting submitted or watched file starts once it turns false.
 	Paused func() bool
 
 	// PlayHold, when non-nil, answers whether a media server is playing path right now, and
@@ -1475,7 +1483,9 @@ func (e *Engine) logLeftTemp(mode sweepMode, msg, path string, v *ownerVerdict) 
 }
 
 // scanOnce walks the roots and fans what it finds out to a pool of workers
-// (Cfg.EffectiveWorkers(), minimum 1) AS IT FINDS IT. A cancelled ctx stops workers pulling
+// (Cfg.EffectiveWorkers(), minimum 1) AS IT FINDS IT. Each local job also holds one of the
+// engine-wide slots every pool shares (holdLocalSlot), so the scan and the daemon's other pools
+// together run at most `workers` local jobs. A cancelled ctx stops workers pulling
 // new files and kills the in-flight ffmpeg subprocess through exec.CommandContext.
 //
 // The enumeration and the feed are the same loop, run on THIS goroutine: the workers start
@@ -1519,6 +1529,15 @@ func (e *Engine) scanOnce(ctx context.Context, pass *listings, bud *budget) (map
 		defer bud.releaseSlot(slot)
 		if ctx.Err() != nil {
 			return true
+		}
+		// A local job holds one of the engine-wide `workers` slots for the whole file; a
+		// node feeder's job is bounded by the node gate instead (localslots.go).
+		if nodeJobFrom(pctx) == nil {
+			release, err := e.holdLocalSlot(pctx, false)
+			if err != nil {
+				return true
+			}
+			defer release()
 		}
 		if err := e.ProcessFile(fctx, workerID, f); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

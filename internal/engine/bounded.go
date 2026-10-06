@@ -220,6 +220,11 @@ func (e *Engine) sweepOrphanedTemps(ctx context.Context) map[string]bool {
 // attributed exactly as a scan's would be rather than under a name only this path uses.
 func (e *Engine) processOne(ctx context.Context, path string) error {
 	e.Log.Info("bounded run: carrying one file to a terminal outcome", "file", path)
+	release, err := e.holdLocalSlot(ctx, false)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := e.ProcessFile(ctx, "w0", path); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err

@@ -617,6 +617,14 @@ func (w *Watches) drain(ctx context.Context, worker string) {
 // and the swap discipline are all on the other side of that door, which is precisely why
 // the watch reaches them without holding a second copy of any of them.
 func (w *Watches) process(ctx context.Context, worker, path string) {
+	// The same wait a targeted submission makes: the gates the scan feed stops on, then one
+	// of the engine-wide `workers` slots. A cancellation while waiting records nothing, and
+	// the next interval scan finds the file.
+	release, err := w.eng.holdLocalSlot(ctx, true)
+	if err != nil {
+		return
+	}
+	defer release()
 	if err := w.eng.ProcessFile(ctx, worker, path); err != nil {
 		w.log.Warn("a watched file ended with an error", "file", path, "err", err)
 	}

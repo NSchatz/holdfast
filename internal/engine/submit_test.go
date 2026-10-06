@@ -399,6 +399,9 @@ func TestTargetedSubmissionIsMutuallyExclusiveWithAScan(t *testing.T) {
 
 		ts := newTestStore(t, root)
 		cfg := baseCfg(root)
+		// Two engine-wide workers, so neither job waits for the other's slot: the race
+		// this case is about is two jobs in flight on one path at once.
+		cfg.Workers = 2
 		prober := probe.New(ffmpeg, ffprobe)
 		enc := gatedFFmpeg(ffmpeg, cfg, prober)
 		enc.started, enc.release = make(chan string, 4), make(chan struct{})
@@ -453,6 +456,9 @@ func TestTargetedSubmissionIsMutuallyExclusiveWithAScan(t *testing.T) {
 
 		ts := newTestStore(t, root)
 		cfg := baseCfg(root)
+		// Two engine-wide workers, so neither job waits for the other's slot: the race
+		// this case is about is two jobs in flight on one path at once.
+		cfg.Workers = 2
 		prober := probe.New(ffmpeg, ffprobe)
 		enc := gatedFFmpeg(ffmpeg, cfg, prober)
 		enc.started, enc.release = make(chan string, 4), make(chan struct{})
