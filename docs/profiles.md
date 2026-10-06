@@ -986,4 +986,6 @@ plain HTTP.
 ## Where the working file lives
 
 `scratch_dir` is a separate question - it moves where the encode WORKS, not what it
-produces. See [docs/scratch.md](scratch.md).
+produces. A library_roots entry may name its own, which replaces the top-level one for that
+root; like `priority` it is in no profile digest and editing it re-opens no row. See
+[docs/scratch.md](scratch.md#per-root).

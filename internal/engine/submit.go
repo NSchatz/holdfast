@@ -105,8 +105,10 @@ type Submissions struct {
 }
 
 // NewSubmissions builds the queue for this engine. workers bounds how many submitted
-// files are encoded at once and defaults to the engine's own worker count, so a targeted
-// submission costs the host what a scan costs it; capacity bounds how many may wait.
+// files are encoded at once and defaults to the engine's own worker count, and every one of
+// them also holds one of the engine-wide slots the scan and the watch share (holdLocalSlot),
+// so a targeted submission never adds to what a scan costs the host; capacity bounds how
+// many may wait.
 //
 // It registers the claim observer, which is the one signal this package needs from the
 // pipeline and which nothing else uses.
@@ -163,6 +165,9 @@ func (s *Submissions) Pending() int { return len(s.ch) }
 
 // Run drains the queue until ctx is cancelled. It is the serve command's driver and runs
 // in the caller's goroutine, exactly as the hub's does.
+//
+// A path taken off the channel while Paused says stop - pause, run_window or max_load -
+// WAITS for it to clear, and then for an engine-wide slot, before it is processed.
 //
 // A cancelled ctx stops the pool taking NEW work; a file already being processed finishes
 // through ProcessFile's own cancellation discipline (the in-flight ffmpeg is killed, its
@@ -230,6 +235,14 @@ func (s *Submissions) Results() []SubmissionResult {
 // decides anything about the file: ProcessFile is called unconditionally, whatever that
 // read said, so there is no fast path and no second answer to a question Claim owns.
 func (s *Submissions) process(ctx context.Context, worker, path string) {
+	// Wait for the gates the scan feed stops on, then for one of the engine-wide `workers`
+	// slots. A cancellation while waiting is the shutdown dropping a path nothing has looked
+	// at yet, exactly as drain drops its backlog: nothing is recorded, not even a result.
+	release, err := s.eng.holdLocalSlot(ctx, true)
+	if err != nil {
+		return
+	}
+	defer release()
 	before, _, exists, err := s.eng.Store.Get(ctx, path, probe.Fingerprint(path))
 	if err != nil || !exists {
 		before = ""

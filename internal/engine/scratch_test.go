@@ -576,3 +576,68 @@ func TestScratchWorkPath_IsStablePerSourceAndDistinctAcrossDirectories(t *testin
 		t.Fatalf("a truncated working name is no longer this build's construction: %s", filepath.Base(p))
 	}
 }
+
+// A library root's own scratch_dir (docs/scratch.md#per-root): the encoder writes a
+// source under that root into the root's own working location and nowhere beside the
+// source, a root that replaces it with "" encodes beside the source again, and the
+// start-of-run sweep reaches every working location a root names.
+func TestScratch_ARootsOwnScratchDirIsWhereItsEncodesAreWritten(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	films, tv := filepath.Join(d, "disk1", "films"), filepath.Join(d, "disk1", "tv")
+	work := filepath.Join(d, "disk1", ".holdfast", "work")
+	for _, p := range []string{films, tv, work} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	film, ep := filepath.Join(films, "film.mkv"), filepath.Join(tv, "ep.mkv")
+	mkH264(t, ffmpeg, film, "8M")
+	mkH264(t, ffmpeg, ep, "8M")
+	orphan := scratchWorkPath(work, filepath.Join(films, "gone.mkv"), "mkv", 0)
+	if err := os.WriteFile(orphan, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	beside := ""
+	eng := buildEngine(t, ffmpeg, ffprobe, films, nil, func(c *config.Config) {
+		c.LibraryRoots = []string{films, tv}
+		c.Roots = c.RootProfiles()
+		c.Roots[0].ScratchDir = &work
+		c.Roots[1].ScratchDir = &beside
+	})
+	var filmDirAtEncode []string
+	rec := &realEncode{
+		enc: FFmpegEncoder{FFmpeg: ffmpeg, Cfg: eng.Cfg, Probe: eng.Probe},
+		before: func(in, out string) {
+			if in == film {
+				filmDirAtEncode = listDir(t, films)
+			}
+		},
+	}
+	eng.Enc = rec
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	if exists(orphan) {
+		t.Errorf("the sweep did not reach the root's own working location: %s survived", orphan)
+	}
+	if wrote := rec.outFor(t, film); filepath.Dir(wrote) != work {
+		t.Errorf("the encoder wrote %s to %s, want the root's own scratch_dir %s", film, wrote, work)
+	}
+	if len(filmDirAtEncode) != 1 || filmDirAtEncode[0] != "film.mkv" {
+		t.Errorf("at encode time the film's directory held %v, want only the source", filmDirAtEncode)
+	}
+	if wrote, want := rec.outFor(t, ep), tempPath(tv, "ep", "mkv", 0); wrote != want {
+		t.Errorf("the encoder wrote %s to %s, want beside the source (%s) under scratch_dir: \"\"", ep, wrote, want)
+	}
+	for dir, want := range map[string]string{films: "film.mkv", tv: "ep.mkv"} {
+		if got := listDir(t, dir); len(got) != 1 || got[0] != want {
+			t.Errorf("after the run %s holds %v, want just the swapped %s", dir, got, want)
+		}
+	}
+	if got := listDir(t, work); len(got) != 0 {
+		t.Errorf("the root's working location holds %v after the run, want nothing", got)
+	}
+}

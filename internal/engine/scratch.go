@@ -287,10 +287,14 @@ func fileDigest(path string) (string, int64, error) {
 // duplicate of bytes that already reached the source's directory. The source, or the
 // file the swap left in its place, is still there in both cases.
 func (e *Engine) cleanScratch(ctx context.Context) {
-	dir := strings.TrimSpace(e.Cfg.ScratchDir)
-	if dir == "" {
-		return
+	for _, dir := range e.Cfg.ScratchDirs() {
+		e.cleanScratchDir(ctx, dir)
 	}
+}
+
+// cleanScratchDir is cleanScratch for one working location: the top-level scratch_dir,
+// or one a library_roots entry names.
+func (e *Engine) cleanScratchDir(ctx context.Context, dir string) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		e.Log.Warn("could not list the scratch directory to sweep it (continuing)", "scratch_dir", dir, "err", err)

@@ -554,7 +554,12 @@ func TestWatch_EnqueuesThroughTheSameClaimedPath(t *testing.T) {
 			started: make(chan string, 1),
 			release: make(chan struct{}),
 		}
-		eng := buildEngine(t, ffmpeg, ffprobe, root, gate, func(c *config.Config) { watchedRoots(c, 0) })
+		// Two workers, so the watch's job is not held waiting for the scan's slot: the race
+		// this case is about is two jobs in flight on one path at once.
+		eng := buildEngine(t, ffmpeg, ffprobe, root, gate, func(c *config.Config) {
+			watchedRoots(c, 0)
+			c.Workers = 2
+		})
 		eng.SetCoverage([]string{root}, nil)
 		var claims atomic.Int32
 		eng.onClaim = func(string, string) { claims.Add(1) }

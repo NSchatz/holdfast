@@ -390,6 +390,13 @@ func printResolvedProfiles(w io.Writer, cfg *config.Config) {
 		if r.Priority != nil {
 			fmt.Fprintf(w, "  %-20s %-24d from this root's entry (orders its files only)\n", "priority", *r.Priority)
 		}
+		if r.ScratchDir != nil {
+			where := *r.ScratchDir
+			if where == "" {
+				where = `""`
+			}
+			fmt.Fprintf(w, "  %-20s %-24s from this root's entry (where its encodes are written only)\n", "scratch_dir", where)
+		}
 		printRules(w, r)
 	}
 }
@@ -463,13 +470,13 @@ func printPathFilters(w io.Writer, r config.Root) {
 // refuse. With no scratch_dir configured it checks nothing at all and returns 0, so a
 // configuration that predates this item is unchanged.
 func validateScratch(cfg *config.Config, stderr io.Writer) int {
-	if strings.TrimSpace(cfg.ScratchDir) == "" {
+	if len(cfg.ScratchDirs()) == 0 {
 		return 0
 	}
 	res := startup.RunScratchOnly(startup.Check{
 		Roots:            cfg.LibraryRoots,
 		StateDir:         stateDirPath(cfg),
-		ScratchDir:       cfg.ScratchDir,
+		ScratchDirs:      cfg.ScratchDirs(),
 		ScratchMinFreeGB: cfg.ScratchMinFreeGB,
 		Platform:         startupPlatform(),
 	})
@@ -1070,7 +1077,7 @@ func startupDecisionScoped(cfg *config.Config, scope classifyScope) startup.Resu
 		// anything is encoded: a scratch directory that is missing, is not a
 		// directory, is unwritable, is short of the floor or overlaps a library
 		// root refuses the run here rather than failing every file mid-encode.
-		ScratchDir:       cfg.ScratchDir,
+		ScratchDirs:      cfg.ScratchDirs(),
 		ScratchMinFreeGB: cfg.ScratchMinFreeGB,
 		Platform:         startupPlatform(),
 	})

@@ -89,7 +89,7 @@ a filesystem boundary rather than copying across it. One swap shape, on every mo
 
 <a id="scratch-benefit"></a>
 
-Four things, all of them about the SHAPE of the I/O rather than its volume:
+Five things, all of them about the SHAPE of the I/O rather than its volume:
 
 - **Seek thrash avoided on a spinning disk.** Without a scratch directory a large
   sequential read and a large sequential write interleave on one spindle for the
@@ -103,6 +103,11 @@ Four things, all of them about the SHAPE of the I/O rather than its volume:
   or a run that is killed halfway, costs the array nothing at all.
 - **A better write pattern over NFS or SMB.** One streamed copy rather than an
   encoder's write pattern over the wire.
+- **A media server's change detection left quiet.** A server that rescans a folder on
+  any change in it (Plex's partial scan, for one) reacts to every write an encoder makes
+  to a working file beside the source, for the whole encode, even though the working
+  file's name keeps it out of the library. With a scratch directory outside the library
+  folders the folder changes twice: when the accepted copy lands and when it is renamed.
 
 What it costs is a full **write-plus-read cycle** on the scratch device that would not
 otherwise happen: the encode is written there and then read back to be copied beside
@@ -121,9 +126,39 @@ of which survives that arithmetic:
 Reach for it because your array hates the write pattern, not because you think it
 spares the drive.
 
+<a id="per-root"></a>
+
+## One per library root
+
+A `library_roots` entry may carry its own `scratch_dir`, which REPLACES the top-level one
+for that root's files. `""` there writes that root's encodes beside the source again; an
+entry that names none inherits the top-level value. It decides where an encode is written
+and nothing about what is encoded, so, like `priority`, it is in no profile digest and
+editing it re-opens no row.
+
+```yaml
+library_roots:
+  - path: /mnt/disk1/movies
+    scratch_dir: /mnt/disk1/.holdfast/work
+  - path: /mnt/disk1/tv
+    scratch_dir: /mnt/disk1/.holdfast/work
+  - path: /mnt/disk2/movies
+    scratch_dir: /mnt/disk2/.holdfast/work
+```
+
+That shape - each drive's own working directory, on the drive, outside its library
+folders - is the one for a library spread over several drives whose folders a media
+server watches: the encoder's writes stay out of the watched folders, and no drive's
+encodes are carried to another drive and back. Nothing else changes. Each value is held
+to every rule below, the same file is never checked twice when roots share it, each is
+swept at start, and the swap is the copy back and the same same-directory rename, even
+though the two directories share a filesystem: one swap shape on every mount
+([design/swap.md](design/swap.md#swap-invariant)). The copy costs a write and a read of
+the accepted encode on that drive, once per transcode.
+
 ## Startup refuses rather than failing mid-encode
 
-A configured `scratch_dir` is checked in the same start-or-refuse decision as the
+Every configured `scratch_dir`, the top-level one and each one an entry names, is checked in the same start-or-refuse decision as the
 library roots and the state directory - before the first encode, before the job store
 is opened, and before anything is created, renamed or removed. The run is refused,
 non-zero, naming the path, the cause and the remedy, if the directory:
@@ -132,7 +167,7 @@ non-zero, naming the path, the cause and the remedy, if the directory:
 - cannot be inspected;
 - **is a library root, is beneath one, or has one beneath it** (compared after
   symlink resolution). A working area inside the tree holdfast scans is on the same
-  storage and delivers none of the four benefits above;
+  storage and delivers none of the benefits above;
 - has less free space than `scratch_min_free_gb`;
 - cannot be written to by the running user.
 
@@ -183,8 +218,10 @@ for a week.
 
 ## Housekeeping
 
-Working files a killed run left in the scratch directory are discarded when the next
-run starts, under the same hold-back exceptions the in-place sweep applies: a path a
+Working files a killed run left in a scratch directory are discarded when the next
+run starts, in every scratch directory some root's files are written to - a directory the
+configuration no longer names, at the top level or in any entry, is not swept, and what a
+killed run left there stays until it is removed by hand. They are discarded under the same hold-back exceptions the in-place sweep applies: a path a
 live record holds back is left alone, and so is a replacement holdfast retained. The
 copy made beside the source is built by the existing temp construction, so the
 stale-temp sweep, the record-based hold-backs and the record-free stray-replacement
