@@ -1538,6 +1538,13 @@ func (e *Engine) scanOnce(ctx context.Context, pass *listings, bud *budget) (map
 				return true
 			}
 			defer release()
+			// The feed handed this file out while it could run, but it may have waited for
+			// the slot behind another route's job for as long as that job took. A stop that
+			// landed meanwhile holds it back: nothing was claimed, and the next scan offers
+			// it again, which is what a file the feed did not hand out gets.
+			if e.Paused != nil && e.Paused() {
+				return false
+			}
 		}
 		if err := e.ProcessFile(fctx, workerID, f); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

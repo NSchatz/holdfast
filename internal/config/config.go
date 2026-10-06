@@ -1839,8 +1839,9 @@ func (c *Config) validateRest() error {
 		return err
 	}
 	// The knobs that are NOT per-root, checked once, here. A library root's profile may
-	// not carry any of these - the target bitrate, the encode profiles or the scratch
-	// location - so there is no per-root pass for them to be checked in.
+	// not carry any of these - the target bitrate or the encode profiles - so there is no
+	// per-root pass for them to be checked in. A root's own scratch_dir is not a profile
+	// knob, and validateScratch checks every one.
 	//
 	// A negative bitrate has no reading: it is neither "use the quality target" (0)
 	// nor a rate. Refused BY NAME rather than clamped, on a knob whose whole job is

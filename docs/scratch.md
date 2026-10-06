@@ -218,8 +218,10 @@ for a week.
 
 ## Housekeeping
 
-Working files a killed run left in the scratch directory are discarded when the next
-run starts, under the same hold-back exceptions the in-place sweep applies: a path a
+Working files a killed run left in a scratch directory are discarded when the next
+run starts, in every scratch directory some root's files are written to - a directory the
+configuration no longer names, at the top level or in any entry, is not swept, and what a
+killed run left there stays until it is removed by hand. They are discarded under the same hold-back exceptions the in-place sweep applies: a path a
 live record holds back is left alone, and so is a replacement holdfast retained. The
 copy made beside the source is built by the existing temp construction, so the
 stale-temp sweep, the record-based hold-backs and the record-free stray-replacement

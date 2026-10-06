@@ -241,3 +241,59 @@ func TestSubmissionWaitsWhilePaused(t *testing.T) {
 		t.Fatalf("a submission cancelled while paused was reported (%d result(s))", n)
 	}
 }
+
+// TestAScanFileWaitingForASlotDoesNotStartOnceStopped: a file the scan feed handed out while
+// it could run, then waited for the only slot behind a submission's job, does not start if a
+// stop (pause, run_window, max_load) landed while it waited. It is left for the next scan.
+func TestAScanFileWaitingForASlotDoesNotStartOnceStopped(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root := t.TempDir()
+	a, b := filepath.Join(root, "a.mp4"), filepath.Join(root, "b.mp4")
+	s0163Copies(t, ffmpeg, a)
+	enc := newHeldEncoder()
+	eng, _ := buildEngineAndStore(t, ffmpeg, ffprobe, root, enc, func(c *config.Config) { c.Workers = 1 })
+	var paused atomic.Bool
+	var asked atomic.Int32
+	eng.Paused = func() bool { asked.Add(1); return paused.Load() }
+	subs := eng.NewSubmissions(0, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	subsDone := make(chan struct{})
+	go func() { defer close(subsDone); subs.Run(ctx) }()
+	offerOne(t, subs, a)
+	if got := enc.awaitStart(t, "the submitted file"); got != a {
+		t.Fatalf("the first encode was of %s, want %s", got, a)
+	}
+
+	s0163Copies(t, ffmpeg, b)
+	before := asked.Load()
+	scanDone := make(chan error, 1)
+	go func() { scanDone <- eng.RunOneshot(ctx) }()
+	// The feed asks Paused before it hands b out; past that, b's worker is at the slot.
+	deadline := time.Now().Add(s0163Guard)
+	for asked.Load() == before {
+		if time.Now().After(deadline) {
+			t.Fatal("the scan feed never asked whether it may hand a file out")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	paused.Store(true)
+	close(enc.release)
+
+	enc.refuteStart(t, "after a stop landed while it waited for the slot")
+	select {
+	case err := <-scanDone:
+		if err != nil {
+			t.Fatalf("RunOneshot: %v", err)
+		}
+	case <-time.After(s0163Guard):
+		t.Fatal("the scan never ended")
+	}
+	cancel()
+	<-subsDone
+	if !exists(b) {
+		t.Fatalf("the held-back file %s is gone", b)
+	}
+}
