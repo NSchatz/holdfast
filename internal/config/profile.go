@@ -144,7 +144,7 @@ func isProfileKnob(key string) bool {
 func entryKeyList() string {
 	keys := append(append([]string(nil), profileKnobs...), filterKeys...)
 	keys = append(keys, watchKeys...)
-	return strings.Join(append(keys, rulesKey, priorityKey), ", ")
+	return strings.Join(append(keys, rulesKey, priorityKey, scratchDirKey), ", ")
 }
 
 // rootPathKey is the one key inside an entry that is not a knob: which tree the profile
@@ -620,6 +620,12 @@ type Root struct {
 	// decision input, and editing it re-opens no row.
 	Priority *int
 
+	// ScratchDir is the working location this root's entry names (scratch.go), nil where
+	// it names none and the top-level scratch_dir applies. Like the priority it is NOT
+	// part of the profile: it decides where the encode is written, never what is
+	// encoded, so it is in no digest and editing it re-opens no row.
+	ScratchDir *string
+
 	// Layers says which of the three layers supplied each knob's resolved value, keyed
 	// by the knob's config key. It is what `holdfast validate` prints beside each value,
 	// so the printed configuration states not only what the inheritance produced but
@@ -697,6 +703,10 @@ type rootEntry struct {
 	// priority is the entry's queue priority, nil where it names none. Parsed out of the
 	// entry for rules' reason: it inherits from nothing.
 	priority *int
+
+	// scratchDir is the entry's working location, nil where it names none. Parsed out
+	// of the entry for priority's reason: it is in no profile.
+	scratchDir *string
 }
 
 // parseRootEntries turns the raw library_roots value into entries, refusing anything
@@ -793,6 +803,7 @@ func parseRootMapping(i int, m map[string]any, file string) (rootEntry, error) {
 	// iteration reaches the two keys in either order.
 	watchRaw := map[string]any{}
 	var priority *int
+	var scratchDir *string
 	for key, val := range m {
 		if key == rootPathKey {
 			continue
@@ -805,6 +816,16 @@ func parseRootMapping(i int, m map[string]any, file string) (rootEntry, error) {
 				return rootEntry{}, err
 			}
 			priority = &v
+			continue
+		}
+		// `scratch_dir` moves where this root's encodes are written and decides nothing
+		// about them, so it is read here, like the priority, and never reaches the knob map.
+		if key == scratchDirKey {
+			v, err := scratchDirValue(where, val)
+			if err != nil {
+				return rootEntry{}, err
+			}
+			scratchDir = &v
 			continue
 		}
 		// `rules` is neither a knob nor a filter: it is a LIST of per-band overrides, so it
@@ -869,6 +890,7 @@ func parseRootMapping(i int, m map[string]any, file string) (rootEntry, error) {
 	e.rules = rules
 	e.watch = w
 	e.priority = priority
+	e.scratchDir = scratchDir
 	return e, nil
 }
 
@@ -930,13 +952,14 @@ func resolveRoots(k *koanf.Koanf, entries []rootEntry, explicitTop map[string]bo
 		// than joining them: a rule has no top-level counterpart and no layer of its own.
 		p.Rules = e.rules
 		roots = append(roots, Root{
-			Path:     e.path,
-			Clean:    filepath.Clean(e.path),
-			Profile:  p,
-			Filters:  resolveFilters(k, e, explicitTop),
-			Watch:    e.watch,
-			Priority: e.priority,
-			Layers:   layers,
+			Path:       e.path,
+			Clean:      filepath.Clean(e.path),
+			Profile:    p,
+			Filters:    resolveFilters(k, e, explicitTop),
+			Watch:      e.watch,
+			Priority:   e.priority,
+			ScratchDir: e.scratchDir,
+			Layers:     layers,
 		})
 	}
 	return roots, nil

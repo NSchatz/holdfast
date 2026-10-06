@@ -2046,12 +2046,23 @@ func (c *Config) validateScratch() error {
 	if c.ScratchMinFreeGB < 0 {
 		return fmt.Errorf("scratch_min_free_gb %d must be >= 0 (0 disables the free-space floor)", c.ScratchMinFreeGB)
 	}
-	dir := strings.TrimSpace(c.ScratchDir)
-	if dir == "" {
-		return nil
-	}
-	if !filepath.IsAbs(dir) {
+	if dir := strings.TrimSpace(c.ScratchDir); dir != "" && !filepath.IsAbs(dir) {
 		return fmt.Errorf("scratch_dir %q must be an absolute path", c.ScratchDir)
+	}
+	// Every working location a root's files are written to, the top-level one and each
+	// one a library_roots entry names, is held to the same rule.
+	for _, dir := range c.ScratchDirs() {
+		if err := validateScratchDir(dir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateScratchDir is validateScratch's path rule for one working location.
+func validateScratchDir(dir string) error {
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("scratch_dir %q must be an absolute path", dir)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -2165,8 +2176,8 @@ func (c *Config) Notices() []string {
 	// wrote it believes the pool follows the quota. It is a NOTICE on this file's own rule:
 	// no gate is weakened, the pool runs exactly the number workers names.
 	n = append(n, c.coresPerWorkerNotice()...)
-	if strings.TrimSpace(c.ScratchDir) != "" {
-		n = append(n, "scratch_dir is set - the encoder writes its working file to "+strings.TrimSpace(c.ScratchDir)+
+	if dirs := c.ScratchDirs(); len(dirs) > 0 {
+		n = append(n, "scratch_dir is set - the encoder writes its working file to "+strings.Join(dirs, ", ")+
 			" and the accepted result is COPIED BACK into a temp beside the source before the swap. The swap itself is "+
 			"unchanged: it is still an atomic rename within the source's own directory. The scratch device therefore pays "+
 			"a full write-plus-read cycle per transcode, at video-file sizes.")

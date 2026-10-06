@@ -194,6 +194,36 @@ func TestValidate_ReportsTheScratchDirectoryCausesRunWouldRefuseOn(t *testing.T)
 			t.Fatalf("validate left %d file(s) in the scratch directory", len(ents))
 		}
 	})
+
+	// A library root's own scratch_dir is held to the same causes, and `validate` prints
+	// it under the root that names it.
+	t.Run("a root's own scratch directory", func(t *testing.T) {
+		missing := filepath.Join(dir, "disk2-work")
+		body := "library_roots:\n  - path: " + lib + "\n    scratch_dir: " + missing + "\n" +
+			"state_dir: " + filepath.Join(dir, "state") + "\nscratch_min_free_gb: 0\n"
+		p := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var out, errOut bytes.Buffer
+		if code := dispatch([]string{"validate", "--config", p}, &out, &errOut); code == 0 {
+			t.Fatalf("validate exited 0 for a root's scratch directory that does not exist:\n%s", out.String())
+		}
+		if !strings.Contains(errOut.String(), missing) {
+			t.Errorf("the account does not name %s:\n%s", missing, errOut.String())
+		}
+		if err := os.MkdirAll(missing, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		out.Reset()
+		errOut.Reset()
+		if code := dispatch([]string{"validate", "--config", p}, &out, &errOut); code != 0 {
+			t.Fatalf("validate exited %d once it exists (stderr: %s)", code, errOut.String())
+		}
+		if !regexp.MustCompile(`(?m)^\s+scratch_dir\s+` + regexp.QuoteMeta(missing) + `\s+from this root's entry`).MatchString(out.String()) {
+			t.Errorf("validate does not print the root's scratch_dir:\n%s", out.String())
+		}
+	})
 }
 
 var flagLine = regexp.MustCompile(`(?m)^\s+-([A-Za-z0-9][A-Za-z0-9_.-]*)`)

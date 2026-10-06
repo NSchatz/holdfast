@@ -2435,7 +2435,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// makes "a failed or aborted transcode is kept off the array" true rather than nearly
 	// true. Either way the SWAP is unchanged and reads a path in the source's own directory.
 	// See copyBackBesideSource, below the gates.
-	scratch := strings.TrimSpace(e.Cfg.ScratchDir)
+	scratch := e.Cfg.ScratchDirFor(f)
 	var work string
 	if scratch == "" {
 		// Pick the temp path and clear any stale temp at it. The n-suffixed candidates exist

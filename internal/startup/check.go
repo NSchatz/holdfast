@@ -294,6 +294,10 @@ type Check struct {
 	// writes beside the source. It is checked, classified and reported, and it
 	// is never walked: it is not a library and nothing is enumerated from it.
 	ScratchDir string
+	// ScratchDirs are the further working locations library_roots entries name
+	// for themselves. Each is checked exactly as ScratchDir is; a path named in
+	// both, or twice, is checked once.
+	ScratchDirs []string
 	// ScratchMinFreeGB is the free-space floor, in GiB, the scratch directory's
 	// filesystem must clear. 0 disables the floor.
 	ScratchMinFreeGB int
@@ -864,11 +868,31 @@ func (r *checkRun) applyDeclarations(decls []string) {
 // Storage that is NOT LOCAL is deliberately not on the list. It is classified,
 // recorded and reported like every other checked path, and the run starts.
 func (r *checkRun) checkScratch() {
-	dir := strings.TrimSpace(r.c.ScratchDir)
-	if dir == "" {
-		return
+	for _, dir := range r.c.scratchDirs() {
+		r.checkScratchDir(dir)
 	}
-	clean := cleanPath(dir)
+}
+
+// scratchDirs is every configured working location, cleaned, in configured order and
+// each once: ScratchDir first, then ScratchDirs.
+func (c Check) scratchDirs() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, d := range append([]string{c.ScratchDir}, c.ScratchDirs...) {
+		if strings.TrimSpace(d) == "" {
+			continue
+		}
+		clean := cleanPath(strings.TrimSpace(d))
+		if !seen[clean] {
+			seen[clean] = true
+			out = append(out, clean)
+		}
+	}
+	return out
+}
+
+// checkScratchDir is checkScratch for one working location.
+func (r *checkRun) checkScratchDir(clean string) {
 
 	info, err := r.c.Platform.Inspect(clean)
 	switch {
@@ -916,7 +940,7 @@ func (r *checkRun) checkScratch() {
 	// library is the whole reason a lexical comparison is not enough here.
 	//
 	// A working area inside the tree the walk classifies and the scan enumerates
-	// delivers none of the four things a scratch location is for (it is the same
+	// delivers none of the things a scratch location is for (it is the same
 	// storage), and it puts holdfast's own working files where its own sweep,
 	// hold-backs and collision guards have to reason about them twice.
 	if r.refuseScratchOverlap(rec) {

@@ -40,8 +40,9 @@
 # An entry may also carry exclude_paths / include_paths (which files it offers at all),
 # `rules` (per-resolution-band overrides of the height-sensitive knobs above, named in
 # the commented block below), `watch` / `watch_settle_sec` (how files under that root
-# are DISCOVERED) and `priority` (how early its files are OFFERED). See the commented
-# blocks below and docs/profiles.md.
+# are DISCOVERED), `priority` (how early its files are OFFERED) and `scratch_dir` (where
+# its encodes are WRITTEN, replacing the top-level scratch_dir for that root). See the
+# commented blocks below, docs/profiles.md and docs/scratch.md.
 #
 # NO ROOT MAY CONTAIN ANOTHER. Nesting is refused rather than resolved by a precedence
 # rule, because a file under two roots would have two answers to what may be done to it.
@@ -793,6 +794,12 @@ dry_run: false
 #                            # REPORTED and does not refuse: nothing irreversible
 #                            # happens in this directory, so no allow_non_local entry
 #                            # is required or possible for it.
+#                            #
+#                            # A library_roots entry may carry its own scratch_dir,
+#                            # which replaces this one for that root ("" included):
+#                            # one per drive, outside the library folders, keeps a
+#                            # media server watching them from rescanning on every
+#                            # write the encoder makes. See docs/scratch.md.
 #
 # scratch_min_free_gb: 50    # the free-space floor, in GiB, the scratch filesystem
 #                            # must clear at startup. 0 disables the floor. It is a

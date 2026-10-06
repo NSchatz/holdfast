@@ -389,3 +389,35 @@ func TestScratch_AnAbsentScratchDirChangesNothing(t *testing.T) {
 		t.Fatal("the refusal text mentions a probe that never ran")
 	}
 }
+
+// A library root's own scratch_dir (docs/scratch.md#per-root): every working location
+// is checked as the top-level one is, a missing one refuses even when another is fine,
+// and a path named twice is checked once.
+func TestScratch_EveryPerRootScratchDirIsChecked(t *testing.T) {
+	t.Run("all present: each probed once", func(t *testing.T) {
+		f := libraryFS()
+		f.mkdir("/mnt/disk2/work")
+		res := Run(Check{Roots: []string{"/srv/media"}, StateDir: "/var/state", IsMediaFile: mediaByExt,
+			ScratchDir: "/mnt/scratch", ScratchDirs: []string{"/mnt/disk2/work", "/mnt/scratch/", "/mnt/disk2/work"},
+			Platform: f})
+		if !res.Start {
+			t.Fatalf("the run was refused: %+v", res.Causes)
+		}
+		if f.probes != 2 {
+			t.Fatalf("the writability probe ran %d time(s), want 2 (one per distinct directory)", f.probes)
+		}
+	})
+	t.Run("one missing: refused naming it", func(t *testing.T) {
+		f := libraryFS()
+		res := Run(Check{Roots: []string{"/srv/media"}, StateDir: "/var/state", IsMediaFile: mediaByExt,
+			ScratchDirs: []string{"/mnt/scratch", "/mnt/disk2/work"}, Platform: f})
+		assertRefused(t, res, CauseScratchMissing, "/mnt/disk2/work")
+	})
+	t.Run("one inside a library root: refused", func(t *testing.T) {
+		f := libraryFS()
+		f.mkdir("/srv/media/.holdfast")
+		res := Run(Check{Roots: []string{"/srv/media"}, StateDir: "/var/state", IsMediaFile: mediaByExt,
+			ScratchDirs: []string{"/mnt/scratch", "/srv/media/.holdfast"}, Platform: f})
+		assertRefused(t, res, CauseScratchOverlaps, "/srv/media/.holdfast")
+	})
+}
