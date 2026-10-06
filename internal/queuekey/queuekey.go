@@ -14,6 +14,7 @@
 // operator's case (S0164, the operator's report quoted in the umbrella spec): bytes saved
 // rise with the source bitrate in excess of what the encode is expected to produce for that
 // picture, and the work rises with pixels times frames.
+// measure: a throwaway comment.
 package queuekey
 
 import (
