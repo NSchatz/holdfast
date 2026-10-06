@@ -338,9 +338,9 @@ mutation-shape:
 # works.
 #
 # Outside `check` for the same reason every other selftest that mutates a tree is: it
-# writes to a copy of the repository and it drives the real runner. ci.yml runs it as its
-# own step beside the gate, in the job that installs the pinned ffmpeg, so it binds every
-# pull request rather than waiting for somebody to type it.
+# writes to a copy of the repository and it drives the real runner. ci.yml runs it nightly as its
+# own step beside the gate, in the job that installs the pinned ffmpeg, and pr.yml runs it on a
+# pull request that changes its inputs, so it never waits for somebody to type it.
 mutation-selftest:
 	./scripts/mutation-selftest.sh
 
@@ -378,8 +378,8 @@ check: check-pins check-pins-selftest install-ffmpeg-selftest install-dynhdr-too
 # The gate tiers: tier-fast for a quick run while working, tier-full at a goal's end and nightly on
 # main; each prints its elapsed time. tier-full is `check`. tier-fast is `check` with every package
 # tested but internal/engine, the suite of real encodes behind the real verify gate: on a full run it
-# took 2033 s of the test step's 2066 s, the next package 694 s. Neither changes what `check` is, and
-# `check` stays the merge gate.
+# took 2033 s of the test step's 2066 s, the next package 694 s. Neither changes what `check` is.
+# `check` runs nightly on main (ci.yml); a pull request runs only what it touches (pr.yml).
 FAST_TEST_PKGS = $(shell go list ./... | grep -v '/internal/engine$$')
 
 tier-fast:

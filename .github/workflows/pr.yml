@@ -1,0 +1,189 @@
+name: PR
+
+# What a pull request waits for: only the checks and tests its change touches, in 2 minutes or
+# less (the owner's rule). scripts/pr-scope.sh decides the scope from the diff against the base
+# branch: the packages the change touches and every package that depends on them, and each
+# check or selftest whose inputs changed. internal/engine's real-encode suite never runs here.
+# The full gate, `make check` with internal/engine and every selftest, runs nightly on main
+# (ci.yml), and by hand through its workflow_dispatch.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Held equal to the Dockerfile and the other workflows by scripts/check-pins.sh.
+  GO_VERSION: "1.25.14"
+
+jobs:
+  changed:
+    runs-on: ubuntu-latest
+    outputs:
+      package: ${{ steps.plan.outputs.package }}
+    steps:
+      - name: start the clock
+        run: echo "PR_T0=$(date +%s)" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The merge base with the base branch, and the identity scan's first commit.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      - name: plan (scripts/pr-scope.sh)
+        id: plan
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          ./scripts/pr-scope.sh "origin/${BASE_REF}" | tee -a "$GITHUB_OUTPUT"
+
+      # Whole-tree and seconds each, so every PR runs them.
+      - name: check-pins, secret-scan, identity-scan
+        run: make check-pins secret-scan identity-scan
+
+      - name: gofmt (changed Go files)
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          files="$(git diff --name-only --diff-filter=d "$(git merge-base "origin/${BASE_REF}" HEAD)" HEAD -- '*.go')"
+          [ -z "$files" ] && exit 0
+          out="$(gofmt -l $files)"
+          if [ -n "$out" ]; then echo "gofmt needs:"; echo "$out"; exit 1; fi
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        if: steps.plan.outputs.ui == 'true'
+        with:
+          node-version-file: web/.node-version
+          check-latest: false
+          package-manager-cache: false
+
+      - name: web UI (lint, typecheck, test, build)
+        if: steps.plan.outputs.ui == 'true'
+        run: make ui-lint ui-typecheck ui-test ui-build
+
+      - name: build
+        run: make build
+
+      - name: vet and staticcheck (changed packages and their dependents)
+        if: steps.plan.outputs.vet != ''
+        env:
+          PKGS: ${{ steps.plan.outputs.vet }}
+        run: |
+          set -euo pipefail
+          go vet $PKGS
+          go run "honnef.co/go/tools/cmd/staticcheck@$(sed -n 's/^STATICCHECK_VERSION *?= *//p' Makefile)" $PKGS
+
+      - name: install ffmpeg (the pin the image ships; libx265 + libvmaf)
+        if: steps.plan.outputs.pkgs != '' || steps.plan.outputs.happy_path_selftest == 'true' || steps.plan.outputs.mutation_selftest == 'true'
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/ffmpeg /opt/dynhdr-tools
+          sudo chown "$USER" /opt/ffmpeg /opt/dynhdr-tools
+          ./scripts/install-ffmpeg.sh /opt/ffmpeg
+          ./scripts/install-dynhdr-tools.sh /opt/dynhdr-tools
+          echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
+          echo "/opt/dynhdr-tools/bin" >> "$GITHUB_PATH"
+
+      - name: go test (changed packages and their dependents)
+        if: steps.plan.outputs.pkgs != ''
+        run: make test TEST_PKGS='${{ steps.plan.outputs.pkgs }}'
+
+      - name: api-schema-diff
+        if: steps.plan.outputs.api_schema_diff == 'true'
+        run: make api-schema-diff
+
+      - name: govulncheck
+        if: steps.plan.outputs.govulncheck == 'true'
+        run: make govulncheck
+
+      - name: config schema self-test
+        if: steps.plan.outputs.config_selftest == 'true'
+        run: |
+          set -euo pipefail
+          go build -o /tmp/holdfast ./cmd/holdfast
+          /tmp/holdfast validate --config config.example.yaml
+          for bad in testdata/config-invalid.yaml testdata/config-invalid-value.yaml \
+                     testdata/config-invalid-profile-key.yaml testdata/config-invalid-nested-roots.yaml; do
+            if /tmp/holdfast validate --config "$bad"; then
+              echo "::error::invalid config $bad was ACCEPTED - schema gate is broken"; exit 1
+            fi
+          done
+
+      # Each selftest runs when its own inputs changed (scripts/pr-scope.sh names them).
+      - { name: check-pins-selftest,           if: steps.plan.outputs.check_pins_selftest == 'true',      run: make check-pins-selftest }
+      - { name: install-ffmpeg-selftest,       if: steps.plan.outputs.install_ffmpeg_selftest == 'true',  run: make install-ffmpeg-selftest }
+      - { name: install-dynhdr-tools-selftest, if: steps.plan.outputs.install_dynhdr_selftest == 'true',  run: make install-dynhdr-tools-selftest }
+      - { name: secret-scan-selftest,          if: steps.plan.outputs.secret_scan_selftest == 'true',     run: make secret-scan-selftest }
+      - { name: identity-scan-selftest,        if: steps.plan.outputs.identity_scan_selftest == 'true',   run: make identity-scan-selftest }
+      - { name: api-schema-diff-selftest,      if: steps.plan.outputs.api_schema_diff_selftest == 'true', run: make api-schema-diff-selftest }
+      - { name: mutation-shape,                if: steps.plan.outputs.mutation_shape == 'true',           run: make mutation-shape }
+      - { name: mutation-selftest,             if: steps.plan.outputs.mutation_selftest == 'true',        run: make mutation-selftest }
+      - { name: happy-path-log-selftest,       if: steps.plan.outputs.happy_path_selftest == 'true',      run: make happy-path-log-selftest }
+      - { name: govulncheck-selftest,          if: steps.plan.outputs.govulncheck_selftest == 'true',     run: make govulncheck-selftest }
+      - { name: pr-scope-selftest,             if: steps.plan.outputs.pr_scope_selftest == 'true',        run: ./scripts/pr-scope-selftest.sh }
+
+      # Prints the job's elapsed time and warns (never fails) past the 2-minute budget.
+      - name: elapsed
+        if: always()
+        run: |
+          s=$(( $(date +%s) - PR_T0 ))
+          echo "PR checks: ${s} s"
+          if [ "$s" -gt 120 ]; then echo "::warning::PR checks took ${s} s, over the 2-minute budget"; fi
+
+  # The image smoke gate, only when the image's own inputs changed; nightly runs it always.
+  package:
+    needs: changed
+    if: needs.changed.outputs.package == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: build the image (linux/amd64)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: holdfast:ci
+          build-args: |
+            VERSION=0.0.0-ci-${{ github.sha }}
+            COMMIT=${{ github.sha }}
+            DATE=1970-01-01T00:00:00Z
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: smoke test the image (real encode, real gate)
+        run: ./scripts/smoke-image.sh holdfast:ci
+
+      - name: build the image (linux/arm64)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          tags: holdfast:ci-arm64
+          build-args: |
+            VERSION=0.0.0-ci-${{ github.sha }}
+            COMMIT=${{ github.sha }}
+            DATE=1970-01-01T00:00:00Z
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: smoke test the arm64 image (exec only, under QEMU)
+        run: ./scripts/smoke-image.sh holdfast:ci-arm64 linux/arm64 --no-encode
+
+      - name: the compose example must be valid
+        run: docker compose -f docker-compose.yml config -q
