@@ -156,7 +156,7 @@ reds on a bad config) and the image smoke gate (`scripts/smoke-image.sh`, needs 
 
 The gate needs the pinned ffmpeg (`scripts/install-ffmpeg.sh`), and it is not
 skipped when absent - a grader that skips is a false green. A focused test that needs a real encode
-still takes the `goals-heavy` lock on the shared host; nothing larger runs there.
+may run on the shared host; nothing larger runs there.
 
 Never claim green without a green CI run. Every change that touches the engine
 extends the fixture suite so it reds on that specific regression: a data-safety
