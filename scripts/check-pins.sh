@@ -278,7 +278,7 @@ fi
 # than this script post-processing git grep's `path:lineno:content` output — which was tried
 # twice and was a file-level exemption by accident both times (a PATH containing the allow
 # term exempted every line in the file). A line may name a banned identifier only to PROHIBIT
-# it — the rule in CLAUDE.md has to quote what it forbids — and must carry this marker, which
+# it — the rule in docs/development.md has to quote what it forbids — and must carry this marker, which
 # keeps every exemption greppable. Exactly one line in the repo does.
 allow='rename-guard-allow'
 

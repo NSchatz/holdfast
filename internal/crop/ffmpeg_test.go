@@ -15,7 +15,7 @@ import (
 // built to test it - never a log string written by hand.
 
 // tools finds ffmpeg, failing loud rather than skipping: a skipped safety proof is a false
-// green (CLAUDE.md, "a grader that skips is a false green").
+// green (docs/development.md, "a grader that skips is a false green").
 func tools(t *testing.T) string {
 	t.Helper()
 	ffmpeg := os.Getenv("HOLDFAST_FFMPEG")

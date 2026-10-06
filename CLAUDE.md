@@ -21,7 +21,7 @@ It re-encodes bloated video smaller and never destroys a source until a replacem
 ## The gate
 
 CI is the only place it runs: no gate, tier, whole-package, `-race` or mutation run on this host.
-A PR runs only what its change touches (`pr.yml`, `scripts/pr-scope.sh`, 2 minutes); the full
+A PR runs only what its change touches (`pr.yml`, `scripts/pr-scope.sh`, about 2 minutes); the full
 gate (`make check`) runs nightly on main (`ci.yml`), and a red nightly is fixed first. The inner
 loop is one focused test (one package, one `-run`). The pinned ffmpeg is required, never skipped.
 Never claim green without a green CI run.

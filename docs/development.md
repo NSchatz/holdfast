@@ -3,6 +3,11 @@
 The gate, the conventions and the identifier rule in full. `CLAUDE.md` carries the
 must-knows and points here.
 
+North star: a stranger can `docker run` it, point it at a library with a YAML
+file, and trust it. It reclaims space, never trades a good file for a broken or
+worse one, says what it did, survives crashes and restarts, and is declarable in
+git.
+
 ## Build, test and gate
 
 Go 1.25+. The gate is `make check`, and the `check:` target IS its definition -
