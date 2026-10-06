@@ -2,7 +2,7 @@
 
 Which file a scan offers its workers first: the queue `priority` an operator writes on a library
 root, a resolution rule or an encode profile, then the declared `queue_order`, then the path. This
-document is that argument's single home: `CLAUDE.md` names the rule and links here rather than
+document is that argument's single home: the [design index](README.md) names the rule and links here rather than
 restating it. The keys are described in [`docs/profiles.md`](../profiles.md#queue-priority) and
 [`docs/enumeration.md`](../enumeration.md#declared-queue-order); the code is
 `internal/engine/queueorder.go`, `internal/config/priority.go` and `internal/queuekey`.

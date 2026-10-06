@@ -2,7 +2,7 @@
 
 What `crop: auto` cuts away from a picture, how it decides, the gate a cropped replacement
 passes, and why a crop that cannot be decided confidently is not made. This document is that
-argument's single home: `CLAUDE.md` names the rule and links here rather than restating it. The
+argument's single home: the [design index](README.md) names the rule and links here rather than restating it. The
 key is described in [`docs/profiles.md`](../profiles.md#crop); the code is `internal/crop`, and
 the engine's half is `internal/engine/crop.go`.
 

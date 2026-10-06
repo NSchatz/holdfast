@@ -20,7 +20,7 @@ import (
 )
 
 // ffmpegBin finds the pinned ffmpeg, failing loud rather than skipping: a skipped safety
-// proof is a false green (CLAUDE.md, "a grader that skips is a false green").
+// proof is a false green (docs/development.md, "a grader that skips is a false green").
 func ffmpegBin(t *testing.T) string {
 	t.Helper()
 	bin := os.Getenv("HOLDFAST_FFMPEG")

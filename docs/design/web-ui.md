@@ -1,7 +1,7 @@
 # Web UI
 
 How the web UI is built, how it reaches the binary, and what the root path answers. This
-document is that argument's single home: `CLAUDE.md` names the rule and links here rather than
+document is that argument's single home: the [design index](README.md) names the rule and links here rather than
 restating it. The source is `web/` (the views in `web/src/views`, the API module, the token
 holder and the formatting in `web/src/lib`); the embed is `internal/ui`; the routes are in
 `internal/server/server.go` (`handleRoot`, `handleUIAsset`); the daemon's wiring is

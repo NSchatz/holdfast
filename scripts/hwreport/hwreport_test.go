@@ -10,7 +10,7 @@ package hwreport
 // ffmpeg that refuses any VAAPI argument before the real one sees it (brief T9).
 //
 // A missing jq, ffmpeg, ffprobe or bash FAILS these tests; it never skips them. A grader that
-// skips is a false green (CLAUDE.md).
+// skips is a false green (docs/development.md).
 
 import (
 	"bytes"

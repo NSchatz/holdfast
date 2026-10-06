@@ -165,7 +165,7 @@ rm -f "$repo/testdata/staged.conf"
 expect 1 "a leak STAGED but deleted from the worktree is caught (pins the --cached scan)"
 reset
 
-# --- 5. The marker genuinely exempts the LINE that carries it — the rule in CLAUDE.md has to
+# --- 5. The marker genuinely exempts the LINE that carries it — the rule in docs/development.md has to
 #        quote the identifiers it forbids, so if this could not pass, the rule could not be
 #        written down at all. Planted with a real banned identifier, not asserted on the clean
 #        tree (case 0 already does that, and it would be a tautology here).
