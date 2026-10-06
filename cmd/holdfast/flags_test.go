@@ -234,8 +234,14 @@ func TestValidate_ReportsTheScratchDirectoryCausesRunWouldRefuseOn(t *testing.T)
 		for _, tc := range []struct {
 			exclude string
 			ok      bool
-		}{{"", false}, {"exclude_paths: [\"**/.holdfast/**\"]\n", true}} {
-			body := tc.exclude + "library_roots:\n  - path: " + lib + "\n    scratch_dir: " + inside + "\n" +
+			entry   string
+		}{
+			{"", false, ""},
+			{"exclude_paths: [\"**/.holdfast/**\"]\n", true, ""},
+			// An entry's own list REPLACES the top-level one, so it must carry the pattern too.
+			{"exclude_paths: [\"**/.holdfast/**\"]\n", false, "    exclude_paths: [\"**/@eaDir/**\"]\n"},
+		} {
+			body := tc.exclude + "library_roots:\n  - path: " + lib + "\n    scratch_dir: " + inside + "\n" + tc.entry +
 				"state_dir: " + filepath.Join(dir, "state") + "\nscratch_min_free_gb: 0\n"
 			p := filepath.Join(t.TempDir(), "config.yaml")
 			if err := os.WriteFile(p, []byte(body), 0o600); err != nil {

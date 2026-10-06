@@ -477,6 +477,13 @@ func TestScratch_BeneathARootIsAcceptedOnlyWherePruned(t *testing.T) {
 		res := check(build(), "/srv/media/.holdfast/work", excluding("/srv/media"))
 		assertRefused(t, res, CauseScratchOverlaps, "/srv/media/.holdfast/work")
 	})
+	t.Run("a symlink below the root under a pruned spelling: refused", func(t *testing.T) {
+		f := build()
+		f.mkdir("/srv/media/Films/tmp/work")
+		f.symlink("/srv/media/.lnk", "/srv/media/Films/tmp")
+		res := check(f, "/srv/media/.lnk/work", excluding("/srv/media/.lnk"))
+		assertRefused(t, res, CauseScratchOverlaps, "/srv/media/.lnk/work")
+	})
 	t.Run("a symlink into a pruned directory: refused", func(t *testing.T) {
 		res := check(build(), "/mnt/scratch", excluding("/srv/media/.holdfast"))
 		assertRefused(t, res, CauseScratchOverlaps, "/mnt/scratch")

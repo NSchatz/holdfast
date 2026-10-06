@@ -989,11 +989,20 @@ func (r *checkRun) checkScratchDir(clean string) {
 // scratchPruned reports whether the configured scratch path lies, AS CONFIGURED, beneath the
 // configured root and inside a directory the walk prunes there: the path itself or one of
 // its ancestors below the root is one the root's exclude_paths reach (Check.Excluded). It
-// reads the configured spellings because the patterns are written against them; a scratch
-// path that reaches a root only through a symbolic link is not pruned by this and stays
-// refused.
-func (r *checkRun) scratchPruned(scratch, root string) bool {
-	if !lexicallyBeneath(scratch, root) {
+// reads the configured spellings because the patterns are written against them, and it
+// requires the RESOLVED scratch path to sit at the same place below the resolved root, so a
+// symbolic link anywhere below the root - one that would put the working directory inside a
+// part of the library the walk does list - is not pruned by this and stays refused.
+//
+// The walk asks only the directory it meets; the ancestors are asked here because an
+// Excluded that answers for a directory alone, not its parents, must still read the same.
+func (r *checkRun) scratchPruned(scratch, root, resolvedScratch, resolvedRoot string) bool {
+	rel, err := filepath.Rel(cleanPath(root), cleanPath(scratch))
+	if err != nil || !lexicallyBeneath(scratch, root) {
+		return false
+	}
+	relResolved, err := filepath.Rel(cleanPath(resolvedRoot), cleanPath(resolvedScratch))
+	if err != nil || relResolved != rel {
 		return false
 	}
 	for d := cleanPath(scratch); lexicallyBeneath(d, root); d = filepath.Dir(d) {
@@ -1028,7 +1037,7 @@ func (r *checkRun) refuseScratchOverlap(rec Record) bool {
 		switch {
 		case scratch == resolved:
 			how = "is the configured library root"
-		case lexicallyBeneath(scratch, resolved) && r.scratchPruned(rec.Path, root):
+		case lexicallyBeneath(scratch, resolved) && r.scratchPruned(rec.Path, root, scratch, resolved):
 			// Beneath a root but inside a directory that root's exclude_paths prune: the
 			// walk never lists it, so nothing there is enumerated, swept or watched as
 			// library, and it shares the root's filesystem, which is the point of putting

@@ -178,7 +178,9 @@ A pruned directory is never listed, so nothing in it is enumerated as a source, 
 the library's or watched, and the run's own scratch sweep is what clears it. Remember that
 an entry's own `exclude_paths` REPLACES the top-level list for that root, so a root with its
 own list must carry the pattern too. The match is made on the path as configured: a
-`scratch_dir` that reaches a root only through a symbolic link is still refused. Put the
+`scratch_dir` whose path crosses a symbolic link below the root is still refused. Nor
+should anything in the library link INTO the working directory: the walk follows such a
+link like any other directory, and the files there would be listed as library. Put the
 directory where no media server's library looks either; the working file there carries no
 `.holdfast-part` suffix.
 
