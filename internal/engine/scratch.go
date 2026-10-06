@@ -268,9 +268,10 @@ func fileDigest(path string) (string, int64, error) {
 // cleanScratch discards the working files a prior killed run left in the configured
 // scratch directory, under the same hold-back exceptions the in-place sweep applies.
 //
-// The scratch directory is not under a library root, so the coverage-bounded sweep
-// cannot reach it: coverage is the startup walk's record of the directories BENEATH
-// THE ROOTS it traversed, and a working area outside them contributes none. It is
+// The scratch directory is not under a library root, or is inside a directory its root's
+// exclude_paths prune, so the coverage-bounded sweep cannot reach it: coverage is the
+// startup walk's record of the directories BENEATH THE ROOTS it traversed, and a working
+// area outside them, or pruned beneath one, contributes none. It is
 // therefore swept explicitly, here, from the same construction and with the same two
 // exceptions AC-B12 names: a path a live record holds back, and a retained
 // replacement, which is never anybody's to delete.
@@ -279,7 +280,8 @@ func fileDigest(path string) (string, int64, error) {
 // omission. That hold asks "is there a source beside this file to measure it
 // against", and in a scratch directory the answer is always no - there are no
 // sources here, by construction, since a scratch directory that overlapped a library
-// root refuses the run at startup. Applying it would hold every working file for
+// root refuses the run at startup unless that root's exclude_paths prune it, and nothing
+// pruned is ever enumerated. Applying it would hold every working file for
 // ever and crash-safety would regress to nothing. What makes the unconditional sweep
 // safe is the property that hold exists to protect: with a scratch directory
 // configured, a replacement only ever reaches the swap as a COPY beside the source,

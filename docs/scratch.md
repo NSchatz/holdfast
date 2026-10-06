@@ -156,6 +156,34 @@ though the two directories share a filesystem: one swap shape on every mount
 ([design/swap.md](design/swap.md#swap-invariant)). The copy costs a write and a read of
 the accepted encode on that drive, once per transcode.
 
+<a id="inside-a-root"></a>
+
+## Inside a library root, excluded
+
+Where a library root is a whole drive, no directory on that drive is outside it. A
+`scratch_dir` beneath a root is therefore accepted when an `exclude_paths` pattern in force
+for that root prunes it - the directory itself or one of its parents below the root:
+
+```yaml
+exclude_paths:
+  - "**/.holdfast/**"
+library_roots:
+  - path: /mnt/disk1
+    scratch_dir: /mnt/disk1/.holdfast/work
+  - path: /mnt/disk2
+    scratch_dir: /mnt/disk2/.holdfast/work
+```
+
+A pruned directory is never listed, so nothing in it is enumerated as a source, swept as
+the library's or watched, and the run's own scratch sweep is what clears it. Remember that
+an entry's own `exclude_paths` REPLACES the top-level list for that root, so a root with its
+own list must carry the pattern too. The match is made on the path as configured: a
+`scratch_dir` whose path crosses a symbolic link below the root is still refused. Nor
+should anything in the library link INTO the working directory: the walk follows such a
+link like any other directory, and the files there would be listed as library. Put the
+directory where no media server's library looks either; the working file there carries no
+`.holdfast-part` suffix.
+
 ## Startup refuses rather than failing mid-encode
 
 Every configured `scratch_dir`, the top-level one and each one an entry names, is checked in the same start-or-refuse decision as the
@@ -166,8 +194,9 @@ non-zero, naming the path, the cause and the remedy, if the directory:
 - does not exist, or exists and is not a directory;
 - cannot be inspected;
 - **is a library root, is beneath one, or has one beneath it** (compared after
-  symlink resolution). A working area inside the tree holdfast scans is on the same
-  storage and delivers none of the benefits above;
+  symlink resolution), unless it is beneath a root inside a directory that root's
+  `exclude_paths` prune (see [inside a root](#inside-a-root)). A working area inside the
+  tree holdfast scans is one its own scan, sweep and watch would have to reason about twice;
 - has less free space than `scratch_min_free_gb`;
 - cannot be written to by the running user.
 

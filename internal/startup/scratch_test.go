@@ -421,3 +421,71 @@ func TestScratch_EveryPerRootScratchDirIsChecked(t *testing.T) {
 		assertRefused(t, res, CauseScratchOverlaps, "/srv/media/.holdfast")
 	})
 }
+
+// A scratch_dir beneath a root is accepted only from inside a directory that root's
+// exclude_paths prune (docs/scratch.md#inside-a-root): the directory itself or a parent of
+// it below the root. Anything short of that is the overlap refusal it always was.
+func TestScratch_BeneathARootIsAcceptedOnlyWherePruned(t *testing.T) {
+	build := func() *fakeFS {
+		f := newFS().setType("/", "ext4")
+		f.mkdir("/srv/media/.holdfast/work")
+		f.mkdir("/srv/media/Films")
+		f.mkfile("/srv/media/Films/Film.mkv")
+		f.mkdir("/var/state")
+		f.mkdir("/mnt")
+		f.symlink("/mnt/scratch", "/srv/media/.holdfast/work")
+		return f
+	}
+	excluding := func(dirs ...string) func(string) bool {
+		return func(d string) bool {
+			for _, x := range dirs {
+				if d == x {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	check := func(f *fakeFS, scratch string, excluded func(string) bool) Result {
+		return Run(Check{Roots: []string{"/srv/media"}, StateDir: "/var/state", IsMediaFile: mediaByExt,
+			Excluded: excluded, ScratchDir: scratch, Platform: f})
+	}
+
+	for name, excluded := range map[string]func(string) bool{
+		"the directory itself is pruned": excluding("/srv/media/.holdfast/work"),
+		"a parent below the root is":     excluding("/srv/media/.holdfast"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := build()
+			res := check(f, "/srv/media/.holdfast/work", excluded)
+			if !res.Start {
+				t.Fatalf("a pruned scratch directory was refused: %+v", res.Causes)
+			}
+			if f.probes != 1 {
+				t.Fatalf("the writability probe ran %d time(s), want 1", f.probes)
+			}
+		})
+	}
+	t.Run("nothing pruned: refused", func(t *testing.T) {
+		res := check(build(), "/srv/media/.holdfast/work", excluding("/srv/media/Films"))
+		assertRefused(t, res, CauseScratchOverlaps, "/srv/media/.holdfast/work")
+		if !strings.Contains(refusalText(res), "exclude_paths") {
+			t.Fatalf("the remedy does not offer exclude_paths:\n%s", refusalText(res))
+		}
+	})
+	t.Run("only the root itself would match: refused", func(t *testing.T) {
+		res := check(build(), "/srv/media/.holdfast/work", excluding("/srv/media"))
+		assertRefused(t, res, CauseScratchOverlaps, "/srv/media/.holdfast/work")
+	})
+	t.Run("a symlink below the root under a pruned spelling: refused", func(t *testing.T) {
+		f := build()
+		f.mkdir("/srv/media/Films/tmp/work")
+		f.symlink("/srv/media/.lnk", "/srv/media/Films/tmp")
+		res := check(f, "/srv/media/.lnk/work", excluding("/srv/media/.lnk"))
+		assertRefused(t, res, CauseScratchOverlaps, "/srv/media/.lnk/work")
+	})
+	t.Run("a symlink into a pruned directory: refused", func(t *testing.T) {
+		res := check(build(), "/mnt/scratch", excluding("/srv/media/.holdfast"))
+		assertRefused(t, res, CauseScratchOverlaps, "/mnt/scratch")
+	})
+}

@@ -224,6 +224,36 @@ func TestValidate_ReportsTheScratchDirectoryCausesRunWouldRefuseOn(t *testing.T)
 			t.Errorf("validate does not print the root's scratch_dir:\n%s", out.String())
 		}
 	})
+
+	// Beneath the root, it validates only where the root's exclude_paths prune it.
+	t.Run("a scratch directory inside the root", func(t *testing.T) {
+		inside := filepath.Join(lib, ".holdfast", "work")
+		if err := os.MkdirAll(inside, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct {
+			exclude string
+			ok      bool
+			entry   string
+		}{
+			{"", false, ""},
+			{"exclude_paths: [\"**/.holdfast/**\"]\n", true, ""},
+			// An entry's own list REPLACES the top-level one, so it must carry the pattern too.
+			{"exclude_paths: [\"**/.holdfast/**\"]\n", false, "    exclude_paths: [\"**/@eaDir/**\"]\n"},
+		} {
+			body := tc.exclude + "library_roots:\n  - path: " + lib + "\n    scratch_dir: " + inside + "\n" + tc.entry +
+				"state_dir: " + filepath.Join(dir, "state") + "\nscratch_min_free_gb: 0\n"
+			p := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var out, errOut bytes.Buffer
+			code := dispatch([]string{"validate", "--config", p}, &out, &errOut)
+			if (code == 0) != tc.ok {
+				t.Errorf("with %q validate exited %d, want ok=%v (stderr: %s)", tc.exclude, code, tc.ok, errOut.String())
+			}
+		}
+	})
 }
 
 var flagLine = regexp.MustCompile(`(?m)^\s+-([A-Za-z0-9][A-Za-z0-9_.-]*)`)
