@@ -568,10 +568,8 @@ a finding it left for the owner. None blocks anything.
 
 ### Findings left for the owner
 
-- `POST /api/scan` is not held back by `run_window` or `max_load`, and files a root's watch
-  offers are held back by none of `run_window`, `max_load` or pause. `docs/docker.md` states
-  both; whether to gate those routes is the owner's call (ledger g2, "Proposals awaiting the
-  owner").
+- DECIDED by the owner: every route waits on `run_window`, `max_load` and pause, and `workers`
+  bounds local encodes engine-wide (`docs/docker.md`, "Workers, `cpus` and `max_load`").
 - Every MPEG-TS and M2TS source is skipped `multi-video-stream`, because ffprobe prints a program
   section ahead of the stream line; `ts` and `m2ts` are default `video_exts`. Fail-safe, and not
   fixed because the fix changes existing decisions (ledger g3 D of 2026-09-30; still open in

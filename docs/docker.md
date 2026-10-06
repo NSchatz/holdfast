@@ -166,7 +166,12 @@ Three settings decide how hard holdfast works a host, and each acts somewhere di
 `workers` is how many files are in flight at once, the compose `cpus:` limit is how much CPU the
 container may use, and `max_load` is when the feed of new files pauses.
 
-**`workers`.** The default is 1: one file is probed, encoded, measured and swapped at a time. A
+**`workers`.** It is one bound for the whole process: the scan, `POST /api/scan` and the arr
+webhooks, and every root's `watch` share the same `workers` slots, and a file holds its slot
+from the moment it is picked up until its gates and swap are done, so at most `workers` files are
+encoded by this server at once whichever route they came by. A job leased to a worker node does
+not take one; the node gate (`node_gate_slots`) bounds those. The default is 1: one file is
+probed, encoded, measured and swapped at a time. A
 whole number from 1 to 1024 runs exactly that many, and `0` or no key at all means 1, whatever
 the CPU quota reads. `workers: auto` (or `HOLDFAST_WORKERS=auto`) sizes the pool from the CPU
 quota the process runs under instead:
@@ -210,13 +215,15 @@ divisor is every CPU of the host. So on the 56-thread host above, `max_load: 0.8
 when the whole host's load passes about 45 (0.8 x 56), whatever `cpus:` gives holdfast and
 whichever process is making the load.
 
-**`max_load`, `run_window` and pause gate only the hand-out of NEW files.** The scan feeds every
-worker from one queue, and while any of the three says stop, it hands no new file to ANY worker;
-every encode already in flight runs to its end, gates and swap included. Nothing is interrupted
-and nothing is lost: the files not handed out wait for the next scan. Two routes into the
-pipeline are not the scan's feed and are gated differently: `POST /api/scan` refuses a
-submission while holdfast is paused, but neither `run_window` nor `max_load` holds one back, and
-a file a root's `watch` offers is held back by none of the three.
+**`max_load`, `run_window` and pause gate only the start of NEW files.** While any of the three
+says stop, no new file starts, by any route; every encode already in flight runs to its end,
+gates and swap included. Nothing is interrupted and nothing is lost. The scan stops handing out
+files, and the ones it did not hand out wait for the next scan. A file accepted from
+`POST /api/scan`, an arr webhook or a root's `watch` waits in its queue, unclaimed and unrecorded,
+and starts once all three allow it and a `workers` slot is free; a shutdown while it waits leaves
+it untouched for the next scan to find. While holdfast is paused, `POST /api/scan` and the
+webhooks still refuse to enqueue anything, as before. Because `max_load` reads the host's load,
+holdfast's own encodes count toward it.
 
 **Memory scales with workers.** Each worker is a concurrent encode plus, after it, a VMAF
 measurement, so `N` workers need about `N` of each in memory at once. The encode memory watchdog

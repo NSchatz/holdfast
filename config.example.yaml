@@ -861,7 +861,9 @@ dry_run: false
 #                            #   per-status policy, and pruning does not shrink jobs.db on
 #                            #   disk (no VACUUM) - it bounds the rows, not the file.
 # workers: 1                 # concurrent encode workers: how many files are in flight
-#                            #   at once. A whole number 0-1024 runs exactly that many
+#                            #   at once, across the scan, POST /api/scan, the arr
+#                            #   webhooks and every watch together (a job leased to a
+#                            #   node takes none). A whole number 0-1024 runs exactly that many
 #                            #   (0 and an absent key mean the default of 1, one file at
 #                            #   a time), whatever the CPU quota reads. Or `auto`, which
 #                            #   sizes the pool from the CPU quota this process runs
@@ -1006,12 +1008,16 @@ dry_run: false
 #                              #   (that file then holds e.g. ntfy://ntfy.sh/mytopic)
 # run_window: ""               # daily host-fair window "HH:MM-HH:MM" (local time)
 #                              #   during which new work may start; empty = always.
-#                              #   Outside it, serve stops feeding NEW files (an
-#                              #   in-flight encode always finishes) — it only DELAYS.
+#                              #   Outside it, serve starts no NEW file by any route
+#                              #   (scan, POST /api/scan, webhook or watch: those wait in
+#                              #   their queue); an in-flight encode always finishes. It
+#                              #   only DELAYS.
 # max_load: 0                  # per-core 1-min load-average cap; while the host is
-#                              #   above it, stop feeding new files. 0 disables. The
-#                              #   load is the HOST's, divided by the CPUs holdfast may
-#                              #   run on, not by its cpus: quota - see docs/docker.md.
+#                              #   above it, start no new file by any route, as for
+#                              #   run_window. 0 disables. The load is the HOST's,
+#                              #   holdfast's own encodes included, divided by the CPUs
+#                              #   holdfast may run on, not by its cpus: quota - see
+#                              #   docs/docker.md.
 # health_sweep_interval_hours: 0  # the library health sweep, OFF at 0 (the default).
 #                              #   >0 = every N hours after the last sweep finished,
 #                              #   serve fully decodes every source the enumeration
