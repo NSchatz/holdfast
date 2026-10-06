@@ -26,15 +26,15 @@ all=0
 if [ "${1:-}" = "--files" ]; then
   changed="$(cat "$2")"
 elif base="$(git merge-base "${1:?usage: pr-scope.sh <base-ref> | --files <file>}" HEAD 2>/dev/null)"; then
-  changed="$(git diff --name-only "$base" HEAD)"
+  changed="$(git diff --name-only --no-renames "$base" HEAD)"  # a move lists both paths
 else
   echo "pr-scope: no merge base with $1; running everything" >&2
   all=1
 fi
 
-has() { printf '%s\n' "$changed" | grep -qE "$1"; }
+has() { grep -qE "$1" <<<"$changed"; }
 
-if has '^(Makefile|\.github/workflows/.*|scripts/pr-scope(-selftest)?\.sh|go\.(mod|sum))$'; then
+if has '^(Makefile|\.github/workflows/.*|scripts/pr-(scope|scope-selftest|shard)\.sh|go\.(mod|sum))$'; then
   all=1
 fi
 
@@ -55,6 +55,8 @@ else
       case "$f" in "$d"/*) [ "${#d}" -gt "${#best}" ] && best="$d" ;; esac
     done
     if [ -n "$best" ]; then touched["$module/$best"]=1; continue; fi
+    # The web UI is built into internal/ui, which the binary embeds and its dependents test.
+    case "$f" in web/*|scripts/ui.sh) touched["$module/internal/ui"]=1; continue ;; esac
     # Any other file (docs, root testdata, a script) is read by the packages whose test
     # files name it or its directory; a top-level directory alone (docs/, scripts/) is too
     # broad to name a reader. Every Markdown file is read by the packages that import
@@ -92,7 +94,7 @@ mapfile -t vet < <(for p in "${!affected[@]}"; do
   [ -d "${p#"$module"/}" ] && printf '%s\n' "$p"; done | sort -u)
 mapfile -t pkgs < <(printf '%s\n' "${vet[@]}" | grep -vxF "$engine" | grep -v '^$' || true)
 
-in_vet() { printf '%s\n' "${vet[@]}" | grep -qxF "$module/$1"; }
+in_vet() { grep -qxF "$module/$1" < <(printf '%s\n' "${vet[@]}"); }
 flag() { # name, condition exit status
   local v=false; { [ "$all" -eq 1 ] || [ "$2" -eq 0 ]; } && v=true
   echo "$1=$v"
@@ -116,4 +118,4 @@ flag govulncheck                "$(st has '^(\.govulncheck-suppressions\.yaml$|s
 flag govulncheck_selftest       "$(st has '^scripts/govulncheck')"
 flag config_selftest            "$( { has '^(config\.example\.yaml|testdata/config-invalid)' || in_vet internal/config || in_vet cmd/holdfast; } && echo 0 || echo 1)"
 flag package                    "$(st has '^(Dockerfile|\.dockerignore|docker-compose\.yml|scripts/smoke-image\.sh)$')"
-flag pr_scope_selftest          "$(st has '^scripts/pr-scope')"
+flag pr_scope_selftest          "$(st has '^scripts/pr-(scope|shard)')"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Proves scripts/pr-scope.sh still selects what a pull request must run. Its one silent failure
+# Proves scripts/pr-scope.sh and scripts/pr-shard.sh still select what a pull request must run. Its one silent failure
 # is selecting too LITTLE - a PR green because the package it broke never ran - so each case
 # names a change and something its plan must include (or, for internal/engine, must not).
 set -euo pipefail
@@ -35,6 +35,15 @@ want "a Markdown change runs the document checks" "$out" "^pkgs=.*$m/internal/do
 
 out="$(plan web/package.json)"
 want "a web/ change runs the UI steps"           "$out" "^ui=true$"
+want "a web/ change tests what embeds the UI"    "$out" "^pkgs=.*$m/cmd/holdfast( |$)"
+
+# A move out of a package must still test the package it left: a real two-commit diff.
+git -C "$here" worktree add -q --detach "$tmp/wt" HEAD
+( cd "$tmp/wt" && mkdir -p internal/zzmoved && git mv internal/queuekey/queuekey_test.go internal/zzmoved/queuekey_test.go \
+    && git -c user.name=selftest -c user.email=selftest@example.invalid commit -qm move )
+out="$(cd "$tmp/wt" && "$here/scripts/pr-scope.sh" HEAD~1 2>/dev/null || true)"
+git -C "$here" worktree remove --force "$tmp/wt"
+want "a file moved out of a package tests the package it left" "$out" "^pkgs=.*$m/internal/queuekey( |$)"
 
 for f in Makefile .github/workflows/ci.yml go.mod scripts/pr-scope.sh; do
   out="$(plan "$f")"
@@ -44,5 +53,14 @@ done
 
 out="$("$here/scripts/pr-scope.sh" refs/does/not/exist 2>/dev/null)"
 want "a base it cannot resolve runs everything"  "$out" "^mutation_selftest=true$"
+
+# scripts/pr-shard.sh: the shards together run every top-level test exactly once.
+q="$m/internal/queuekey"
+count() { grep -c '^=== RUN   [^/]*$' || true; }
+whole="$(cd "$here" && go test -v -count=1 "$q" 2>&1 | count)"
+split=0
+for k in 0 1 2; do split=$((split + $(GOFLAGS=-v "$here/scripts/pr-shard.sh" "$k" 3 "$q" 2>&1 | count))); done
+if [ "$whole" -gt 0 ] && [ "$split" -eq "$whole" ]; then echo "  ok: three shards run the $whole tests one run does"
+else echo "::error::pr-scope selftest: shards ran $split top-level tests, one run $whole"; fail=1; fi
 
 [ "$fail" -eq 0 ] && echo "pr-scope selftest: OK" || exit 1
