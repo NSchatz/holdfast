@@ -790,7 +790,10 @@ dry_run: false
 #                            # does not exist, is not a directory, cannot be
 #                            # inspected or written to, is short of the floor below,
 #                            # or overlaps a library root (either way round, after
-#                            # symlink resolution). Storage here that is not local is
+#                            # symlink resolution) - unless it is inside a directory
+#                            # that root's exclude_paths prune, which is how a root
+#                            # that is a whole drive gets one on its own drive
+#                            # (docs/scratch.md#inside-a-root). Storage here that is not local is
 #                            # REPORTED and does not refuse: nothing irreversible
 #                            # happens in this directory, so no allow_non_local entry
 #                            # is required or possible for it.

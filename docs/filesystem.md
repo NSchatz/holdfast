@@ -40,7 +40,8 @@ record at startup:
 - the working location (`scratch_dir`), when one is configured. It is inspected,
   classified and reported exactly like the paths above, and it is refused for its
   own reasons - it does not exist, it is not a directory, it cannot be inspected,
-  it overlaps a library root, the filesystem holding it is already below
+  it overlaps a library root (other than from inside a directory that root's
+  `exclude_paths` prune, [scratch.md](scratch.md#inside-a-root)), the filesystem holding it is already below
   `scratch_min_free_gb`, or this process cannot create and remove a file in it.
   What does NOT refuse it is storage that is not local: see
   [opting in](#opting-in) below and [the scratch directory](scratch.md).

@@ -474,8 +474,11 @@ func validateScratch(cfg *config.Config, stderr io.Writer) int {
 		return 0
 	}
 	res := startup.RunScratchOnly(startup.Check{
-		Roots:            cfg.LibraryRoots,
-		StateDir:         stateDirPath(cfg),
+		Roots:    cfg.LibraryRoots,
+		StateDir: stateDirPath(cfg),
+		// A scratch_dir inside a root is allowed only where the root's exclude_paths prune
+		// it, so validate reads the same prune decision run and serve do.
+		Excluded:         cfg.DirectoryExcluded(),
 		ScratchDirs:      cfg.ScratchDirs(),
 		ScratchMinFreeGB: cfg.ScratchMinFreeGB,
 		Platform:         startupPlatform(),
