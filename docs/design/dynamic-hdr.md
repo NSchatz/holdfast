@@ -1,7 +1,7 @@
 # Dynamic HDR
 
 What holdfast does with a Dolby Vision or HDR10+ source, and the argument behind the rule
-`CLAUDE.md` states about it. This document is that argument's single home: `CLAUDE.md` names
+the [design index](README.md) states about it. This document is that argument's single home: the [design index](README.md) names
 the rule and links here rather than restating it. The code is `internal/dynhdr` (the decision,
 the tools, the pre-pass and the gate arithmetic) and the engine's guard, pre-pass and gate
 (`internal/engine/dynamichdr.go`).

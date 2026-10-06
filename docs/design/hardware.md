@@ -2,7 +2,7 @@
 
 How holdfast decides whether a hardware encoder may run on this host, which device it opens,
 and what it does where the hardware is missing. This document is that argument's single home:
-`CLAUDE.md` names the rule and links here rather than restating it.
+the [design index](README.md) names the rule and links here rather than restating it.
 
 Nothing here relaxes a gate. A hardware encoder's output is held to exactly the gates a
 libx265 output is held to (`docs/design/swap.md`, `docs/design/quality-gate.md`,

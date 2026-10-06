@@ -1,7 +1,7 @@
 # The swap
 
 The one irreversible thing holdfast does, and the argument behind the rule
-`CLAUDE.md` states. This document is that argument's single home: `CLAUDE.md`
+the [design index](README.md) states. This document is that argument's single home: the [design index](README.md)
 names the invariant and links here rather than restating it.
 
 ## The invariant

@@ -1,7 +1,7 @@
 # The encode plan
 
-What one job's encode does to its source, and the argument behind the rule `CLAUDE.md`
-states about it. This document is that argument's single home: `CLAUDE.md` names the rule
+What one job's encode does to its source, and the argument behind the rule the [design index](README.md)
+states about it. This document is that argument's single home: the [design index](README.md) names the rule
 and links here rather than restating it.
 
 ## The rule

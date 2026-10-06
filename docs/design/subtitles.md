@@ -2,7 +2,7 @@
 
 What `subtitle_sidecars: text` writes beside a replacement, the gate a sidecar passes before it
 is written, and why a refused sidecar does not stop a swap. This document is that argument's
-single home: `CLAUDE.md` names the rule and links here rather than restating it. The key itself
+single home: the [design index](README.md) names the rule and links here rather than restating it. The key itself
 is described in [`docs/profiles.md`](../profiles.md#subtitle-sidecars); the code is
 `internal/subtitle`.
 

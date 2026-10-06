@@ -1,7 +1,7 @@
 # The whole-ledger figures
 
 Why a figure holdfast could not read is reported as nothing rather than as zero.
-This document is that argument's single home: `CLAUDE.md` names the rule and links
+This document is that argument's single home: the [design index](README.md) names the rule and links
 here rather than restating it. Which responses carry which figure, what each one
 is computed over and what its envelope means is the reference in
 [docs/api-reference.md](../api-reference.md).

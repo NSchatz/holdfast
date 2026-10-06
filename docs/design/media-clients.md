@@ -1,7 +1,7 @@
 # Media-server clients
 
 What holdfast says to Radarr, Sonarr and Plex, when, and why it is shaped the way it is. This
-document is that argument's single home: `CLAUDE.md` names the rule and links here rather than
+document is that argument's single home: the [design index](README.md) names the rule and links here rather than
 restating it. The keys, the requests and the deployment warning are in
 [`docs/post-swap-hook.md`](../post-swap-hook.md); the code is `internal/mediaclient`, the path
 maps are `internal/config/pathmap.go`, the engine's half is `internal/engine/playhold.go`, and

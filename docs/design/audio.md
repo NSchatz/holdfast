@@ -2,7 +2,7 @@
 
 What holdfast does to a source's audio tracks when a root asks it to, and what an output's audio
 must be before it may replace the source. This document is that argument's single home:
-`CLAUDE.md` names each rule and links here rather than restating it. The keys and their values
+the [design index](README.md) names each rule and links here rather than restating it. The keys and their values
 are in [`docs/profiles.md`](../profiles.md#audio).
 
 Nothing here relaxes a gate. The audio gates are added to every gate an encode already meets

@@ -1,7 +1,7 @@
 # Worker nodes
 
 What a worker node may do, what the server keeps for itself, and why the lease protocol is
-shaped the way it is. This document is that argument's single home: `CLAUDE.md` names the rule
+shaped the way it is. This document is that argument's single home: the [design index](README.md) names the rule
 and links here rather than restating it. The keys are described in
 [`docs/profiles.md`](../profiles.md#worker-nodes), the endpoints in
 [`docs/api-reference.md`](../api-reference.md#node-leases); the code is `internal/node`, the

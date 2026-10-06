@@ -1,7 +1,7 @@
 # The quality gate
 
 Why the perceptual gate is pooled the way it is, and why it fails closed. This
-document is that argument's single home: `CLAUDE.md` names the rule and links
+document is that argument's single home: the [design index](README.md) names the rule and links
 here rather than restating it. What a job's row RECORDS about a measurement -
 `vmaf_mean`, `vmaf_min`, `vmaf_model`, `vmaf_pix_fmt`, `vmaf_stream`,
 `vmaf_chroma` - is the reference in

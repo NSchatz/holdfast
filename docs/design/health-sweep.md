@@ -1,7 +1,7 @@
 # Health sweep
 
 What the library health sweep does, what it never does, and why it is shaped the way it is.
-This document is that argument's single home: `CLAUDE.md` names the rule and links here rather
+This document is that argument's single home: the [design index](README.md) names the rule and links here rather
 than restating it. The keys are described in [`docs/profiles.md`](../profiles.md#health-sweep);
 the code is `internal/health`, the engine's half is `internal/engine/healthsources.go`, and the
 daemon's wiring is `cmd/holdfast/healthsweep.go`.
