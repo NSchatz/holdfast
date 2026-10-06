@@ -1,7 +1,7 @@
 {
   "schema": "holdfast.http-surface",
   "schema_version": "1",
-  "holdfast_version": "v0.4.0",
+  "holdfast_version": "v0.5.0",
   "endpoints": [
     {
       "method": "GET",
