@@ -18,7 +18,7 @@ concurrency:
 
 env:
   # Held equal to the Dockerfile and the other workflows by scripts/check-pins.sh.
-  GO_VERSION: "1.25.14"
+  GO_VERSION: "1.26.9"
 
 jobs:
   # Seconds of work, so the test shards start almost at once.

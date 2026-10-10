@@ -179,10 +179,10 @@ done
 #
 # The workflows are ENUMERATED, never listed by hand. This section used to read ci.yml and
 # release.yml BY NAME, so a third workflow declaring GO_VERSION was a restatement no check
-# compared - it could drift to any 1.25.x, or past a govulncheck stdlib advisory, under a
+# compared - it could drift to any 1.26.x, or past a govulncheck stdlib advisory, under a
 # green build, which is this script's own founding failure. A workflow added later is
 # covered on the day it lands, the way section 5 already covers its actions.
-go_image="$(arg GO_IMAGE)"                       # golang:1.25.14-trixie@sha256:...
+go_image="$(arg GO_IMAGE)"                       # golang:1.26.9-trixie@sha256:...
 docker_go="${go_image#golang:}"; docker_go="${docker_go%%-*}"
 
 go_wfs=()
