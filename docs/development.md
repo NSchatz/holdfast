@@ -10,7 +10,7 @@ git.
 
 ## Build, test and gate
 
-Go 1.25+. The gate is `make check`, and the `check:` target IS its definition -
+Go 1.26+. The gate is `make check`, and the `check:` target IS its definition -
 read the target rather than any prose about it (`make tier-full` is `check`; `make tier-fast` its quick subset). The Makefile owns the tool pins
 and CI invokes the same target, so the nightly run, a release and a human run the identical thing.
 

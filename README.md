@@ -544,7 +544,7 @@ Every field, every figure and the exact semantics: **[`docs/api-reference.md`](d
 
 ## Build
 
-Requires Go 1.25+.
+Requires Go 1.26+.
 
 ```bash
 make build        # -> ./holdfast

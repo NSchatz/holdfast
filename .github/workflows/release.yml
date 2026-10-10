@@ -49,7 +49,7 @@ env:
   # This value is not free: govulncheck reports stdlib advisories against the toolchain
   # it runs on, so it must be at or above every `Fixed in` version it names for the
   # standard library. scripts/check-pins.sh holds it equal to the Dockerfile and ci.yml.
-  GO_VERSION: "1.25.14"
+  GO_VERSION: "1.26.9"
 
 jobs:
   # Everything a DRY RUN does, and everything a release does before anything leaves the
