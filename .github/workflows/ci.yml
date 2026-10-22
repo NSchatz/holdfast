@@ -33,7 +33,7 @@ env:
   # `make check`) silently running different tools — the same "duplicated and held in
   # step by hope" failure as the ffmpeg pin. One gate, defined once, run by CI, by the
   # release, and by a human typing `make check`.
-  GO_VERSION: "1.26.9"
+  GO_VERSION: "1.26.10"
 
 jobs:
   build:
