@@ -393,12 +393,14 @@ grep -qE '^check:.* secret-scan( |$)' "$repo/Makefile" || wiring="$wiring the Ma
 grep -qE '^check:.* secret-scan-selftest( |$)' "$repo/Makefile" || wiring="$wiring the Makefile's check: target does not name secret-scan-selftest;"
 # The gate step in ci.yml must carry no `if:` - a conditional required step is a step that
 # can be skipped, and AC-14 asks for one that cannot.
-awk '/- name: make check \(the gate\)/{found=1} found && /if:/{print "conditional"; exit}' \
+awk '/- name: make gate-full \(the gate\)/{found=1} found && /if:/{print "conditional"; exit}' \
   "$repo/.github/workflows/ci.yml" | grep -q conditional && wiring="$wiring ci.yml's gate step carries an if:;"
-grep -qE '^[[:space:]]*run: make check$' "$repo/.github/workflows/ci.yml" \
-  || wiring="$wiring ci.yml has no unconditional \`run: make check\` step;"
+grep -qE '^[[:space:]]*run: make gate-full$' "$repo/.github/workflows/ci.yml" \
+  || wiring="$wiring ci.yml has no unconditional \`run: make gate-full\` step;"
+grep -qE '^gate-full:' "$repo/Makefile" && grep -qE '^[[:space:]]+@?\$\(MAKE\) --no-print-directory check$' "$repo/Makefile" \
+  || wiring="$wiring the Makefile's gate-full: target does not run check;"
 if [ "$clean_ok" -eq 1 ] && [ -z "$wiring" ]; then
-  printf '  ok: a clean commit still lands, and `make check` (which CI runs unconditionally) reaches the scan\n'
+  printf '  ok: a clean commit still lands, and `make check` (which CI runs unconditionally as gate-full) reaches the scan\n'
   pass=$((pass + 1))
 else
   [ "$clean_ok" -eq 1 ] || printf '::error::selftest: a CLEAN commit was refused - the hook refuses everything\n' >&2
