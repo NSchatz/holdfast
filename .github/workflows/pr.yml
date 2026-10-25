@@ -160,6 +160,9 @@ jobs:
       - { name: happy-path-log-selftest,       if: needs.plan.outputs.happy_path_selftest == 'true',      run: make happy-path-log-selftest }
       - { name: govulncheck-selftest,          if: needs.plan.outputs.govulncheck_selftest == 'true',     run: make govulncheck-selftest }
       - { name: pr-scope-selftest,             if: needs.plan.outputs.pr_scope_selftest == 'true',        run: ./scripts/pr-scope-selftest.sh }
+      # A dry run of a second, so it runs on every PR, and so whenever pr-scope.sh runs everything
+      # (any Makefile or workflow change): gate-full is still check, gate-quick still tier-fast.
+      - { name: gate-targets-selftest,                                                                     run: ./scripts/gate-targets-selftest.sh }
 
   # `go test` of the changed packages and their dependents, in parallel shards
   # (scripts/pr-shard.sh): cmd/holdfast and internal/server are suites of real encodes too.

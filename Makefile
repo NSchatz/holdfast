@@ -52,7 +52,7 @@ LDFLAGS := -s -w \
 IMAGE    ?= holdfast:dev
 PLATFORM ?= linux/amd64
 
-.PHONY: build test check tier-fast tier-full fmt vet staticcheck govulncheck govulncheck-selftest \
+.PHONY: build test check tier-fast tier-full gate-quick gate-full fmt vet staticcheck govulncheck govulncheck-selftest \
         check-pins check-pins-selftest install-ffmpeg-selftest install-dynhdr-tools-selftest check-pin-live \
         secret-scan secret-scan-selftest identity-scan identity-scan-selftest \
         install-hooks snapshot-bench \
@@ -391,6 +391,15 @@ tier-full:
 	@t0=$$(date +%s); if $(MAKE) --no-print-directory check; then \
 	  echo "tier-full: PASS in $$(( $$(date +%s) - t0 )) s"; \
 	else echo "tier-full: FAIL in $$(( $$(date +%s) - t0 )) s"; exit 1; fi
+
+# The standard gate names every repository in the harness answers to. gate-full is `check`, which
+# ci.yml runs nightly on main; gate-quick is tier-fast. Neither runs on the host, and neither is what
+# a pull request waits for: that is still pr.yml, the scoped and sharded run scripts/pr-scope.sh plans.
+gate-full:
+	@$(MAKE) --no-print-directory check
+
+gate-quick:
+	@$(MAKE) --no-print-directory tier-fast
 
 # Asks UPSTREAM whether the pinned ffmpeg release, and the pinned dovi_tool and
 # hdr10plus_tool release assets, are still served. Deliberately NOT part

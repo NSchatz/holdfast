@@ -95,12 +95,13 @@ jobs:
           echo "/opt/dynhdr-tools/bin" >> "$GITHUB_PATH"
 
       # THE gate. Invoked through the Makefile, and deliberately NOT re-listed as steps
-      # here: the Makefile's `check:` target is the definition, so CI, the release workflow
+      # here: `gate-full` is the standard name for the Makefile's `check:` target, which is
+      # the definition, so CI, the release workflow
       # and a human run the identical gate, and adding to it lands in one file. (Restating
       # what it contains would just be one more copy to drift — the mistake this repo has
       # made with the ffmpeg pin, the tool pins, and the base image.)
-      - name: make check (the gate)
-        run: make check
+      - name: make gate-full (the gate)
+        run: make gate-full
 
       # The happy-path log grader's own self-test (S0130). It is deliberately NOT in
       # `check`: it MUTATES a copy of the tree, and the gate must never grade a tree one

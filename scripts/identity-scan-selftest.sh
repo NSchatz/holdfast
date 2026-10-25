@@ -208,14 +208,14 @@ grep -qE '^check:.* identity-scan( |$)' "$here/Makefile" \
 grep -qE '^check:.* identity-scan-selftest( |$)' "$here/Makefile" \
   || wiring="$wiring the Makefile's check: target does not name identity-scan-selftest;"
 for wf in "$here/.github/workflows/ci.yml" "$here/.github/workflows/release.yml"; do
-  # Every job that runs `make check` must carry `fetch-depth: 0` on its checkout. awk walks
+  # Every job that runs `make check` (or `make gate-full`, its standard name) must carry `fetch-depth: 0` on its checkout. awk walks
   # the jobs, skipping comments: a job's name line resets the state, a fetch-depth of 0
   # marks it, and a `run: make check` in an unmarked job is reported.
   bad="$(awk '
     /^[[:space:]]*#/ { next }
     /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { job=$1; full=0 }
     /fetch-depth:[[:space:]]*0([[:space:]]|$)/ { full=1 }
-    /run:[[:space:]]*make check[[:space:]]*$/ { if (!full) print job }
+    /run:[[:space:]]*make (check|gate-full)[[:space:]]*$/ { if (!full) print job }
   ' "$wf")"
   [ -z "$bad" ] || wiring="$wiring $(basename "$wf") runs make check in a shallow checkout (job $bad);"
 done
