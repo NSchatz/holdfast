@@ -390,6 +390,12 @@ Every job's encode is declared once, as a plan the command line and every gate r
 format the encoder is handed](docs/design/encode-plan.md#explicit-pixel-format) from the encoder's
 own list, and the output replaces its source only when it carries what the plan declares.
 
+`x265_open_gop` (unset by default) decides whether libx265 codes open or closed GOPs. Unset, nothing
+is passed and libx265 keeps its own default, open GOPs, so an existing configuration's command line
+and profile digest do not move. For a library a media server streams, `x265_open_gop: false` is
+recommended: every keyframe is then an IDR a player, a seek or an HLS/DASH segmenter can start
+decoding at without dropping pictures ([docs/design/encode-plan.md](docs/design/encode-plan.md#gop)).
+
 Hardware encoders are opt-in, and none runs on a guess. `nvenc`, `qsv`, `vaapi` and `amf` write
 HEVC, and each has an H.264 and an AV1 sibling (`h264_nvenc`, `av1_qsv` and the rest -
 [docs/profiles.md](docs/profiles.md)). At start, every encoder the configuration can reach is put through [a

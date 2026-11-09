@@ -118,6 +118,11 @@ var profileKnobs = []string{
 	// How a job's source is decoded, on the same terms: it contributes only where it is not
 	// the shipped `software`.
 	hwDecodeKey,
+	// Whether libx265 is told to code open or closed GOPs, on the same terms: it contributes
+	// only where it is set at all. Absent is the shipped state, in which libx265 is told
+	// nothing and keeps its own default, so a root that does not set it digests as it did
+	// before the key existed; either written value changes the command line and digests apart.
+	x265OpenGOPKey,
 }
 
 // ProfileKnobs returns the closed set of knobs a library_roots entry may override, in
@@ -237,6 +242,12 @@ type Profile struct {
 	// HWDecodeHardware. "" is the default, software. See Config.HWDecode.
 	HWDecode string `yaml:"hw_decode"`
 
+	// X265OpenGOP is whether libx265 codes open GOPs under this root: nil (the default) passes
+	// nothing and leaves libx265's own default in force, true passes open-gop=1 and false
+	// open-gop=0. It is a libx265 parameter and no other encoder reads it. See
+	// Config.X265OpenGOP.
+	X265OpenGOP *bool `yaml:"x265_open_gop"`
+
 	// Rules are this root's ordered, first-match resolution bands (see rules.go). They are
 	// NOT a knob and carry no `yaml` tag of their own: they are resolved out of the entry
 	// before the knob map is decoded, and a rule supplies a subset of the knobs above for
@@ -326,7 +337,8 @@ func (p Profile) values() []string {
 		strconv.FormatBool(p.DownscaleAcknowledged()),
 	}
 	vals = append(vals, p.audioValues()...)
-	return append(vals, p.SubtitleSidecarsMode(), p.CropMode(), p.DolbyVisionP7Mode(), p.HWFallbackMode(), p.HWDecodeMode())
+	return append(vals, p.SubtitleSidecarsMode(), p.CropMode(), p.DolbyVisionP7Mode(), p.HWFallbackMode(), p.HWDecodeMode(),
+		p.OpenGOPMode())
 }
 
 // renderDeinterlace is the deinterlace knob as `validate` prints it and as the digest reads
@@ -427,6 +439,8 @@ func digestSilent(knob, value string) bool {
 		return value == crop.Off
 	case dolbyVisionP7Key:
 		return value == DolbyVisionP7Skip
+	case x265OpenGOPKey:
+		return value == X265OpenGOPUnset
 	}
 	return false
 }
@@ -871,6 +885,12 @@ func parseRootMapping(i int, m map[string]any, file string) (rootEntry, error) {
 		// check and a rule's, in the same words. See ceiling.go.
 		if key == maxHeightKey {
 			if _, err := ceilingValue(where, val); err != nil {
+				return rootEntry{}, err
+			}
+		}
+		// x265_open_gop is a boolean, read as WRITTEN for the top level's reason.
+		if key == x265OpenGOPKey {
+			if err := checkX265OpenGOPValue(where, val); err != nil {
 				return rootEntry{}, err
 			}
 		}
