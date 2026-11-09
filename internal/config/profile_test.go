@@ -104,6 +104,7 @@ audio_downmix: stereo
 audio_loudness: ebu_r128
 hw_fallback: software
 hw_decode: hardware
+keep_bit_depth: false
 subtitle_sidecars: text
 crop: auto
 dolby_vision_p7: convert
@@ -153,6 +154,7 @@ max_load: 1.5
 		AudioLoudness:     "ebu_r128",
 		HWFallback:        "software",
 		HWDecode:          "hardware",
+		KeepBitDepth:      &no,
 		SubtitleSidecars:  "text",
 		Crop:              "auto",
 		DolbyVisionP7:     "convert",
@@ -426,6 +428,10 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 		// replacement is written by, so it is a knob; digested only where set, so a root that
 		// does not set it digests as it always did.
 		"x265_open_gop",
+		// Whether pixel_format: auto keeps a source's bit depth rather than flooring it at 10.
+		// It decides the depth a replacement is written at, so it is a knob; digested
+		// conditionally, so a root that sets nothing digests as it always did.
+		"keep_bit_depth",
 	}
 	if !reflect.DeepEqual(knobs, want) {
 		t.Fatalf("ProfileKnobs() = %v, want %v", knobs, want)

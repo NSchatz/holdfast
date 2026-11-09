@@ -751,6 +751,46 @@ error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10
 error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hdr10.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
 == x265-open-gop-true/remux-only
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/false
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== keep-bit-depth
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/stream-plan-handed
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -b:v 8000k -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/hw-decode
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -filter_hw_device hfva -hwaccel vaapi -hwaccel_device hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/x265-3cpu
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/source-full-range
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <fixtures>/full-range.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range pc -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/source-422
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv422p of "<fixtures>/422.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== keep-bit-depth/source-444
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv444p of "<fixtures>/444.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== keep-bit-depth/source-10bit
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/10bit.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== keep-bit-depth/source-12bit
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p12le of "<fixtures>/12bit.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== keep-bit-depth/source-mpeg4
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <fixtures>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/colour-bt709
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <fixtures>/bt709.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -colorspace bt709 -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/colour-hlg
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hlg.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== keep-bit-depth/colour-pq
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pq.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== keep-bit-depth/colour-hdr10
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hdr10.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
 == alias-h264_vaapi
 (no invocation)
 error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)

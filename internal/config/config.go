@@ -85,6 +85,7 @@ var knownKeys = map[string]bool{
 	downscaleAckKey:  true,
 	hwFallbackKey:    true,
 	hwDecodeKey:      true,
+	keepBitDepthKey:  true,
 	x265CPUsKey:      true,
 	x265OpenGOPKey:   true,
 	qualityKey:       true,
@@ -212,6 +213,9 @@ func defaultLayer() map[string]any {
 		// A source is decoded in software, as every job always was: hardware decode is off
 		// until configured (docs/design/hardware.md#decode).
 		hwDecodeKey: HWDecodeSoftware,
+		// pixel_format: auto floors an 8-bit source at 10 bits, as it always has: keeping the
+		// source's depth is off until configured (docs/design/encode-plan.md#bit-depth).
+		keepBitDepthKey: false,
 		// No sidecar is written until configured (docs/design/subtitles.md#sidecars).
 		subtitleSidecarsKey: SubtitleSidecarsOff,
 		// Nothing is cropped until configured (docs/design/crop.md#crop).
@@ -393,6 +397,12 @@ type Config struct {
 	// reads them. A job encoded in software decodes in software. A library root may override
 	// it. See docs/design/hardware.md#decode.
 	HWDecode string `yaml:"hw_decode"`
+	// KeepBitDepth is whether `pixel_format: auto` keeps each source's own bit depth (an
+	// 8-bit source encoded 8-bit, HEVC Main under libx265) rather than flooring it at 10 (HEVC
+	// Main 10), which is the default. It never lowers a depth, so a 10-bit HDR source stays
+	// 10-bit. It is refused beside a forced pixel_format. A library root may override it. See
+	// docs/design/encode-plan.md#bit-depth.
+	KeepBitDepth *bool `yaml:"keep_bit_depth"`
 	// The audio keys, each off until configured and each overridable per library root: see
 	// Profile and docs/design/audio.md.
 	AudioReencode     string `yaml:"audio_reencode"`
@@ -454,8 +464,8 @@ type Config struct {
 	// (see internal/engine.svtav1Preset). Ignored by the hardware encoders.
 	Preset string `yaml:"preset"`
 	// PixelFormat is the output pixel format. "auto" (default) derives it per
-	// source — preserve chroma subsampling, floor bit-depth at 10 (see
-	// internal/hdr.DerivePixFmt); an exotic/unrecognized source pix_fmt is SKIPPED,
+	// source - preserve chroma subsampling, floor bit-depth at 10, or keep the source's
+	// depth under KeepBitDepth (see internal/hdr.DeriveOutputPixFmt); an exotic/unrecognized source pix_fmt is SKIPPED,
 	// never silently subsampled. Any other value forces that pix_fmt for every
 	// source (back-compat with TRANSCODE-1's fixed yuv420p10le behaviour).
 	PixelFormat string `yaml:"pixel_format"`
@@ -1158,6 +1168,7 @@ func (c *Config) TopLevelProfile() Profile {
 		DownscaleAck:      c.DownscaleAck,
 		HWFallback:        c.HWFallback,
 		HWDecode:          c.HWDecode,
+		KeepBitDepth:      c.KeepBitDepth,
 		AudioReencode:     c.AudioReencode,
 		AudioCodec:        c.AudioCodec,
 		AudioMonoKbps:     c.AudioMonoKbps,

@@ -123,6 +123,10 @@ var profileKnobs = []string{
 	// nothing and keeps its own default, so a root that does not set it digests as it did
 	// before the key existed; either written value changes the command line and digests apart.
 	x265OpenGOPKey,
+	// Whether `pixel_format: auto` keeps the source's bit depth rather than flooring it at
+	// 10, on the same terms: it contributes only where it is not the shipped `false`, so a
+	// root that sets nothing digests as it did before the key existed.
+	keepBitDepthKey,
 }
 
 // ProfileKnobs returns the closed set of knobs a library_roots entry may override, in
@@ -248,6 +252,11 @@ type Profile struct {
 	// Config.X265OpenGOP.
 	X265OpenGOP *bool `yaml:"x265_open_gop"`
 
+	// KeepBitDepth is whether `pixel_format: auto` keeps a source's own bit depth under this
+	// root rather than flooring it at 10. nil is the default, false, which is what a Profile
+	// assembled in Go carries. See Config.KeepBitDepth and bitdepth.go.
+	KeepBitDepth *bool `yaml:"keep_bit_depth"`
+
 	// Rules are this root's ordered, first-match resolution bands (see rules.go). They are
 	// NOT a knob and carry no `yaml` tag of their own: they are resolved out of the entry
 	// before the knob map is decoded, and a rule supplies a subset of the knobs above for
@@ -338,7 +347,7 @@ func (p Profile) values() []string {
 	}
 	vals = append(vals, p.audioValues()...)
 	return append(vals, p.SubtitleSidecarsMode(), p.CropMode(), p.DolbyVisionP7Mode(), p.HWFallbackMode(), p.HWDecodeMode(),
-		p.OpenGOPMode())
+		p.OpenGOPMode(), strconv.FormatBool(p.BitDepthKept()))
 }
 
 // renderDeinterlace is the deinterlace knob as `validate` prints it and as the digest reads
@@ -433,6 +442,8 @@ func digestSilent(knob, value string) bool {
 		return value == HWFallbackSkip
 	case hwDecodeKey:
 		return value == HWDecodeSoftware
+	case keepBitDepthKey:
+		return value == "false"
 	case subtitleSidecarsKey:
 		return value == SubtitleSidecarsOff
 	case cropKey:
@@ -461,6 +472,9 @@ func (p Profile) validate() error {
 		return err
 	}
 	if err := validateHWDecode(p.HWDecode); err != nil {
+		return err
+	}
+	if err := p.validateKeepBitDepth(); err != nil {
 		return err
 	}
 	if err := p.validateAudio(); err != nil {

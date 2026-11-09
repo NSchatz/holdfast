@@ -32,7 +32,7 @@
 # min_bitrate_kbps, min_savings_percent, skip_hardlinked, vmaf_enable, min_vmaf,
 # vmaf_min_pool, vmaf_min_chroma, vmaf_subsample, vmaf_model, audio_languages,
 # subtitle_languages, keep_commentary, remux_only, deinterlace, max_height,
-# downscale_acknowledged, the audio keys below. Anything else inside an entry refuses to start: workers,
+# downscale_acknowledged, keep_bit_depth, the audio keys below. Anything else inside an entry refuses to start: workers,
 # cores_per_worker, x265_cpus, state_dir, server_*, undo_window_hours,
 # history_retention_rows, run_window, max_load and the notification keys describe the
 # PROCESS, not a library, and stay at the top level.
@@ -310,8 +310,10 @@ dry_run: false
 #                         #              (H.264 < HEVC < AV1) is skipped as
 #                         #              better-codec-family, never re-encoded
 #                         #              down. h264_qsv and h264_vaapi carry 8-bit
-#                         #              only: pair them with pixel_format: yuv420p
-#                         #              (the derived default is 10-bit).
+#                         #              only: pair them with keep_bit_depth: true
+#                         #              (8-bit sources then encode; 10-bit ones
+#                         #              still skip) or pixel_format: yuv420p (the
+#                         #              derived default is 10-bit).
 #                         # The raw ffmpeg -c:v codec name (e.g. libsvtav1) also
 #                         # works as an alias for its short key.
 #                         #   auto       the first of nvenc, qsv, vaapi, amf that
@@ -447,6 +449,17 @@ dry_run: false
 #                         # on svtav1/qsv/amf/vaapi, 12-bit on svtav1/amf/vaapi) the
 #                         # file is SKIPPED as exotic-pixel-format, never left to
 #                         # ffmpeg to subsample or cut depth silently.
+# keep_bit_depth: false  # false (default): pixel_format: auto floors an 8-bit source
+#                         # at 10 bits (HEVC Main 10 under cpu), which compresses
+#                         # slightly better and avoids banding. true: keep each
+#                         # source's own depth, so an 8-bit source is encoded 8-bit
+#                         # (HEVC Main), which direct plays on more clients (browsers,
+#                         # TVs and set-top boxes that decode HEVC Main but not Main
+#                         # 10). It never lowers a depth: a 10-bit HDR10/HLG source
+#                         # stays 10-bit. Every encoder carries an 8-bit plan (vaapi
+#                         # uploads nv12 without the Main 10 profile). Refused beside
+#                         # a forced pixel_format. A library root may override it.
+#                         # See docs/design/encode-plan.md#bit-depth.
 
 # container_ext: source  # "source" or "auto" (default, equivalent): output
 #                         # container = the SOURCE file's own extension, so the

@@ -86,6 +86,15 @@ const (
 	// back. It is offered on every job, and recorded by no other verdict, so no row written
 	// before the key existed changes on upgrade.
 	InputDolbyVisionP7 = dynhdr.InputP7
+
+	// InputKeepBitDepth is the keep_bit_depth key, recorded by the one verdict whose answer
+	// it can move: the encoder half of the pixel-format guard (SkipExoticPixelFormat where the
+	// job's encoder lists no format for the plan's chroma and depth). An 8-bit source planned
+	// at 10 bits for an encoder that carries 8 bits only (h264_qsv, h264_vaapi) is skipped
+	// there, and turning keep_bit_depth on plans it at 8 and offers it back. It is offered on
+	// every job, on dolby_vision_p7's terms, and recorded by no other verdict, so no row
+	// written before the key existed changes on upgrade.
+	InputKeepBitDepth = "keep_bit_depth"
 )
 
 // EVERY VALUE HERE IS RESOLVED FOR ONE PATH, through the whole layering the decision that
@@ -127,6 +136,7 @@ func DecisionInputsForJob(cfg config.Config, prof config.Profile, ts config.Tran
 		InputMinBitrateKbps: strconv.Itoa(prof.MinBitrateKbps),
 		InputContainerExt:   ts.ContainerExt,
 		InputDolbyVisionP7:  prof.DolbyVisionP7Mode(),
+		InputKeepBitDepth:   strconv.FormatBool(prof.BitDepthKept()),
 	}
 	if len(prof.Rules) > 0 {
 		read[InputRules] = prof.Rules.Canonical()
