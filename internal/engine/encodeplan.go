@@ -985,8 +985,16 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 	// A converted profile 7 source is encoded from the converted stream, a second input read
 	// at the source's exact rate, which takes the source's video's place in the map; every
 	// other stream is still the source's (docs/design/dynamic-hdr.md#profile-7).
+	//
+	// The chapters are named from the source explicitly on this path and only on it. ffmpeg
+	// copies chapters from the first input that has any, which is the source wherever the
+	// source has them; but a second input is the one place another file could ever supply
+	// them, and the chapter-parity gate holds the output to the SOURCE's table, so the source
+	// is the only input chapters may come from. A single-input command line has nowhere else
+	// to take them from, and stays as it was.
 	if raw := p.dynamic.InputArgs(); raw != nil {
 		mapArgs = append(raw, convertedMapArgs(p.Streams, len(p.coverArt.attached) > 0)...)
+		mapArgs = append(mapArgs, "-map_chapters", "0")
 	}
 	body = append([]string(nil), mapArgs...)
 	if p.Video.Copy {

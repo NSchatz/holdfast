@@ -23,6 +23,9 @@ The crop gate joins them by addition on a job that crops: the replacement must b
 plan declares, and the area the crop removed from the source must be black on every frame
 ([crop](crop.md#crop-gate)).
 
+The chapter-parity gate joins them by addition: the replacement must carry the source's
+chapter table ([chapter parity](#chapter-parity)).
+
 Any gate failure discards the temp and leaves the source byte-for-byte intact.
 There is no half-written state left behind to clean up, and no moment at which the
 source is gone and the replacement is not yet in place.
@@ -38,6 +41,52 @@ removed under a rename nothing has proved. True power-loss survival is filesyste
 and hardware-dependent and is untestable in CI without a power-cut harness, so
 this is the portable discipline, documented as such, and not an absolute
 guarantee.
+
+## Chapter parity
+
+<a id="chapter-parity"></a>
+
+Chapters are container metadata: not a stream, so the intended-stream check cannot count them,
+and not pictures, so the decode and perceptual gates cannot score them. An output whose chapters
+were dropped, moved or pushed past its end passes every other gate. The chapter-parity gate
+(`internal/chapters`, gate label `chapters`) runs after the intended-stream check, on every job
+including a remux, and refuses the output unless:
+
+- it carries the same number of chapters as the source, with the same titles, in the same order;
+- each chapter starts and ends within **100 ms** of the source's, both read as positions into the
+  file (the chapter time less the file's `start_time`, the position a player shows, and the one
+  ffmpeg keeps when it rebases a copy to start at 0);
+- every chapter the source places inside its own duration starts before the output's end and
+  ends no later than the output's end plus 100 ms plus `duration_tolerance_sec` (the drift the
+  length gate already accepted between the two files).
+
+The tolerance is 100 ms because an encode copies chapters and never re-times them. The only
+differences a faithful copy carries are the rounding of a rescale between time bases (Matroska
+stores nanoseconds, ffmpeg's MP4 muxer milliseconds: at most 1 ms) and a move of the first
+presented timestamp by an encoder delay or a frame reordering (two frames at 23.976 fps is
+83 ms). A crop, a scale or a deinterlace changes no timestamp. 100 ms is still far below what a
+viewer can see: a chapter seek lands on the keyframe before it, usually seconds away.
+
+A chapter table either file reports that cannot be read is refused: an unknown table is not an
+empty one. A refusal is deterministic, since the same source, configuration and ffmpeg build
+write the same table, and the source is kept.
+
+**A source whose own table is malformed** (a chapter past its own end, ending before it starts,
+or overlapping or out of order with the one before it) is not refused for it, and is not
+skipped. The gate's question is whether the encode damaged what was there, and an output that
+reproduces the source's table exactly has not; refusing it would keep a file whose table is just
+as broken and make it unencodable for a defect the swap neither causes nor changes. Parity is
+still enforced chapter by chapter, and only the in-duration check is waived, and only for a
+chapter the source itself places outside its duration; each defect is logged as a warning naming
+the file. Where the source's duration is unknown nothing is waived. This is the case
+[issue #200](https://github.com/NSchatz/holdfast/issues/200) met: the swapped file's table had
+three chapters starting after its end, and
+[the re-acquired source carries the same table](https://github.com/NSchatz/holdfast/issues/200#issuecomment-6730994015),
+copied faithfully. That swap passes this gate.
+
+The encode takes chapters from the source. A single-input command line has nowhere else to take
+them from; the one command line with a second input (a converted Dolby Vision profile 7 stream,
+`1:v:0`) names the source explicitly with `-map_chapters 0`.
 
 ## Where the encode is written, and why the swap shape never moves
 
