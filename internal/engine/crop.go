@@ -8,7 +8,6 @@ import (
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/crop"
 	"github.com/NSchatz/holdfast/internal/dynhdr"
-	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 )
@@ -282,10 +281,7 @@ func (e *Engine) cropBeforePrePass(ctx context.Context, f, work string, props *p
 		return &c, e.cropL5(ctx, f, work), intent
 	}
 	l5 := e.cropL5(ctx, f, work)
-	outFmt := ts.PixelFormat
-	if ts.PixelFormatAuto() {
-		outFmt, _ = hdr.DerivePixFmt(props.PixFmt())
-	}
+	outFmt, _ := planPixelFormat(ts, props.PixFmt())
 	in := cropInputs(*cropIn, props, outFmt)
 	in.DolbyVision.L5 = l5
 	d := crop.Decide(in)

@@ -18,6 +18,8 @@ reasoning lives in the document, not in this index.
   HDR10 metadata its plan declares** - [`docs/design/encode-plan.md`](encode-plan.md#fidelity).
 - **libx265 is told about GOPs only where a root sets `x265_open_gop`; unset passes nothing** -
   [`docs/design/encode-plan.md`](encode-plan.md#gop).
+- **An 8-bit source is encoded at 10 bits unless its root says `keep_bit_depth: true`, and no
+  setting plans a source shallower than it is** - [`docs/design/encode-plan.md`](encode-plan.md#bit-depth).
 - **A hardware encoder runs only after a real encode through a job's own command line came out
   faithful at each bit depth** - [`docs/design/hardware.md`](hardware.md#probe).
 - **A job whose hardware is missing or fails is encoded by nothing else unless its root says

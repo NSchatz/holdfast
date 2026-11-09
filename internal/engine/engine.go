@@ -3500,19 +3500,16 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 	}
 
 	// Chroma/bit-depth guard. Preserve the source's chroma subsampling and floor bit-depth
-	// at 10; an exotic pix_fmt is SKIPPED rather than silently subsampled or guessed. A
-	// forced (non-"auto") PixelFormat bypasses derivation entirely.
-	planFmt := ts.PixelFormat
-	if ts.PixelFormatAuto() {
-		srcPixFmt := props.PixFmt()
-		derived, ok := hdr.DerivePixFmt(srcPixFmt)
-		if !ok {
-			return props, sourceVerdict{guard: SkipExoticPixelFormat, codec: codec,
-				inputs:  []string{InputPixelFormat},
-				log:     "skip (unrecognized/exotic pixel format — refusing to silently subsample)",
-				logArgs: []any{"pix_fmt", srcPixFmt}}
-		}
-		planFmt = derived
+	// at 10 (or keep it, under keep_bit_depth); an exotic pix_fmt is SKIPPED rather than
+	// silently subsampled or guessed. A forced (non-"auto") PixelFormat bypasses derivation
+	// entirely. keep_bit_depth decides no refusal here - the depth rule cannot make an exotic
+	// format readable - so this verdict records pixel_format alone, as it always did.
+	planFmt, ok := planPixelFormat(ts, props.PixFmt())
+	if !ok {
+		return props, sourceVerdict{guard: SkipExoticPixelFormat, codec: codec,
+			inputs:  []string{InputPixelFormat},
+			log:     "skip (unrecognized/exotic pixel format — refusing to silently subsample)",
+			logArgs: []any{"pix_fmt", props.PixFmt()}}
 	}
 	// The same guard, for the encoder: the output pixel format - derived or forced - must be
 	// one the job's encoder can be handed EXACTLY, in a format it lists with the same chroma
@@ -3539,7 +3536,7 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 	if spec, known := encoder.Lookup(runs); known && !prof.RemuxOnlyEnabled() {
 		if _, ok := spec.InputFormat(planFmt); !ok {
 			return props, sourceVerdict{guard: SkipExoticPixelFormat, codec: codec,
-				inputs:  []string{InputPixelFormat, InputEncoder},
+				inputs:  []string{InputPixelFormat, InputEncoder, InputKeepBitDepth},
 				log:     "skip (the encoder lists no pixel format carrying this chroma subsampling and bit depth - refusing to let ffmpeg silently subsample or cut depth)",
 				logArgs: []any{"pix_fmt", planFmt, "encoder", spec.Key, "ffmpeg_encoder", spec.FFmpegCodec}}
 		}

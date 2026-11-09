@@ -201,7 +201,7 @@ type VideoPlan struct {
 	DecodeDevice string
 	// PixelFormat is the pixel format the video is encoded to: the one the settings force,
 	// or the one derived from the source's so that its chroma subsampling is kept and its
-	// bit depth is floored at 10.
+	// bit depth is floored at 10 - or, under keep_bit_depth, kept (planPixelFormat).
 	PixelFormat string
 	// InputFormat is the format the encoder is handed, named explicitly on the command
 	// line: a format the encoder lists that carries PixelFormat's chroma subsampling and
@@ -474,16 +474,12 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 		return nil, err
 	}
 
-	pixFmt := ts.PixelFormat
-	if ts.PixelFormatAuto() {
-		derived, ok := hdr.DerivePixFmt(props.PixFmt())
-		if !ok {
-			// The engine's pix_fmt guard runs before any plan is derived and should already
-			// have skipped an exotic source - this is a defence-in-depth backstop so the
-			// encode can never silently subsample if that guard is ever bypassed.
-			return nil, fmt.Errorf("cannot derive an output pixel format for %q (unrecognized/exotic source pix_fmt)", in.source)
-		}
-		pixFmt = derived
+	pixFmt, ok := planPixelFormat(ts, props.PixFmt())
+	if !ok {
+		// The engine's pix_fmt guard runs before any plan is derived and should already
+		// have skipped an exotic source - this is a defence-in-depth backstop so the
+		// encode can never silently subsample if that guard is ever bypassed.
+		return nil, fmt.Errorf("cannot derive an output pixel format for %q (unrecognized/exotic source pix_fmt)", in.source)
 	}
 	// The deinterlace and the scale, resolved from the profile and the source's own snapshot:
 	// the filters the encode runs, the reference the perceptual gate builds and the provenance
@@ -575,6 +571,21 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 	// The audio last: its first loudness passes are the one costly step of a derivation, so
 	// every refusal above is met before any runs.
 	return p, p.deriveAudio(in)
+}
+
+// planPixelFormat is the pixel format a job's video is encoded to, and the ONE reading of
+// pixel_format and keep_bit_depth together: the engine's pixel-format guard, the crop's
+// decision and the plan derivation all ask here, so none of them can plan a depth another
+// did not. A forced pixel_format is returned as it is. `auto` derives one from the source's
+// own format (srcPixFmt): its chroma subsampling kept and its bit depth floored at 10, or,
+// under keep_bit_depth, its bit depth kept (hdr.DeriveOutputPixFmt), which never lowers a
+// depth. ok is false where `auto` cannot derive one (an exotic or deeper-than-12-bit
+// source), and the caller skips or refuses.
+func planPixelFormat(ts config.Transcode, srcPixFmt string) (string, bool) {
+	if !ts.PixelFormatAuto() {
+		return ts.PixelFormat, true
+	}
+	return hdr.DeriveOutputPixFmt(srcPixFmt, ts.KeepBitDepth)
 }
 
 // deriveDynamic declares the dynamic HDR the output carries, from the job's pre-pass: what the
