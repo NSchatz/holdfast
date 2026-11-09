@@ -276,7 +276,7 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 		}
 	}
 
-	// 7. VMAF perceptual-quality gate, last because it costs a second full decode. The
+	// 7. VMAF perceptual-quality gate, the last faithfulness gate because it costs a second full decode. The
 	// structural checks prove the output exists, decodes and carries the tracks; VMAF proves
 	// it still LOOKS like the source. Unavailable libvmaf or a failed measurement REJECTS.
 	//
@@ -300,10 +300,31 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 		// is gone.
 		return vmafProof{Skipped: VmafSkippedRemuxOnly}, "", "", nil
 	}
+	proof := none
 	if prof.VmafGate() {
-		return e.vmafGateCropped(ctx, tmp, in, prof, job.Picture.Deinterlace, job.Picture.Crop.Rect, job.Picture.Downscale)
+		var gate string
+		var class store.FailureClass
+		var err error
+		proof, gate, class, err = e.vmafGateCropped(ctx, tmp, in, prof, job.Picture.Deinterlace, job.Picture.Crop.Rect, job.Picture.Downscale)
+		if err != nil {
+			return proof, gate, class, err
+		}
 	}
-	return none, "", "", nil
+
+	// 8. THE PLAYABILITY GATE, last: every gate above measured whether the output is FAITHFUL,
+	// and this measures whether it PLAYS from anywhere but its first frame - decodes started
+	// cold at a sample of its keyframes, its video remuxed to fragmented MP4 with sampled
+	// fragments decoded on their own, and the cold starts again on the job's hardware decoder
+	// where it has one (docs/design/playability.md#playability-gate). Last because a rejection
+	// here then carries the VMAF proof that everything else passed, and because its cost is
+	// bounded and small beside the perceptual gate's. A REMUX is not held to it: its video is
+	// the source's bytes, which the identity check above established, and no swap changes how
+	// they play. A failed cold start is DETERMINISTIC (the same settings produce the same
+	// bitstream); a measurement that could not be taken is transient.
+	if gate, class, err := e.playabilityGate(ctx, job); err != nil {
+		return proof, gate, class, err
+	}
+	return proof, "", "", nil
 }
 
 // addedStreams are the streams the plan's audio adds after every carried one, each as the

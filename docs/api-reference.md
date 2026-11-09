@@ -1169,7 +1169,7 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   The `guard` label set is the skip vocabulary enumerated under [the recorded outcome](#the-recorded-outcome---the-proof-a-swap-was-safe),
   plus `unclassified` for a reason this build does not recognise. The `gate` label set is
   `probe | encode | codec | length | size | stream-parity | fidelity | decode | vmaf-mean | vmaf-min | vmaf-chroma |
-  vmaf-unmeasured | swap | other | audio | loudness | crop | dolby-vision-record | dolby-vision-rpu | hdr10-plus | dolby-vision-l5`, decided where the rejection is made and never read off the failure's
+  vmaf-unmeasured | swap | other | audio | loudness | crop | dolby-vision-record | dolby-vision-rpu | hdr10-plus | dolby-vision-l5 | playability`, decided where the rejection is made and never read off the failure's
   `reason` text. Both are CLOSED vocabularies pre-created at `0`, which is what lets an alert be written
   before the first such skip or rejection, and what keeps the number of series knowable in advance: a value
   outside the set is counted under its fallback (`unclassified`, `other`) and never becomes a label of its

@@ -23,6 +23,9 @@ Where each part of the repository lives and what it owns.
   the decision (a rectangle or a named refusal) and the blackness check of the removed area.
 - `internal/dynhdr` - which Dolby Vision and HDR10+ sources are carried, the dovi_tool and hdr10plus_tool
   pre-passes, the Dolby Vision VBV ceiling, and the dynamic-HDR gates' arithmetic.
+- `internal/playability` - the playability gate: the keyframe sample, the cold-start decodes and their
+  landing check, and the fragmented-MP4 remux decoded fragment by fragment; `playabilitytest` builds its
+  fixtures.
 - `internal/queuekey` - the `savings_per_hour` ordering key: estimated bytes saved per hour of work.
 - `internal/health` - the report-only health sweep: its schedule, resumable full decode and read-API report.
 - `internal/mediaclient` - the Radarr, Sonarr and Plex clients: the post-swap rescan and the Plex play hold.

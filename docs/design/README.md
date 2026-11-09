@@ -8,6 +8,9 @@ reasoning lives in the document, not in this index.
 
 - **No source is mutated until a replacement has passed every gate** -
   [`docs/design/swap.md`](swap.md#swap-invariant).
+- **A replacement replaces nothing until it decodes from a cold start at a sample of its keyframes,
+  and fragment by fragment when remuxed to fragmented MP4** -
+  [`docs/design/playability.md`](playability.md#playability-gate).
 - **The quality gate bounds the worst frame, not only the average** -
   [`docs/design/quality-gate.md`](quality-gate.md#vmaf-pooling).
 - **An unreadable figure is reported as null, never as a zero** -

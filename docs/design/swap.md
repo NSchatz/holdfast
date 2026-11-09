@@ -23,6 +23,12 @@ The crop gate joins them by addition on a job that crops: the replacement must b
 plan declares, and the area the crop removed from the source must be black on every frame
 ([crop](crop.md#crop-gate)).
 
+The playability gate joins them by addition, last: the replacement must decode when started cold
+at a sample of its keyframes, and when its video is remuxed to fragmented MP4 and each sampled
+fragment is decoded on its own, as a player that seeks or a server that streams it would start it
+([playability](playability.md#playability-gate)). The gates above measure whether a replacement is
+faithful; this one measures whether it plays from anywhere but its first frame.
+
 Any gate failure discards the temp and leaves the source byte-for-byte intact.
 There is no half-written state left behind to clean up, and no moment at which the
 source is gone and the replacement is not yet in place.
