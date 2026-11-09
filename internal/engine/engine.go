@@ -363,6 +363,10 @@ const (
 	// GateStreamParity: the output does not carry the streams this job intended, or its
 	// streams could not be enumerated to check.
 	GateStreamParity = "stream-parity"
+	// GateChapters: the output's chapter table is not the source's - a chapter dropped,
+	// added, retitled or moved - or one of its chapters lies past the output's end, or the
+	// two tables could not be read to compare (docs/design/swap.md#chapter-parity).
+	GateChapters = "chapters"
 	// GateFidelity: the output does not carry what its encode plan declares - its bit
 	// depth, chroma subsampling, a colour tag, or an HDR10 static-metadata block the
 	// source carries - or that could not be established.
@@ -441,6 +445,7 @@ var GateVocabulary = []string{
 	GateDolbyVisionRPU,
 	GateHDR10Plus,
 	GateDolbyVisionL5,
+	GateChapters,
 }
 
 // Engine drives the transcode over a set of library roots.

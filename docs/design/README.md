@@ -8,6 +8,8 @@ reasoning lives in the document, not in this index.
 
 - **No source is mutated until a replacement has passed every gate** -
   [`docs/design/swap.md`](swap.md#swap-invariant).
+- **An output replaces its source only when it carries the source's chapter table, and a source's own malformed table reproduced exactly passes** -
+  [`docs/design/swap.md`](swap.md#chapter-parity).
 - **The quality gate bounds the worst frame, not only the average** -
   [`docs/design/quality-gate.md`](quality-gate.md#vmaf-pooling).
 - **An unreadable figure is reported as null, never as a zero** -
