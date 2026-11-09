@@ -46,7 +46,7 @@ one value it derives, and refuses a plan carrying any other (below).
 
 | Part | What this build declares | Read by |
 |---|---|---|
-| `Video` | the registry encoder and the device it opens (the render node for `vaapi`, none for every other encoder); the decode path (software, `DecodeSoftware`); the pixel format (forced, or derived from the source's); the quality value (`crf`, or `bitrate_kbps`, and the preset); the codec the output must be in, or a copy of the source's video on a remux-only root | the command line; the codec gate; on a copy, the video-identity check |
+| `Video` | the registry encoder and the device it opens (the render node for `vaapi`, none for every other encoder); the decode path (software, `DecodeSoftware`); the pixel format (forced, or derived from the source's); the quality value (`crf`, or `bitrate_kbps`, and the preset); the GOP libx265 is told (`x265_open_gop`, [below](#gop)), and nothing for any other encoder; the codec the output must be in, or a copy of the source's video on a remux-only root | the command line; the codec gate; on a copy, the video-identity check |
 | `Audio`, `Subtitles` | every carried stream is copied (`CopyStreams`) | the command line |
 | `AudioTracks` | what the encode does to each audio track: copied (and why), re-encoded in place, kept beside its added re-encode, a stereo downmix added, the codec, layout, sample rate and bitrate of each, and the first loudness pass's figures where one is normalised ([docs/design/audio.md](audio.md)); the zero plan copies every track | the command line; the stream-parity gate's additions; the audio and loudness gates; the row's `audio_tracks` |
 | `Streams` | the intended stream map: which source streams the output carries (the same value the row's dropped streams are recorded from) | the command line; the stream-parity gate |
@@ -117,6 +117,41 @@ Both are recorded argv changes, not refactors: the golden command lines of the h
 encoders moved to name their input format (and VAAPI to upload `p010le`), and every one is
 held by `TestGoldenArgv_EveryArgvNamesItsPixelFormat` to name a format its encoder lists.
 libx265 and libsvtav1 are handed every format they list unchanged.
+
+## Open and closed GOPs
+
+<a id="gop"></a>
+
+**libx265 is told about GOPs only where a root sets `x265_open_gop`, and an unset key passes
+nothing.** The plan declares `Video.GOP` from the effective profile, only for libx265:
+`x265_open_gop: false` appends `:open-gop=0` to `-x265-params`, after the run's parallelism and
+ahead of the colour block, and `true` appends `:open-gop=1`, on the quality and the bitrate path
+alike. Every other encoder's plan declares nothing, and the builder refuses a plan whose GOP is
+not the one its derivation gives (`gopFor`).
+
+Unset is the default because a new instruction to the encoder changes the command line and so the
+profile digest every terminal row records: a configuration that did not ask for it keeps the
+argv and the digest it had. The key is digested only where it is set, on the conditional terms
+the deinterlace knob set.
+
+The recommendation is closed GOPs (`false`) for any library a media server streams. libx265's
+own default is open GOPs: each keyframe after the first is a CRA, and its leading pictures in
+display order (RASL) reference the GOP before it. A decoder that starts at a CRA - a player
+seeking or resuming, a segmenter cutting HLS, DASH or fragmented MP4 there, a hardware decoder
+handed one segment - must drop those pictures. That path is legal and most decoders take it,
+but it is the one the gates do not exercise: the decode-integrity gate is one linear decode from
+the first frame, which never starts at a CRA. Under closed GOPs every keyframe is an IDR with no
+picture referencing across it, so a cold start anywhere decodes everything it is handed. It costs
+a little compression, which is why it is a choice rather than a change to every library.
+
+The key is a libx265 parameter. A root whose files libx265 can encode - its own encoder, a
+rule's, an encode profile's, or the software fallback `hw_fallback: software` gives a hardware
+HEVC encoder or `auto` - accepts it, and it applies to exactly the jobs libx265 encodes. A root
+none of whose files libx265 can encode refuses it at start, naming the key: on such a root it is
+a setting nothing reads, and an operator who wrote it would believe their library had closed
+GOPs. A real libx265 encode under each value proves what reaches the bitstream: a CRA with RASL
+pictures at the keyframe interval unset or under `true`, and an IDR with none under `false`
+(`TestX265OpenGOP_ReachesTheBitstream`).
 
 ## The output fidelity gate
 

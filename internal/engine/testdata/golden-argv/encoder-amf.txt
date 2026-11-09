@@ -524,6 +524,42 @@ error: no output container is known for a name with no extension (output <out>/f
 -hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -hwaccel vaapi -hwaccel_device hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == hw-decode/software
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-unset
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-unset/not-handed
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-unset/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc vbr_peak -b:v 8000k -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-unset/x265-3cpu
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-unset/x265-3cpu/bitrate-1500k/hdr10
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/hdr10.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -rc vbr_peak -b:v 1500k -vf setparams=color_primaries=bt2020:color_trc=smpte2084 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-unset/remux-only
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-false
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-false/not-handed
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-false/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc vbr_peak -b:v 8000k -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-false/x265-3cpu
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-false/x265-3cpu/bitrate-1500k/hdr10
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/hdr10.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -rc vbr_peak -b:v 1500k -vf setparams=color_primaries=bt2020:color_trc=smpte2084 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-false/remux-only
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-true
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-true/not-handed
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-true/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc vbr_peak -b:v 8000k -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-true/x265-3cpu
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-true/x265-3cpu/bitrate-1500k/hdr10
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/hdr10.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -rc vbr_peak -b:v 1500k -vf setparams=color_primaries=bt2020:color_trc=smpte2084 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== x265-open-gop-true/remux-only
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == alias-hevc_amf
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_amf -pix_fmt p010le -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == alias/stream-plan-handed-hevc_amf
