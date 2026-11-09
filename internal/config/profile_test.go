@@ -72,7 +72,7 @@ func TestLoad_FlatStringRootsAreUnchanged(t *testing.T) {
 library_roots:
   - /mnt/tv
   - /mnt/movies
-encoder: svtav1
+encoder: cpu
 crf: 18
 preset: medium
 pixel_format: yuv420p10le
@@ -108,6 +108,7 @@ keep_bit_depth: false
 subtitle_sidecars: text
 crop: auto
 dolby_vision_p7: convert
+x265_open_gop: false
 workers: 4
 state_dir: /var/lib/holdfast
 undo_window_hours: 24
@@ -123,7 +124,7 @@ max_load: 1.5
 	no := false
 	yes := true
 	want := Profile{
-		Encoder:           "svtav1",
+		Encoder:           "cpu",
 		CRF:               18,
 		Preset:            "medium",
 		PixelFormat:       "yuv420p10le",
@@ -157,6 +158,7 @@ max_load: 1.5
 		SubtitleSidecars:  "text",
 		Crop:              "auto",
 		DolbyVisionP7:     "convert",
+		X265OpenGOP:       &no,
 	}
 	roots := c.RootProfiles()
 	if len(roots) != 2 {
@@ -422,6 +424,10 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 		// is a knob; digested conditionally, so a root that sets nothing digests as it
 		// always did.
 		"hw_decode",
+		// Whether libx265 codes open or closed GOPs. It changes the command line every libx265
+		// replacement is written by, so it is a knob; digested only where set, so a root that
+		// does not set it digests as it always did.
+		"x265_open_gop",
 		// Whether pixel_format: auto keeps a source's bit depth rather than flooring it at 10.
 		// It decides the depth a replacement is written at, so it is a knob; digested
 		// conditionally, so a root that sets nothing digests as it always did.

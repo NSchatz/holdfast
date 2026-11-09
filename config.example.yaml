@@ -378,7 +378,20 @@ dry_run: false
 #                         # carried by default on cpu; every other encoder skips
 #                         # all of them. A library root may override it. See
 #                         # docs/design/dynamic-hdr.md.
-# crf: 22                # quality knob (lower = bigger/better): libx265/libsvtav1
+# x265_open_gop: false   # whether libx265 codes open GOPs. Unset (the default):
+#                         # nothing is passed and libx265 keeps its own default,
+#                         # which is OPEN - keyframes after the first are CRA
+#                         # pictures whose leading (RASL) pictures reference the
+#                         # GOP before them, so a player, seek or HLS/DASH
+#                         # segmenter that starts decoding at one must drop them.
+#                         # false: open-gop=0, every keyframe an IDR that decodes
+#                         # on its own - RECOMMENDED for a library a media server
+#                         # (Plex, Jellyfin, Emby) streams or remuxes. true:
+#                         # open-gop=1, explicitly. Applies only where libx265
+#                         # encodes the job; a root no file of which libx265 can
+#                         # encode refuses it at start. A library root may
+#                         # override it. See docs/design/encode-plan.md#gop.
+# crf: 22               # quality knob (lower = bigger/better): libx265/libsvtav1
 #                         # constant-rate-factor, 0-51. A hardware encoder with no
 #                         # quality.<key> below takes this value unchanged as its
 #                         # own quality target, which is what it always did.

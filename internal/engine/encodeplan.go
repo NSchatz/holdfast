@@ -211,6 +211,41 @@ type VideoPlan struct {
 	InputFormat string
 	// Quality is the rate control the encode runs under.
 	Quality Quality
+	// GOP is what libx265 is told about open GOPs (docs/design/encode-plan.md#gop): the
+	// root's x265_open_gop where libx265 encodes the job, and nothing on every other plan.
+	GOP GOP
+}
+
+// GOP is what one libx265 encode is told about open GOPs. The zero value tells it nothing,
+// which is every plan whose root does not set x265_open_gop and every plan another encoder
+// writes: libx265 keeps its own default, and the command line is the one it always was.
+type GOP struct {
+	// Set says the encode is told; Open is then what it is told.
+	Set, Open bool
+}
+
+// X265Params is the fragment this GOP adds to libx265's colon-separated -x265-params string,
+// colon-led so it appends to the fragment before it, and "" for the zero value.
+func (g GOP) X265Params() string {
+	if !g.Set {
+		return ""
+	}
+	if g.Open {
+		return ":open-gop=1"
+	}
+	return ":open-gop=0"
+}
+
+// gopFor is the GOP a plan for spec under prof declares, and the one place it is derived: the
+// root's x265_open_gop where spec is libx265, and nothing where it is any other encoder,
+// which reads no x265 parameter (config.Validate refuses the key on a root libx265 never
+// encodes).
+func gopFor(spec encoder.Spec, prof config.Profile) GOP {
+	if spec.FFmpegCodec != "libx265" {
+		return GOP{}
+	}
+	open, set := prof.OpenGOP()
+	return GOP{Set: set, Open: open}
 }
 
 // HardwareDecode reports whether the source is decoded on a device (DecodeCUDA or
@@ -508,6 +543,7 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 		PixelFormat:  pixFmt,
 		InputFormat:  inputFmt,
 		Quality:      quality,
+		GOP:          gopFor(spec, in.prof),
 	}
 	p.Picture = PictureOps{Deinterlace: film, Downscale: shrink, Crop: cut}
 	// The fidelity declaration names every HDR10 block the source carries, read from its side
@@ -916,6 +952,9 @@ func (p *EncodePlan) buildable() error {
 			p.Video.Decode, p.Video.DecodeDevice, p.Video.Encoder.Key)}
 	case p.Video.Device != deviceFor(p.Video.Encoder, p.devices):
 		return &UnbuildablePlanError{What: fmt.Sprintf("the device %q for encoder %q", p.Video.Device, p.Video.Encoder.Key)}
+	case p.Video.GOP != gopFor(p.Video.Encoder, p.Profile):
+		return &UnbuildablePlanError{What: fmt.Sprintf("the GOP %+v for encoder %q under x265_open_gop %s",
+			p.Video.GOP, p.Video.Encoder.Key, p.Profile.OpenGOPMode())}
 	}
 	// The input format is the one the encoder's own list gives for the plan's pixel format,
 	// and nothing else: a plan naming another would hand the encoder a format that does not
@@ -972,8 +1011,9 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 	// resampler run first would have blended two fields into every line it produced.
 	//
 	// The libx265 parallelism joins the same -x265-params string as the colour block, ahead
-	// of it, and is "" when the run carries none. Every other family ignores the string, so
-	// their argv cannot move with it.
+	// of it, and is "" when the run carries none; the GOP follows it, and is "" where the root
+	// does not set x265_open_gop. Every other family ignores the string, so their argv cannot
+	// move with it.
 	//
 	// Every encoder but libx265 takes its colour primaries and transfer from the frames it is
 	// handed, not from -color_primaries/-color_trc, so the declared ones are stamped onto the
@@ -981,7 +1021,7 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 	// to - after them, and before any upload to a hardware surface. libx265 writes them from
 	// its own parameters, and its command line does not change.
 	video := videoArgs(p.Video, p.Metadata.Color.FFmpegFlags(),
-		x265.Params()+p.Metadata.Color.X265Params()+p.dynamic.X265Params())
+		x265.Params()+p.Video.GOP.X265Params()+p.Metadata.Color.X265Params()+p.dynamic.X265Params())
 	if p.Video.Encoder.FFmpegCodec != "libx265" {
 		video = withHeadFilter(video, p.Metadata.Color.SetParams())
 	}
