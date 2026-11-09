@@ -1797,6 +1797,13 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 // the output through one purpose-built reader (probe.OutputFacts) rather than the source
 // snapshot's three probes plus a separate frame-colour probe.
 //
+// It went UP from 13 for the playability gate (docs/design/playability.md#cost), re-measured
+// here in the commit that moved it: two probes of the output (its video streams, to find the
+// one a player starts; its packet list, which reads the container and decodes nothing), paid
+// only by a job that encoded. This fixture has one keyframe, so the gate samples nothing and
+// spawns no ffmpeg; a stream with keyframes to sample pays one probe more for its start time,
+// and the bounded decodes the design document states.
+//
 // These constants are NOT the evidence for AC12 and must not be read as it — they are a
 // long-run ceiling, so that a per-PR "no worse than last time" cannot ratchet the cost up
 // one probe at a time across many changes. The criterion itself is proved by MEASURING
@@ -1804,7 +1811,7 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 // fails if these numbers ever stop matching what it measures, so they cannot decay into
 // folklore.
 const (
-	probeBudgetFFprobe = 13
+	probeBudgetFFprobe = 15
 	probeBudgetFFmpeg  = 2
 )
 

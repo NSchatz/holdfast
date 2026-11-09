@@ -176,9 +176,13 @@ func (c Checker) Check(ctx context.Context, file string, stream int) (Report, er
 	for _, k := range sample {
 		rep.Sampled = append(rep.Sampled, k.Ordinal)
 	}
-	base, err := c.seekBase(ctx, file)
-	if err != nil {
-		return rep, err
+	// A stream with one keyframe samples nothing: no seek is computed and no fragment decoded,
+	// so its start time is not probed. The hardware opening decode below still runs.
+	var base SeekBase
+	if len(sample) > 0 {
+		if base, err = c.seekBase(ctx, file); err != nil {
+			return rep, err
+		}
 	}
 	for _, k := range sample {
 		if err := c.coldStart(ctx, c.FFmpeg, nil, StageColdStart, file, stream, k, len(kfs), base); err != nil {
