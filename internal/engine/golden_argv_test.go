@@ -741,6 +741,23 @@ func encoderArgvCases() []encoderArgvCase {
 		cfg: both(hwDecode, deint("yadif"), ceiling(240))})
 	add(encoderArgvCase{name: "hw-decode/remux-only", cfg: both(hwDecode, remux)})
 	add(encoderArgvCase{name: "hw-decode/software", cfg: func(c *config.Config) { c.HWDecode = config.HWDecodeSoftware }})
+
+	// keep_bit_depth, appended: false builds what the base case builds; true encodes an 8-bit
+	// source at 8 bits (what pixel-format-yuv420p builds for it) in its own chroma, and every
+	// deeper source exactly as without the key.
+	keepDepth := func(on bool) func(*config.Config) { return func(c *config.Config) { c.KeepBitDepth = boolPtr(on) } }
+	add(encoderArgvCase{name: "keep-bit-depth/false", cfg: keepDepth(false)})
+	add(encoderArgvCase{name: "keep-bit-depth", cfg: keepDepth(true)})
+	add(encoderArgvCase{name: "keep-bit-depth/stream-plan-handed", cfg: keepDepth(true), handProfile: true, streamPlan: true})
+	add(encoderArgvCase{name: "keep-bit-depth/bitrate-8000k", cfg: both(keepDepth(true), bitrate(8000))})
+	add(encoderArgvCase{name: "keep-bit-depth/hw-decode", cfg: both(keepDepth(true), hwDecode)})
+	add(encoderArgvCase{name: "keep-bit-depth/x265-3cpu", cfg: keepDepth(true), x265: x265(3)})
+	for _, src := range []string{"full-range", "422", "444", "10bit", "12bit", "mpeg4"} {
+		add(encoderArgvCase{name: "keep-bit-depth/source-" + src, source: src + ".mkv", cfg: keepDepth(true)})
+	}
+	for _, src := range []string{"bt709", "hlg", "pq", "hdr10"} {
+		add(encoderArgvCase{name: "keep-bit-depth/colour-" + src, source: src + ".mkv", cfg: keepDepth(true)})
+	}
 	return cs
 }
 
@@ -1035,6 +1052,23 @@ func engineArgvCases() []engineArgvCase {
 	add(engineArgvCase{name: "crop/auto/no-bars", root: "crop: auto"})
 	add(engineArgvCase{name: "crop/auto/letterbox/remux-only", source: "letterbox.mkv", root: "crop: auto\nremux_only: true"})
 	add(engineArgvCase{name: "crop/top-level-auto/root-off", source: "letterbox.mkv", top: "crop: auto", root: "crop: off"})
+
+	// keep_bit_depth (docs/design/encode-plan.md#bit-depth), appended: set false it builds the
+	// command line it always did; set true an 8-bit source is encoded 8-bit on every encoder
+	// (the command line `pixel_format: yuv420p` builds for that source), a 10-bit PQ source
+	// keeps its 10 bits and is skipped by the encoders that carry 8 only, and a root inherits
+	// the top level's value or turns it off.
+	add(engineArgvCase{name: "keep-bit-depth/false/every-encoder", root: "keep_bit_depth: false", core: true})
+	add(engineArgvCase{name: "keep-bit-depth/every-encoder", root: "keep_bit_depth: true", core: true})
+	add(engineArgvCase{name: "keep-bit-depth/source-mpeg4/every-encoder", source: "mpeg4.mkv",
+		root: "keep_bit_depth: true", core: true})
+	add(engineArgvCase{name: "keep-bit-depth/source-ffv1-pq/every-encoder", source: "ffv1-pq.mkv",
+		root: "keep_bit_depth: true", core: true})
+	add(engineArgvCase{name: "keep-bit-depth/source-hdr10", source: "hdr10.mkv", root: "keep_bit_depth: true"})
+	add(engineArgvCase{name: "keep-bit-depth/source-422", source: "422.mkv", root: "keep_bit_depth: true"})
+	add(engineArgvCase{name: "keep-bit-depth/top-level/source-mpeg4", source: "mpeg4.mkv", top: "keep_bit_depth: true", core: true})
+	add(engineArgvCase{name: "keep-bit-depth/top-level/root-false", source: "mpeg4.mkv", top: "keep_bit_depth: true",
+		root: "keep_bit_depth: false"})
 	return cs
 }
 

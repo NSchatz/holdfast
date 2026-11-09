@@ -85,8 +85,8 @@ the encoder's own refusal always recorded, and the encoder is then never called.
 
 **The plan names the format the encoder is handed, from the encoder's own list, and a plan
 the encoder cannot carry exactly is never derived.** `Video.PixelFormat` is what the output
-is meant to be (the source's chroma subsampling, depth floored at 10, or a forced
-`pixel_format`); `Video.InputFormat` is the format the encoder receives: that format where
+is meant to be (the source's chroma subsampling, depth floored at 10 or - under
+`keep_bit_depth` - [kept](#bit-depth), or a forced `pixel_format`); `Video.InputFormat` is the format the encoder receives: that format where
 the encoder lists it, else the planar or semi-planar spelling of the same chroma and depth
 that it lists (`yuv420p10le` is `p010le` on NVENC, QSV and AMF), chosen once by
 `encoder.Spec.InputFormat` from the registry's copy of the pinned binary's "Supported pixel
@@ -118,6 +118,60 @@ encoders moved to name their input format (and VAAPI to upload `p010le`), and ev
 held by `TestGoldenArgv_EveryArgvNamesItsPixelFormat` to name a format its encoder lists.
 libx265 and libsvtav1 are handed every format they list unchanged.
 
+## The output bit depth
+
+<a id="bit-depth"></a>
+
+**Under `pixel_format: auto` an 8-bit source is encoded at 10 bits unless the root asks to keep
+its depth; no setting ever plans a source shallower than it is.** `hdr.DeriveOutputPixFmt` is
+the one derivation, and `planPixelFormat` the one place the engine reads it, so the
+pixel-format guard, the crop's decision and the plan cannot disagree about a depth:
+
+| source | `keep_bit_depth` unset or `false` (default) | `keep_bit_depth: true` |
+|---|---|---|
+| 8-bit (`yuv420p`, `yuvj420p`, `yuv422p`, `yuv444p`) | 10-bit, same chroma (`yuv420p10le`): HEVC Main 10 under libx265 | 8-bit, same chroma (`yuv420p`): HEVC Main under libx265 |
+| 10-bit or 12-bit, SDR or HDR10/HLG | its own depth | its own depth (identical plan) |
+| exotic, or deeper than 12 bits | skipped (`exotic-pixel-format`) | skipped (`exotic-pixel-format`) |
+
+**Why 10 bits is the default.** An 8-bit source encoded at 10 bits compresses slightly better at
+the same quality target and does not add banding in smooth gradients, because the encoder's
+quantisation and in-loop filters work in the finer steps; libx265 and the AV1 encoders all do
+it well. That is why the derivation has floored at 10 since the first build, and why every
+configuration that does not set the key keeps doing so: `keep_bit_depth` unset or `false`
+contributes nothing to `Profile.Digest()` and changes no command line (the golden argv cases
+`keep-bit-depth/false` are byte-identical to `base`).
+
+**Why a library would keep 8 bits.** The 10-bit output changes which clients can direct play the
+file. 8-bit HEVC Main decodes in hardware on more devices, browsers and TVs than HEVC Main 10,
+and a client that cannot direct play the replacement makes the media server transcode it on
+every play (issue #200). An H.264 output at 10 bits (High 10) has almost no hardware decode
+support at all. So a library whose clients direct play 8-bit HEVC but not Main 10 sets
+`keep_bit_depth: true` and accepts the slightly larger, banding-prone 8-bit output.
+
+**What it never does.** It never lowers a depth: a 10-bit HDR10 or HLG source is a 10-bit plan
+with or without it, so it cannot push an HDR source to 8 bits. It changes only how `auto`
+derives a depth, so it is refused at start beside a forced `pixel_format` on the same root (one
+of the two would be silently ignored); an encode profile's own `pixel_format` names the format
+for the files it selects and wins there.
+
+**Every encoder in the registry carries an 8-bit 4:2:0 plan** (`TestKeepBitDepth_ThePlanOnEveryEncoder`):
+libx265, libsvtav1, libx264, NVENC and AMF are handed `yuv420p`, QSV is handed `nv12`, and
+VAAPI uploads `nv12` with no `-profile:v main10` (the Main 10 profile is named only for a
+`p010le` upload). An 8-bit 4:2:2 or 4:4:4 plan, and a deeper source the key keeps, are held to
+the encoder's list exactly as any plan is ([above](#explicit-pixel-format)): where it lists no
+format of that chroma and depth the file is skipped as `exotic-pixel-format` and the derivation
+refuses it again by name, never handed to ffmpeg to auto-select. The key widens what two
+encoders carry: `h264_qsv` and `h264_vaapi` list 8 bits only, so under the floor they skip
+every 8-bit source, and under the key they encode it. That skip records `keep_bit_depth` beside
+`pixel_format` and `encoder`, so turning the key on offers those files back.
+
+**The gates agree with it by construction.** The fidelity declaration is taken from the plan's
+pixel format ([below](#fidelity)), so an 8-bit plan holds the output to 8 bits and an encoder
+that promoted it to 10 is rejected by `bit-depth`; the VMAF gate's comparison format is the
+deeper of the two streams' depths, which for an 8-bit source and an 8-bit output is `yuv420p`
+(`TestKeepBitDepth_An8BitSourceIsReplacedAt8Bits` encodes one with the pinned ffmpeg and checks
+both).
+
 ## The output fidelity gate
 
 <a id="fidelity"></a>
@@ -144,7 +198,7 @@ https://github.com/FFmpeg/FFmpeg/blob/5d4d3bdc61/fftools/ffmpeg_mux_init.c , rea
 proposal P2). The gate does not depend on the command line being right: it measures the file.
 
 What the plan declares it changes is part of the declaration, so it is never a mismatch: the
-bit-depth floor (8 to 10), a configured `pixel_format`, and the HDR10 tag defaults a source
+bit-depth floor (8 to 10) or its absence under `keep_bit_depth`, a configured `pixel_format`, and the HDR10 tag defaults a source
 carrying HDR10 metadata but under-signalling its tags is given. A tag the plan writes nothing
 for - the source signals none - has nothing to lose and is not compared.
 

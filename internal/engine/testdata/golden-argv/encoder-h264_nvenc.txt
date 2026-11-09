@@ -512,6 +512,38 @@ error: no output container is known for a name with no extension (output <out>/f
 -hide_banner -nostdin -loglevel error -y -hwaccel cuda -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt p010le -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == hw-decode/software
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt p010le -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/false
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt p010le -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt yuv420p -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/stream-plan-handed
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt yuv420p -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt yuv420p -color_range tv -fps_mode passthrough -rc vbr -b:v 8000k -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/hw-decode
+-hide_banner -nostdin -loglevel error -y -hwaccel cuda -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt yuv420p -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/x265-3cpu
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt yuv420p -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/source-full-range
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/full-range.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt yuv420p -color_range pc -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/source-422
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/422.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt nv16 -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/source-444
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/444.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt yuv444p -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/source-10bit
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/10bit.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt p010le -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/source-12bit
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/12bit.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt p012le -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/source-mpeg4
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt yuv420p -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/colour-bt709
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/bt709.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt yuv420p -colorspace bt709 -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/colour-hlg
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/hlg.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt p010le -color_primaries bt2020 -color_trc arib-std-b67 -colorspace bt2020nc -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -vf setparams=color_primaries=bt2020:color_trc=arib-std-b67 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/colour-pq
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/pq.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt p010le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -vf setparams=color_primaries=bt2020:color_trc=smpte2084 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== keep-bit-depth/colour-hdr10
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/hdr10.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt p010le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -vf setparams=color_primaries=bt2020:color_trc=smpte2084 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == alias-h264_nvenc
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt p010le -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == alias/stream-plan-handed-h264_nvenc

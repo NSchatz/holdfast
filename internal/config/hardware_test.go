@@ -126,14 +126,14 @@ func TestHardware_HWFallbackMovesTheDigestOnlyAwayFromTheDefault(t *testing.T) {
 		t.Errorf("the default's digest = %s, want %s (the pre-key digest)", got, digestBeforeHWFallback)
 	}
 	vals := software.values()
-	at := len(profileKnobs) - 2 // hw_decode follows it
+	at := len(profileKnobs) - 3 // hw_decode and keep_bit_depth follow it
 	if vals[at] != HWFallbackSoftware || profileKnobs[at] != hwFallbackKey {
 		t.Errorf("hw_fallback is not the knob rendered before hw_decode: %v", vals)
 	}
 }
 
 // A root that sets no hw_decode, or sets the default, digests as it did before the key
-// existed; a root that decodes on hardware digests apart. It is the last knob rendered.
+// existed; a root that decodes on hardware digests apart. keep_bit_depth follows it.
 func TestHardware_HWDecodeMovesTheDigestOnlyAwayFromTheDefault(t *testing.T) {
 	base := Profile{Encoder: "cpu", CRF: 22, Preset: "slow", PixelFormat: "auto", ContainerExt: "mkv"}
 	software, hardware := base, base
@@ -152,8 +152,8 @@ func TestHardware_HWDecodeMovesTheDigestOnlyAwayFromTheDefault(t *testing.T) {
 		t.Errorf("an unset hw_decode resolves to %q, want software", got)
 	}
 	vals := hardware.values()
-	if vals[len(vals)-1] != HWDecodeHardware || profileKnobs[len(profileKnobs)-1] != hwDecodeKey {
-		t.Errorf("hw_decode is not the last knob rendered: %v", vals)
+	if vals[len(vals)-2] != HWDecodeHardware || profileKnobs[len(profileKnobs)-2] != hwDecodeKey {
+		t.Errorf("hw_decode is not the knob rendered before keep_bit_depth: %v", vals)
 	}
 }
 
