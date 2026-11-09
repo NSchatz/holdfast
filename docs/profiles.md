@@ -325,6 +325,33 @@ switching to `convert` offers it back. It is a library root knob with a top-leve
 `subtitle_sidecars`. The rules and their reasoning are in
 [docs/design/dynamic-hdr.md](design/dynamic-hdr.md#profile-7).
 
+## `x265_open_gop` - open or closed GOPs in libx265
+
+<a id="x265-open-gop"></a>
+
+```yaml
+# x265_open_gop:          # the default, unset: nothing is passed, libx265 keeps its own default (open)
+x265_open_gop: false      # recommended for a media-server library: open-gop=0, every keyframe an IDR
+# x265_open_gop: true     # open-gop=1, explicitly
+```
+
+Unset, a libx265 encode is told nothing about GOPs and libx265 codes open ones: each keyframe after
+the first is a CRA picture, and the pictures that lead it in display order (RASL) reference the GOP
+before it. A decoder that starts at that CRA - a player resuming or seeking, a media server's
+HLS or DASH segmenter cutting a stream there, a hardware decoder handed one segment - has to drop
+those pictures, and the gates' one linear decode from the first frame never takes that path.
+`false` passes `open-gop=0`: every keyframe is an IDR that decodes on its own, at a small cost in
+compression. It is the recommended value for a library Plex, Jellyfin or Emby streams or
+remuxes. `true` passes `open-gop=1`, libx265's default stated explicitly.
+
+The key applies only where libx265 encodes the job (`encoder: cpu`, or a rule, an encode profile or
+`hw_fallback: software` that hands the job to it); every other encoder reads no x265 parameter and
+its command line does not move. A root none of whose files libx265 can encode refuses the key at
+start, naming it. Unset, a root's profile digest is what it was before the key existed; either
+written value changes the command line and the digest. It is a library root knob with a top-level
+default; an encode profile does not carry it. The reasoning is in
+[docs/design/encode-plan.md](design/encode-plan.md#gop).
+
 ## `exclude_paths` and `include_paths` - which paths this tool may touch
 
 <a id="path-filters"></a>

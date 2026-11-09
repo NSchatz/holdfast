@@ -741,6 +741,25 @@ func encoderArgvCases() []encoderArgvCase {
 		cfg: both(hwDecode, deint("yadif"), ceiling(240))})
 	add(encoderArgvCase{name: "hw-decode/remux-only", cfg: both(hwDecode, remux)})
 	add(encoderArgvCase{name: "hw-decode/software", cfg: func(c *config.Config) { c.HWDecode = config.HWDecodeSoftware }})
+
+	// x265_open_gop (docs/design/encode-plan.md#gop), appended: unset passes nothing, so its
+	// command line is the base's; set, libx265 is told open-gop=0 or open-gop=1 after the
+	// parallelism and ahead of the colour block, on the quality and the bitrate path alike.
+	// Every other encoder reads no x265 parameter, and its command line does not move.
+	gop := func(v *bool) func(*config.Config) { return func(c *config.Config) { c.X265OpenGOP = v } }
+	for _, g := range []struct {
+		name string
+		v    *bool
+	}{{"unset", nil}, {"false", boolPtr(false)}, {"true", boolPtr(true)}} {
+		n := "x265-open-gop-" + g.name
+		add(encoderArgvCase{name: n, cfg: gop(g.v), handProfile: true})
+		add(encoderArgvCase{name: n + "/not-handed", cfg: gop(g.v)})
+		add(encoderArgvCase{name: n + "/bitrate-8000k", cfg: both(gop(g.v), bitrate(8000)), handProfile: true})
+		add(encoderArgvCase{name: n + "/x265-3cpu", cfg: gop(g.v), x265: x265(3), handProfile: true})
+		add(encoderArgvCase{name: n + "/x265-3cpu/bitrate-1500k/hdr10", source: "hdr10.mkv",
+			cfg: both(gop(g.v), bitrate(1500)), x265: x265(3), handProfile: true})
+		add(encoderArgvCase{name: n + "/remux-only", cfg: both(gop(g.v), remux), handProfile: true, streamPlan: true})
+	}
 	return cs
 }
 
@@ -1035,6 +1054,26 @@ func engineArgvCases() []engineArgvCase {
 	add(engineArgvCase{name: "crop/auto/no-bars", root: "crop: auto"})
 	add(engineArgvCase{name: "crop/auto/letterbox/remux-only", source: "letterbox.mkv", root: "crop: auto\nremux_only: true"})
 	add(engineArgvCase{name: "crop/top-level-auto/root-off", source: "letterbox.mkv", top: "crop: auto", root: "crop: off"})
+
+	// x265_open_gop (docs/design/encode-plan.md#gop), appended, for the default encoder: the
+	// key unset builds the command line it always did; a root's value, or a top-level one a
+	// root inherits or overrides, reaches -x265-params on the quality and the bitrate path;
+	// and a job an encode profile or a rule routes to another encoder is told nothing.
+	add(engineArgvCase{name: "x265-open-gop/unset"})
+	add(engineArgvCase{name: "x265-open-gop/false", root: "x265_open_gop: false"})
+	add(engineArgvCase{name: "x265-open-gop/true", root: "x265_open_gop: true"})
+	add(engineArgvCase{name: "x265-open-gop/false/bitrate-1500k", root: "x265_open_gop: false", top: "bitrate_kbps: 1500"})
+	add(engineArgvCase{name: "x265-open-gop/true/bitrate-1500k", root: "x265_open_gop: true", top: "bitrate_kbps: 1500"})
+	add(engineArgvCase{name: "x265-open-gop/false/x265-3cpu/hdr10", source: "hdr10.mkv", root: "x265_open_gop: false",
+		x265: x265(3)})
+	add(engineArgvCase{name: "x265-open-gop/top-level-false", top: "x265_open_gop: false"})
+	add(engineArgvCase{name: "x265-open-gop/top-level-false/root-true", top: "x265_open_gop: false",
+		root: "x265_open_gop: true"})
+	add(engineArgvCase{name: "x265-open-gop/false/encode-profile-to-svtav1", root: "x265_open_gop: false",
+		top: "encode_profiles:\n  - name: to-av1\n    match: \"*.mkv\"\n    encoder: svtav1"})
+	add(engineArgvCase{name: "x265-open-gop/false/rule-to-nvenc", root: "x265_open_gop: false\nrules:\n" +
+		"  - when:\n      max_source_height: 576\n    encoder: nvenc"})
+	add(engineArgvCase{name: "x265-open-gop/false/remux-only", root: "x265_open_gop: false\nremux_only: true"})
 	return cs
 }
 

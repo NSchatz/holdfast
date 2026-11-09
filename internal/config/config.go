@@ -86,6 +86,7 @@ var knownKeys = map[string]bool{
 	hwFallbackKey:    true,
 	hwDecodeKey:      true,
 	x265CPUsKey:      true,
+	x265OpenGOPKey:   true,
 	qualityKey:       true,
 	// The divisor `workers: auto` sizes the pool by. It describes the PROCESS, so a
 	// library_roots entry naming it is refused as a daemon-level key, exactly as one
@@ -221,6 +222,10 @@ func defaultLayer() map[string]any {
 		// No configured libx265 parallelism: the run derives it from the CPU quota of its
 		// own cgroup, or passes none where there is no quota to read.
 		x265CPUsKey: 0,
+		// libx265 is told nothing about GOPs and keeps its own default, open GOP: the key is
+		// unset until configured (docs/design/encode-plan.md#gop). It is a knob in profileKnobs,
+		// so it has an entry here, and the entry is the absence of a value.
+		x265OpenGOPKey: nil,
 		// The CPUs of quota one worker is sized for under `workers: auto`. It is read only
 		// when workers is auto, so the default moves no configuration that does not ask.
 		coresPerWorkerKey: DefaultCoresPerWorker,
@@ -410,6 +415,15 @@ type Config struct {
 	// default) or "convert" to profile 8.1 before the encode. A library root may override it.
 	// See docs/design/dynamic-hdr.md#profile-7.
 	DolbyVisionP7 string `yaml:"dolby_vision_p7"`
+	// X265OpenGOP is whether libx265 codes open GOPs (open-gop=1) or closed ones
+	// (open-gop=0). nil - absent, the default - passes nothing, and libx265 keeps its own
+	// default, which is open. Closed GOPs are what a media server's segmenter and a player
+	// that starts decoding at a keyframe other than the first need: at an open GOP's CRA
+	// keyframe the leading (RASL) pictures reference the GOP before it and must be dropped.
+	// It is a libx265 parameter and no other encoder reads it; a root none of whose files
+	// libx265 can encode refuses it at start. A library root may override it. See
+	// docs/design/encode-plan.md#gop.
+	X265OpenGOP *bool `yaml:"x265_open_gop"`
 	// CRF is the software encoders' quality knob (lower = bigger/better): libx265's
 	// and libsvtav1's constant rate factor, 0-51. Each hardware encoder's quality is
 	// set on its own scale by Quality below, and a hardware encoder with no entry there
@@ -1156,6 +1170,7 @@ func (c *Config) TopLevelProfile() Profile {
 		SubtitleSidecars:  c.SubtitleSidecars,
 		Crop:              c.Crop,
 		DolbyVisionP7:     c.DolbyVisionP7,
+		X265OpenGOP:       c.X265OpenGOP,
 	}
 }
 
@@ -1373,6 +1388,18 @@ func Load(path string) (*Config, error) {
 				return nil, err
 			}
 			preserveMtimeWritten = true
+		}
+	}
+
+	// x265_open_gop is a BOOLEAN, checked against the value the file or the environment
+	// CARRIED for preserve_mtime's reason: the weakly typed decoder would read 3 as true. A key
+	// written with no value is the absent key, unset, as preserve_mtime's is.
+	if explicitTop[x265OpenGOPKey] {
+		if raw := carriedValue(x265OpenGOPKey, k, kf, ke); raw != nil {
+			if err := checkX265OpenGOPValue("the top level of "+path+" (or "+envPrefix+
+				strings.ToUpper(x265OpenGOPKey)+")", raw); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -1981,6 +2008,10 @@ func (c *Config) validateRest() error {
 	for _, r := range c.RootProfiles() {
 		if err := r.Profile.validate(); err != nil {
 			return fmt.Errorf("library root %s: %w", r.Clean, err)
+		}
+		// x265_open_gop on a root libx265 never encodes is a setting nothing reads.
+		if err := c.validateX265OpenGOP(r); err != nil {
+			return err
 		}
 		// The watch's own per-value refusal, run here as well as at parse time so a
 		// Config assembled in Go rather than read from a file is held to it too. A
