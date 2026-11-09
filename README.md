@@ -48,7 +48,9 @@ and fixes the trust gaps:
   **VMAF** perceptual-quality check - its **average** (`min_vmaf`, default `95`), its **worst frame**
   (`vmaf_min_pool`, default `60`) *and* its **colour** (`vmaf_min_chroma`, default `30`, which the
   luma-only VMAF model cannot see at all). The comparison is made in one pixel format holdfast **names and records**, not one
-  ffmpeg negotiated. Any failure leaves the source byte-for-byte untouched.
+  ffmpeg negotiated. Last, a **playability** gate decodes the output from a cold start at a sample of its keyframes
+  and, remuxed to fragmented MP4, fragment by fragment, as a player that seeks or a server that streams it would
+  ([docs/design/playability.md](docs/design/playability.md#playability-gate)). Any failure leaves the source byte-for-byte untouched.
 - **The source can't be swapped out from under a running encode.** The source's `size:mtime` is
   re-checked immediately before the swap: if something else (Plex, an *arr, you) rewrote or replaced it
   while the encode ran - hours, on a real film - the swap is **refused** rather than atomically

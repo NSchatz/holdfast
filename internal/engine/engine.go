@@ -407,6 +407,11 @@ const (
 	// build, the measurement failed, or no comparison pixel format could be named. An
 	// unmeasured encode is refused, so this is a rejection like any other.
 	GateVmafUnmeasured = "vmaf-unmeasured"
+	// GatePlayability: a decode started cold at a keyframe other than the first, or a fragment
+	// of the output remuxed to fragmented MP4 decoded on its own, or a cold start on the job's
+	// hardware decoder, failed - or that could not be measured
+	// (docs/design/playability.md#playability-gate).
+	GatePlayability = "playability"
 	// GateSwap: any refusal from the pre-swap steps onward - the collision re-check, the
 	// copy back beside the source, the metadata carry, the fsync, the retention hook, the
 	// re-fingerprint, the pre-swap attribute record, and the rename itself.
@@ -441,6 +446,7 @@ var GateVocabulary = []string{
 	GateDolbyVisionRPU,
 	GateHDR10Plus,
 	GateDolbyVisionL5,
+	GatePlayability,
 }
 
 // Engine drives the transcode over a set of library roots.

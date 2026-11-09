@@ -47,7 +47,7 @@ func hwDecodeStandIn(t *testing.T, real, mode string) (stub, log string) {
 	script := `#!/bin/sh
 hw=
 for a in "$@"; do
-  case "$a" in *_nvenc|*_qsv|*_vaapi|*_amf) hw=1 ;; esac
+  case "$a" in *_nvenc|*_qsv|*_vaapi|*_amf|-hwaccel) hw=1 ;; esac
 done
 [ -z "$hw" ] && exec ` + real + ` "$@"
 printf '%s\n' "$*" >> ` + log + `
@@ -92,7 +92,7 @@ func mkFFV1HDR10(t *testing.T, ffmpeg, path string) {
 // hwDecodeRun runs one pass of key under hw_decode: hardware through the stand-in, over the
 // source mkSrc writes, and returns what fidelityRunFrom does plus the stand-in's log.
 func hwDecodeRun(t *testing.T, key, mode string, mkSrc func(t *testing.T, ffmpeg, path string),
-	mutate func(*config.Config)) (src, before string, st *testStore, events []Event, logged []string) {
+	mutate func(*config.Config)) (src, before string, st *testStore, events []Event, logged, gate []string) {
 	t.Helper()
 	ffmpeg, _ := tools(t)
 	real, err := exec.LookPath(ffmpeg)
@@ -110,7 +110,17 @@ func hwDecodeRun(t *testing.T, key, mode string, mkSrc func(t *testing.T, ffmpeg
 			mutate(c)
 		}
 	})
-	return src, before, st, events, readLines(t, log)
+	// The stand-in logs every command line carrying a hardware decode: the encode's, and the
+	// playability gate's decodes of the output on the same hardware (no -c:v: they encode
+	// nothing).
+	for _, line := range readLines(t, log) {
+		if strings.Contains(line, " -c:v ") {
+			logged = append(logged, line)
+		} else {
+			gate = append(gate, line)
+		}
+	}
+	return src, before, st, events, logged, gate
 }
 
 // hwDecodeArgvOf is the device and decode options each vendor's pipeline opens with.
@@ -121,6 +131,11 @@ var hwDecodeArgvOf = map[string]string{
 	encoder.APIQSV: "-init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva " +
 		"-hwaccel vaapi -hwaccel_device hfva -i ",
 	encoder.APIAMF: "-init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -hwaccel vaapi -hwaccel_device hfva -i ",
+}
+
+// decodeOfAPI is the decode each hardware API's jobs run under hw_decode: hardware (decodeFor).
+var decodeOfAPI = map[string]string{
+	encoder.APINVENC: DecodeCUDA, encoder.APIVAAPI: DecodeVAAPI, encoder.APIQSV: DecodeVAAPI, encoder.APIAMF: DecodeVAAPI,
 }
 
 // TestHWDecode_EveryVendorKeeps10BitAndHDR10: for every hardware encoder that carries a 10-bit
@@ -148,7 +163,7 @@ func TestHWDecode_EveryVendorKeeps10BitAndHDR10(t *testing.T) {
 			if spec.TargetCodec == "h264" {
 				mkSrc = mkFFV1HDR10
 			}
-			src, before, st, events, logged := hwDecodeRun(t, key, "faithful", mkSrc, nil)
+			src, before, st, events, logged, gate := hwDecodeRun(t, key, "faithful", mkSrc, nil)
 			for _, ev := range events {
 				if ev.Gate == GateFidelity || ev.Status == store.Failed {
 					t.Fatalf("the %s hardware-decode job was refused: %+v", key, ev)
@@ -164,6 +179,14 @@ func TestHWDecode_EveryVendorKeeps10BitAndHDR10(t *testing.T) {
 			if len(logged) != 1 || !strings.Contains(logged[0], hwDecodeArgvOf[spec.API]) ||
 				strings.Contains(logged[0], "-hwaccel_output_format") || !strings.Contains(logged[0], "-c:v "+spec.FFmpegCodec) {
 				t.Errorf("the job did not run %s's decode pipeline %q:\n%s", key, hwDecodeArgvOf[spec.API], strings.Join(logged, "\n"))
+			}
+			// The playability gate decoded the output on the job's own hardware decoder, with the
+			// decode half of its options only (docs/design/playability.md#playability-gate).
+			hw := strings.Join(playabilityHardwareArgs(VideoPlan{Decode: decodeOfAPI[spec.API],
+				DecodeDevice: "/dev/dri/renderD128"}), " ")
+			if len(gate) == 0 || !strings.Contains(gate[0], hw+" -xerror") || strings.Contains(gate[0], "-filter_hw_device") ||
+				strings.Contains(gate[0], "qsv=") {
+				t.Errorf("the playability gate did not decode on %s's decoder %q:\n%s", key, hw, strings.Join(gate, "\n"))
 			}
 			// What the gate passed, read back: 10 bits and every HDR10 block.
 			ffmpeg, ffprobe := tools(t)
@@ -193,7 +216,7 @@ func TestHWDecode_EightBitOnlyEncodersDecodeOnTheirVendor(t *testing.T) {
 					"-i", "testsrc2=duration=2:size=320x240:rate=10", "-c:v", "mpeg4", "-q:v", "2",
 					"-pix_fmt", "yuv420p", "--", path)
 			}
-			src, before, st, _, logged := hwDecodeRun(t, key, "faithful", mpeg4, func(c *config.Config) { c.PixelFormat = "yuv420p" })
+			src, before, st, _, logged, _ := hwDecodeRun(t, key, "faithful", mpeg4, func(c *config.Config) { c.PixelFormat = "yuv420p" })
 			if row := rowFor(t, st, src); row.Status != store.Done || md5f(t, src) == before {
 				t.Fatalf("row %q %q, want done and the source replaced", row.Status, row.Outcome.Reason)
 			}
@@ -223,7 +246,7 @@ func TestHWDecode_TheFidelityGateRejectsALossyHardwarePath(t *testing.T) {
 		{"h264_amf", "eight-bit", hdr.FieldBitDepth, mkFFV1HDR10},
 	} {
 		t.Run(c.key+"/"+c.mode, func(t *testing.T) {
-			src, before, st, events, logged := hwDecodeRun(t, c.key, c.mode, c.mkSrc, nil)
+			src, before, st, events, logged, _ := hwDecodeRun(t, c.key, c.mode, c.mkSrc, nil)
 			if len(logged) != 1 || !strings.Contains(logged[0], "-hwaccel ") {
 				t.Fatalf("the job did not run a hardware decode:\n%s", strings.Join(logged, "\n"))
 			}
