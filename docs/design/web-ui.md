@@ -224,7 +224,9 @@ nothing it was not told. `restore` and `requeue` are not on the page in any form
   either, and the control token does not authorise them. So the page has no route, button,
   text or identifier for either: `web/src/sources.test.ts` reads every file under `web/` and
   fails on either word, and `internal/server/no_undo_routes_test.go` walks the real router and
-  fails on a route pattern that contains one.
+  fails on a route pattern that contains one. `reroot`, which rewrites every path the ledger
+  records under a moved library root ([docs/reroot.md](../reroot.md)), is local for the same
+  reason, and the same router walk fails on a route pattern containing it.
 - **The answer shown is the server's.** After a pause the page writes the `paused` and
   `scanning` the response carried, not the state it asked for; an answer that carries no boolean
   `paused` is an alert saying the server did not state it, whatever its status. A library scan

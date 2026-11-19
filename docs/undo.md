@@ -146,6 +146,16 @@ If a record's retained original is no longer on disk - somebody deleted it - it 
 reported as **unrestorable**, the record is dropped, and zero bytes are reported. A
 ledger that promises a restore it cannot perform is worse than one that says nothing.
 
+That holds only where the recorded path lies under a **configured library root**. A record
+whose retained original is missing and lies under **no** configured root is **kept**: the
+commonest way to get one is to mount the same library at a new path and edit
+`library_roots` to match, and nothing on disk is gone. Dropping that record would orphan the
+original for good, because the scan never enumerates a retention area and nothing else
+releases one. The pass counts such records and logs a `warn` naming one of them and
+[`holdfast reroot`](reroot.md), which carries them to the root's new path; the next pass
+after the reroot releases them there. (A retained original that IS on disk is released at its
+recorded path as always, under a configured root or not.)
+
 ## Turning it back off
 
 Setting `undo_window_hours` back to `0` stops **new** retentions and does nothing else.
@@ -175,6 +185,11 @@ Every refusal exits non-zero and has changed **nothing** on disk.
 - **Nothing is retained for that path** - never was, or the window closed and the
   retention was released, or it has already been restored.
 - **The retained original is gone.** Reported as unrestorable; the record is dropped.
+- **The retained original is not at its recorded path, and that path lies under no configured
+  library root.** The record is **kept**, and the refusal names
+  [`holdfast reroot`](reroot.md): if the root moved, a reroot carries the record to the new
+  path and the restore then works there. `holdfast restore` with no path says how many of the
+  records it lists lie under no configured root.
 - **The file at that path is not the one holdfast swapped in.** The record carries the
   `size:mtime` fingerprint of what the swap left behind. If it has moved - a
   re-download, an *arr upgrade, a human - restoring would destroy that newer content

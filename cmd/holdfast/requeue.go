@@ -226,7 +226,8 @@ func unrootedLine(s store.DecisionInputsSurvey) []string {
 	}
 	return []string{fmt.Sprintf("%d of those terminal row(s) lie under no configured library root "+
 		"(for example %s), so a scan never enumerates them and never re-opens them; their inputs were "+
-		"resolved against the top-level configuration", s.Unrooted, s.UnrootedExample)}
+		"resolved against the top-level configuration. If that root moved (the same files at a new path), "+
+		"`holdfast reroot --from <old root> --to <new root>` carries them to it", s.Unrooted, s.UnrootedExample)}
 }
 
 // absoluteLedgerPath turns what the operator typed into the path the ledger is keyed by.

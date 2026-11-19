@@ -70,6 +70,7 @@ Commands:
   resolve    Report and resolve a job whose swap outcome could not be established
   restore    List what the undo window is holding, or put one original back
   requeue    Offer a file the engine has already answered back to the pipeline
+  reroot     Carry the ledger across a library root rename (same files, new mount path)
   export     Write every terminal ledger row to newline-delimited JSON (stdout, or --out)
   validate   Load and validate a config file, then exit
   version    Print version and exit
@@ -84,6 +85,7 @@ Run "holdfast <command> -h" for command flags.
   holdfast restore --config config.yaml <path>     # put that original back
   holdfast requeue --config config.yaml <path>     # re-open that file's terminal row
   holdfast requeue --config config.yaml --failed   # re-open every row parked at max_failures
+  holdfast reroot --config config.yaml --from /media/old --to /media/new   # what a root move would rewrite
 `
 
 func dispatch(args []string, stdout, stderr io.Writer) int {
@@ -108,6 +110,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return cmdRestore(args[1:], stdout, stderr)
 	case "requeue":
 		return cmdRequeue(args[1:], stdout, stderr)
+	case "reroot":
+		return cmdReroot(args[1:], stdout, stderr)
 	case "export":
 		return cmdExport(args[1:], stdout, stderr)
 	case "validate":
@@ -359,7 +363,8 @@ func logLedgerAgainstConfig(log *slog.Logger, dbPath string, survey store.Decisi
 			"rows", survey.Unrooted,
 			"example", survey.UnrootedExample,
 			"tried", "resolving each row's path to a configured library root",
-			"next", "the scan runs unaffected and never enumerates those paths")
+			"next", "the scan runs unaffected and never enumerates those paths",
+			"remedy", "if that root moved, stop holdfast and run `holdfast reroot --from <old root> --to <new root>`")
 	}
 }
 
@@ -551,9 +556,19 @@ func listRetained(ctx context.Context, undo *engine.UndoWindow, cfg *config.Conf
 	}
 	fmt.Fprintf(stdout, "%d retained original(s), holding %d byte(s) that the undo window has not yet returned:\n", len(rows), held)
 	now := time.Now().Unix()
+	unrooted := 0
 	for _, r := range rows {
 		fmt.Fprintf(stdout, "  %s  %d bytes  %s  (retained %s)\n",
 			r.SourcePath, r.SourceBytes, remainingWindow(r.ExpiresAt, now), r.RetainedPath)
+		if _, ok := cfg.RootFor(r.RetainedPath); !ok {
+			unrooted++
+		}
+	}
+	// A record under no configured root is kept by the release and refused by a restore
+	// while its path is unreachable; the remedy, where the root moved, is a reroot.
+	if unrooted > 0 {
+		fmt.Fprintf(stdout, "%d of them lie under no configured library root, so neither a restore nor the release "+
+			"reaches them; if that root moved, `holdfast reroot --from <old root> --to <new root>` carries them to it.\n", unrooted)
 	}
 	fmt.Fprintln(stdout, "restore one with: holdfast restore --config <file> <path>")
 	return 0
