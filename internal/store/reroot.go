@@ -157,10 +157,10 @@ type rerootTable struct {
 	// key is the path column in the table's uniqueness constraint, "" where no
 	// constraint involves a path (swap_incidents, keyed by an id).
 	key string
-	// keyWith is the column the constraint pairs key with, "" where the path is the
+	// keyWith is the columns the constraint pairs key with, none where the path is the
 	// whole key. Two rows at one path are then legal - a superseded jobs row beside the
-	// current one, two sweeps' checks of one file - and only the same pair collides.
-	keyWith string
+	// current one, two sweeps' checks of one file - and only the same whole key collides.
+	keyWith []string
 }
 
 // sidecarColumn is the one path that is not a whole column value: the published sidecar
@@ -178,12 +178,16 @@ var sidecarColumn = RerootColumn{Table: "jobs", Column: "subtitle_sidecars"}
 // text can quote a path: they are what was said at the time, about the path as it was,
 // and rewriting prose would be editing the record rather than carrying it.
 var rerootTables = []rerootTable{
-	{name: "jobs", columns: []string{"path", "target_path", "library_root"}, key: "path", keyWith: "fingerprint"},
+	{name: "jobs", columns: []string{"path", "target_path", "library_root"}, key: "path", keyWith: []string{"fingerprint"}},
 	{name: "retained_originals", columns: []string{"source_path", "swapped_path", "retained_path"}, key: "source_path"},
 	{name: "swap_incidents", columns: []string{"source_path", "replacement_path"}},
 	{name: "path_exclusions", columns: []string{"path"}, key: "path"},
-	{name: "health_checks", columns: []string{"path"}, key: "path", keyWith: "sweep_id"},
-	{name: "node_leases", columns: []string{"path", "temp_path"}, key: "path", keyWith: "epoch"},
+	{name: "health_checks", columns: []string{"path"}, key: "path", keyWith: []string{"sweep_id"}},
+	// Playback evidence: a swap and the sessions played on it are both keyed by the path,
+	// and they join each other, jobs and retained_originals on it, so they move with them.
+	{name: "playback_swaps", columns: []string{"path"}, key: "path", keyWith: []string{"fingerprint"}},
+	{name: "playback_sessions", columns: []string{"path"}, key: "path", keyWith: []string{"source", "session_id"}},
+	{name: "node_leases", columns: []string{"path", "temp_path"}, key: "path", keyWith: []string{"epoch"}},
 }
 
 // RerootColumns lists every path-bearing column a reroot rewrites, sidecar paths included.
@@ -284,15 +288,16 @@ type RerootCollision struct {
 	// Was is the row's path as recorded, Path what it would be rewritten to.
 	Was, Path string
 	// With names the rest of the key where the path is not the whole of it
-	// ("fingerprint 1024:1700000000", "sweep_id 3", "epoch 2"), "" where it is.
+	// ("fingerprint 1024:1700000000", "sweep_id 3", "source plex, session_id 7"), "" where
+	// it is.
 	With string
 }
 
 // RerootEvidence is what the ledger records about the file at one rewritten path.
 //
 // Exactly one of the two forms is set. A media file carries Fingerprints: the size:mtime
-// keys (probe.Fingerprint's form) of every jobs row of that path and of the swap's own
-// record of what it left there, so the file the scan would find matches when it matches
+// keys (probe.Fingerprint's form) of every jobs row of that path, of the retention's
+// record of what the swap left there and of the playback evidence's record of the swap, so the file the scan would find matches when it matches
 // ANY of them - a path with a superseded row beside its current one records two. A
 // retained original carries RetainedBytes, the size of the original its retention
 // recorded: that file is a second link to the original, and nothing else about it is
@@ -395,6 +400,9 @@ func planReroot(ctx context.Context, q querier, from, to string) (RerootPlan, er
 	if err := planRetainedEvidence(ctx, q, from, to, evidence); err != nil {
 		return plan, err
 	}
+	if err := planPlaybackEvidence(ctx, q, from, to, evidence); err != nil {
+		return plan, err
+	}
 	for _, e := range evidence {
 		sort.Strings(e.Fingerprints)
 		plan.Evidence = append(plan.Evidence, *e)
@@ -479,9 +487,15 @@ func planSidecars(ctx context.Context, q querier, from, to string, plan *RerootP
 // holds. Every rewritten key lies under to, so the rows recorded there are the only ones
 // one can meet; they are read once, not looked up once per row.
 func planCollisions(ctx context.Context, q querier, t rerootTable, from, to string) ([]RerootCollision, error) {
+	// The rest of the key as one value, its columns joined by the unit separator, which no
+	// value of them carries.
 	with := "''"
-	if t.keyWith != "" {
-		with = "CAST(" + t.keyWith + " AS TEXT)"
+	if len(t.keyWith) > 0 {
+		parts := make([]string, len(t.keyWith))
+		for i, c := range t.keyWith {
+			parts[i] = "COALESCE(CAST(" + c + " AS TEXT), '')"
+		}
+		with = strings.Join(parts, " || char(31) || ")
 	}
 	read := func(root string) (map[[2]string]bool, [][2]string, error) {
 		rows, err := q.QueryContext(ctx,
@@ -521,8 +535,15 @@ func planCollisions(ctx context.Context, q querier, t rerootTable, from, to stri
 			continue
 		}
 		c := RerootCollision{Table: t.name, Was: k[0], Path: nv}
-		if t.keyWith != "" {
-			c.With = t.keyWith + " " + k[1]
+		if len(t.keyWith) > 0 {
+			vals := strings.Split(k[1], "\x1f")
+			named := make([]string, len(t.keyWith))
+			for i, col := range t.keyWith {
+				if i < len(vals) {
+					named[i] = col + " " + vals[i]
+				}
+			}
+			c.With = strings.Join(named, ", ")
 		}
 		out = append(out, c)
 	}
@@ -593,6 +614,27 @@ func planRetainedEvidence(ctx context.Context, q querier, from, to string, evide
 		if nv, ok := RerootPath(retained, from, to); ok {
 			e := evidenceAt(evidence, retained, nv)
 			e.Retained, e.RetainedBytes = true, bytes
+		}
+	}
+	return rows.Err()
+}
+
+// planPlaybackEvidence records the fingerprint of every playback swap the rewrite carries:
+// the file a swap left at its path, as the playback evidence recorded it.
+func planPlaybackEvidence(ctx context.Context, q querier, from, to string, evidence map[string]*RerootEvidence) error {
+	rows, err := q.QueryContext(ctx,
+		`SELECT path, fingerprint FROM playback_swaps WHERE `+underClause("path")+` ORDER BY path`, underArgs(from)...)
+	if err != nil {
+		return fmt.Errorf("store: reroot: read playback swaps: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var p, fp string
+		if err := rows.Scan(&p, &fp); err != nil {
+			return fmt.Errorf("store: reroot: read playback swaps: %w", err)
+		}
+		if nv, ok := RerootPath(p, from, to); ok {
+			addFingerprint(evidenceAt(evidence, p, nv), fp)
 		}
 	}
 	return rows.Err()

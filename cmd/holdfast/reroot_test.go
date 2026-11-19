@@ -197,6 +197,8 @@ func TestReroot_DryRunReportsEveryTableAndTheEvidenceAndRewritesNothing(t *testi
 		"swap_incidents              0 row(s): source_path 0, replacement_path 0",
 		"path_exclusions             1 row(s): path 1",
 		"health_checks               0 row(s): path 0",
+		"playback_swaps              0 row(s): path 0",
+		"playback_sessions           0 row(s): path 0",
 		"node_leases                 0 row(s): path 0, temp_path 0",
 		"in all                      5 row(s)",
 		"of 4 file(s) the ledger recorded, 3 are under " + f.newRoot + " as recorded (0 of them the same file at " +
@@ -466,8 +468,8 @@ func TestReroot_LogsWhatItDidAsRecords(t *testing.T) {
 	if jobs == nil || jobs["rows"] != float64(3) || jobs["columns"].(map[string]any)["path"] != float64(3) {
 		t.Errorf("the jobs record does not carry its rows and per-column counts: %v", jobs)
 	}
-	if len(byTable) != 6 {
-		t.Errorf("%d table record(s), want one for each of the 6 tables holding a path: %v", len(byTable), byTable)
+	if len(byTable) != 8 {
+		t.Errorf("%d table record(s), want one for each of the 8 tables holding a path: %v", len(byTable), byTable)
 	}
 	if whole == nil || whole["rows"] != float64(5) || whole["evidence_matched"] != float64(3) ||
 		whole["evidence_replaced"] != float64(0) || whole["evidence_absent"] != float64(1) ||
@@ -847,5 +849,83 @@ func TestReroot_ADryRunNeverUpgradesTheLedger(t *testing.T) {
 	}
 	if got := userVersion(t, f.db); got != behind {
 		t.Errorf("the dry run moved the ledger's schema version to %d, want it left at %d", got, behind)
+	}
+}
+
+// TestReroot_PlaybackEvidenceFollowsTheRenamedRoot: a swap the playback evidence recorded under
+// the old root, and a session played on it, are carried with the jobs row they join. After the
+// reroot the swap is still the file at its (new) path, its session is still attributed to it,
+// and the next poll's RecordSwaps finds the swap it already has rather than recording a second
+// one beside an orphan.
+func TestReroot_PlaybackEvidenceFollowsTheRenamedRoot(t *testing.T) {
+	f := newRerootFixture(t)
+	moveBack(t, f)
+	swapped := filepath.Join(f.oldRoot, "movies", "swapped.mkv")
+	if err := os.WriteFile(swapped, []byte("a swapped encode"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fp := probe.Fingerprint(swapped)
+	ctx := context.Background()
+	seedLedger(t, f.state, func(st *store.SQLite) {
+		if ok, err := st.Claim(ctx, swapped, fp, "seed", 3, store.DecisionInputs{}); err != nil || !ok {
+			t.Fatalf("claim: %v %v", ok, err)
+		}
+		if err := st.Finish(ctx, swapped, fp, store.Done, &store.Outcome{}, 3); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := st.RecordSwaps(ctx, 100); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.RecordPlaybackSessions(ctx, []store.PlaybackSession{{Source: "tautulli", SessionID: "s-1",
+			Path: swapped, Fingerprint: fp, StartedAt: 50, Client: "c", Platform: "p", Player: "pl",
+			Decision: "direct play", RecordedAt: 100}}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := os.RemoveAll(f.newRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(f.oldRoot, f.newRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	if code, out, errOut := f.reroot(t, "--apply"); code != 0 {
+		t.Fatalf("reroot --apply exited %d:\n%s%s", code, out, errOut)
+	}
+
+	moved := filepath.Join(f.newRoot, "movies", "swapped.mkv")
+	st, err := store.Open(f.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	swaps, err := st.PlaybackSwaps(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every swap the evidence holds (this one, and the fixture's done row and retention) is
+	// under the new root and still the file at its path.
+	var found bool
+	for _, w := range swaps {
+		if _, under := store.RerootPath(w.Path, f.newRoot, f.newRoot); !under || !w.Current {
+			t.Errorf("a playback swap after the reroot is not a current file under %s: %+v", f.newRoot, w)
+		}
+		if w.Path == moved && w.Fingerprint == fp {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no playback swap at %s under %s after the reroot: %+v", moved, fp, swaps)
+	}
+	sessions, err := st.PlaybackEvidence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].Path != moved || sessions[0].SessionID != "s-1" {
+		t.Errorf("the session is not attributed to the swap at its new path: %+v", sessions)
+	}
+	if added, superseded, err := st.RecordSwaps(ctx, 200); err != nil || added != 0 || superseded != 0 {
+		t.Errorf("the next poll's RecordSwaps added %d and superseded %d (%v); want the carried swap found as it is",
+			added, superseded, err)
 	}
 }

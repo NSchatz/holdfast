@@ -64,6 +64,8 @@ The comparison is on **path components**, never a string prefix: `/media/old2/fi
 | `swap_incidents` | `source_path`, `replacement_path` |
 | `path_exclusions` | `path` |
 | `health_checks` | `path` |
+| `playback_swaps` | `path` |
+| `playback_sessions` | `path` |
 | `node_leases` | `path`, `temp_path` |
 
 Nothing else about a row changes. Its `updated_at` and its schema version stamp stay as they were,
@@ -91,8 +93,8 @@ old tree still in place, matches every size and mtime it holds - so every record
   "unrestorable" under a configured root, which drops the record and orphans the original.
 - **only at the new path** (the old mount is gone): judged by what the ledger recorded. A media file is
   **matched** when it matches a `size:mtime` fingerprint recorded for that path (any of the path's
-  `jobs` rows - a file with a superseded row beside its current one records two - or the swap's record
-  of what it left there), and otherwise **replaced since**: files are replaced under the same name all
+  `jobs` rows - a file with a superseded row beside its current one records two - or a swap's record
+  of what it left there, in the retention or in the playback evidence), and otherwise **replaced since**: files are replaced under the same name all
   the time (an *arr upgrade of an episode, a film acquired again). A retained original is matched when
   it is the size of the original its retention recorded.
 - **at neither path**: deleted since its row was written.
@@ -138,7 +140,8 @@ Every refusal exits non-zero, names its reason, and rewrites nothing.
   indistinguishable from one that carried them.
 - **A rewritten row would take a key a row under `--to` already holds.** The key is the table's own:
   a `jobs` row's path and fingerprint, a retention's source path, a withheld path, a health check's
-  path in its sweep, a lease's path at its epoch. Each collision is named. **Nothing is merged**: the
+  path in its sweep, a playback swap's path and fingerprint, a playback session's path with its source
+  and session id, a lease's path at its epoch. Each collision is named. **Nothing is merged**: the
   pair are two records of one file, and which stands is not a decision this command takes.
 - **The evidence fails**, as above: a recorded file is a different file at each path or is only at
   the old one, a retained original is not the recorded size, no recorded file matched, or the coverage

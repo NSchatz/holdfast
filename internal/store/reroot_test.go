@@ -166,6 +166,19 @@ func TestRerootColumns_EveryColumnIsClassified(t *testing.T) {
 		"node_leases.output_bytes", "node_leases.source_digest", "node_leases.upload_attempts",
 		"node_leases.reason", "node_leases.granted_at", "node_leases.updated_at", "node_leases.ended_at",
 		"node_leases.schema_version",
+		// The playback evidence: the identity of a swap and of a session beside the path, the
+		// readings a session carries, and the client's own names for itself. last_failure is
+		// a failure class, not a path.
+		"playback_swaps.fingerprint", "playback_swaps.swapped_at", "playback_swaps.superseded_at",
+		"playback_swaps.recorded_at", "playback_swaps.schema_version",
+		"playback_sessions.source", "playback_sessions.session_id", "playback_sessions.fingerprint",
+		"playback_sessions.started_at", "playback_sessions.stopped_at", "playback_sessions.offset_ms",
+		"playback_sessions.offset_derived", "playback_sessions.duration_ms", "playback_sessions.played_seconds",
+		"playback_sessions.client", "playback_sessions.platform", "playback_sessions.player",
+		"playback_sessions.decision", "playback_sessions.recorded_at", "playback_sessions.schema_version",
+		"playback_polls.source", "playback_polls.cursor", "playback_polls.covered_through",
+		"playback_polls.last_attempt_at", "playback_polls.last_failure", "playback_polls.unresolved_rows",
+		"playback_polls.schema_version",
 	} {
 		notPaths[c] = true
 	}
@@ -218,9 +231,10 @@ func TestApplyReroot_RewritesEveryPathColumnAndNothingElse(t *testing.T) {
 		"retained_originals.source_path": 1, "retained_originals.swapped_path": 1, "retained_originals.retained_path": 1,
 		"swap_incidents.source_path": 1, "swap_incidents.replacement_path": 1,
 		"path_exclusions.path": 1, "health_checks.path": 1, "node_leases.path": 1, "node_leases.temp_path": 1,
+		"playback_swaps.path": 1, "playback_sessions.path": 1,
 	}
 	wantRows := map[string]int64{"jobs": 2, "retained_originals": 1, "swap_incidents": 1, "path_exclusions": 1,
-		"health_checks": 1, "node_leases": 1}
+		"health_checks": 1, "node_leases": 1, "playback_swaps": 1, "playback_sessions": 1}
 	if len(plan.Tables) != len(rerootTables) {
 		t.Errorf("the plan reports %d table(s), want every one of the %d that hold a path", len(plan.Tables), len(rerootTables))
 	}
@@ -237,8 +251,8 @@ func TestApplyReroot_RewritesEveryPathColumnAndNothingElse(t *testing.T) {
 			t.Errorf("%s: the plan rewrites %d value(s), want %d", name, got, want)
 		}
 	}
-	if plan.Rows() != 7 {
-		t.Errorf("the plan rewrites %d row(s) in all, want 7", plan.Rows())
+	if plan.Rows() != 9 {
+		t.Errorf("the plan rewrites %d row(s) in all, want 9", plan.Rows())
 	}
 	if len(plan.Collisions) != 0 {
 		t.Errorf("collisions on a ledger with nothing under %s: %+v", newRoot, plan.Collisions)
@@ -308,6 +322,11 @@ func TestPlanReroot_CollisionsAreTheTableKeys(t *testing.T) {
 	seedEveryTable(t, s, newRoot, 2)
 	seedJob(t, s, newRoot+"/film.mkv", "999:999")
 	execSQL(t, s, `DELETE FROM jobs WHERE path = ? AND fingerprint = '1:1700000000'`, newRoot+"/film.mkv")
+	// A session on the same file with the old root's session id: the same whole key,
+	// (source, session_id, path), so a collision named by both of its partner columns.
+	execSQL(t, s, `INSERT INTO playback_sessions (source, session_id, path, fingerprint, started_at, offset_derived,
+		client, platform, player, decision, recorded_at) VALUES ('tautulli', 's-1', ?, '5:1700000002', 1, 0, '', '', '', '', 1)`,
+		newRoot+"/film.mkv")
 	before := dumpLedger(t, s)
 
 	plan, err := s.PlanReroot(ctx, oldRoot, newRoot)
@@ -325,6 +344,8 @@ func TestPlanReroot_CollisionsAreTheTableKeys(t *testing.T) {
 		"jobs " + newRoot + "/extra.mkv":              "fingerprint 2:1700000000",
 		"retained_originals " + newRoot + "/film.mkv": "",
 		"path_exclusions " + newRoot + "/withheld":    "",
+		"playback_swaps " + newRoot + "/film.mkv":     "fingerprint 5:1700000002",
+		"playback_sessions " + newRoot + "/film.mkv":  "source tautulli, session_id s-1",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("collisions:\n got  %v\n want %v", got, want)
@@ -360,7 +381,7 @@ func TestPlanReroot_EvidenceIsWhatTheLedgerRecordsPerPath(t *testing.T) {
 			Retained: true, RetainedBytes: 9},
 		{Was: oldRoot + "/extra.mkv", Path: newRoot + "/extra.mkv", Fingerprints: []string{"2:1700000000"}},
 		{Was: oldRoot + "/film.mkv", Path: newRoot + "/film.mkv",
-			Fingerprints: []string{"1:1700000000", "4:1700000001", "7:1600000000"}},
+			Fingerprints: []string{"1:1700000000", "4:1700000001", "5:1700000002", "7:1600000000"}},
 	}
 	if !reflect.DeepEqual(plan.Evidence, want) {
 		t.Errorf("evidence:\n got  %+v\n want %+v", plan.Evidence, want)
@@ -530,6 +551,12 @@ func seedEveryTable(t *testing.T, s *SQLite, root string, id int) {
 	execSQL(t, s, `INSERT INTO health_sweeps (id, started_at) VALUES (?, 1)`, id)
 	execSQL(t, s, `INSERT INTO health_checks (sweep_id, path, size, mtime_ns, checked_at, result, reason)
 		VALUES (?, ?, 1, 1700000000000000000, 2, 'ok', '')`, id, film)
+	// An earlier swap at the path, since superseded, and a session played on it.
+	execSQL(t, s, `INSERT INTO playback_swaps (path, fingerprint, swapped_at, superseded_at, recorded_at, schema_version)
+		VALUES (?, '5:1700000002', 8, 9, 10, 26)`, film)
+	execSQL(t, s, `INSERT INTO playback_sessions (source, session_id, path, fingerprint, started_at, offset_derived,
+		client, platform, player, decision, recorded_at) VALUES ('tautulli', ?, ?, '5:1700000002', 8, 0, 'c', 'p', 'pl', 'direct play', 10)`,
+		fmt.Sprintf("s-%d", id), film)
 	execSQL(t, s, `INSERT INTO node_leases (id, path, job_key, node, epoch, state, expires_at, temp_path, reserved_bytes,
 		args_digest, source_size, source_mtime_ns, upload_attempts, reason, granted_at, updated_at)
 		VALUES (?, ?, '1:1700000000', 'n1', ?, 'expired', 1, ?, 1, 'd', 1, 1, 0, 'expired', 1, 1)`,
