@@ -609,13 +609,16 @@ func TestCoverArt_AC8_LostPicturesAreRejected(t *testing.T) {
 }
 
 // claimInvocation is the shell a stand-in ffmpeg runs first: it claims the next invocation
-// number by creating the directory <dir>/<n>, and leaves the number in $n. mkdir either creates
-// a directory or fails because it exists, atomically, so concurrent invocations - the
-// playability gate runs a remux and several decoders at once - each claim a number of their
-// own, in the order they started, with none shared and none skipped. A counter read from a file
-// and written back is not that: two invocations reading it at once take the same number.
-func claimInvocation(dir string) string {
-	return "n=1\nwhile ! mkdir \"" + dir + "/$n\" 2>/dev/null; do n=$((n + 1)); done\n"
+// number by creating the file <prefix><n>, and leaves the number in $n. The claim is the shell's
+// own noclobber redirection, which creates the file or fails because it exists, atomically and
+// without starting a process, so concurrent invocations - the playability gate runs a remux
+// and several decoders at once - each claim a number of their own, in the order they started,
+// with none shared and none skipped. A counter read from a file and written back is not that:
+// two invocations reading it at once take the same number. An invocation that cannot claim
+// exits 3 without running ffmpeg.
+func claimInvocation(prefix string) string {
+	return "set -C\nn=1\nuntil { true > \"" + prefix + "$n\"; } 2>/dev/null; do n=$((n + 1)); " +
+		"[ \"$n\" -gt 1000 ] && exit 3; done\nset +C\n"
 }
 
 // claimed is how many invocation numbers were claimed in dir (claimInvocation): 1 to the result.
@@ -625,85 +628,48 @@ func claimed(t *testing.T, dir string) int {
 	if err != nil {
 		t.Fatalf("read %s: %v", dir, err)
 	}
-	for n := 1; n <= len(entries); n++ {
-		if fi, err := os.Stat(filepath.Join(dir, strconv.Itoa(n))); err != nil || !fi.IsDir() {
-			t.Fatalf("invocation %d of %d claimed no number in %s: %v", n, len(entries), dir, err)
+	n := 0
+	for _, e := range entries {
+		if _, err := strconv.Atoi(e.Name()); err == nil {
+			n++
 		}
 	}
-	return len(entries)
-}
-
-// failingFFmpeg writes a wrapper around the real ffmpeg that numbers every invocation. On
-// invocation failAt it runs the real binary, so whatever that invocation writes is on disk,
-// and then exits non-zero; every other invocation is the real binary. failAt 0 fails none.
-// counter is the directory the numbers are claimed in (claimInvocation).
-func failingFFmpeg(t *testing.T, dir, real string, failAt int) (wrapper, counter string) {
-	t.Helper()
-	wrapper = filepath.Join(dir, "failing-ffmpeg.sh")
-	counter = filepath.Join(dir, "failing-ffmpeg.calls")
-	if err := os.Mkdir(counter, 0o755); err != nil {
-		t.Fatal(err)
+	for i := 1; i <= n; i++ {
+		if _, err := os.Stat(filepath.Join(dir, strconv.Itoa(i))); err != nil {
+			t.Fatalf("invocation %d of %d claimed no number in %s: %v", i, n, dir, err)
+		}
 	}
-	script := "#!/bin/sh\n" + claimInvocation(counter) +
-		"if [ \"$n\" = \"" + strconv.Itoa(failAt) + "\" ]; then\n" +
-		"  \"" + real + "\" \"$@\"\n" +
-		"  exit 1\n" +
-		"fi\n" +
-		"exec \"" + real + "\" \"$@\"\n"
-	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
-		t.Fatalf("write the failing ffmpeg wrapper: %v", err)
-	}
-	return wrapper, counter
-}
-
-func invocations(t *testing.T, counter string) int {
-	t.Helper()
-	return claimed(t, counter)
+	return n
 }
 
 // [AC-9] For each ffmpeg invocation a passing run of the report-shaped source makes, a run in
 // which that invocation exits non-zero is not swapped and leaves no file the job wrote in the
-// source directory or the scratch directory - with and without a scratch directory.
+// source directory or the scratch directory - with and without a scratch directory. Each
+// invocation is chosen by its kind and its place among the invocations of that kind
+// (kindFFmpeg), never by its place among all of them: the playability gate runs a remux and
+// several decoders at once, so which process starts ninth is the scheduler's choice, and a run
+// told to fail "the ninth" can fail a different process than the passing run numbered ninth,
+// or none.
 func TestCoverArt_AC9_AFailedInvocationLeavesNothingBehind(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 	for _, withScratch := range []bool{false, true} {
 		t.Run("scratch="+strconv.FormatBool(withScratch), func(t *testing.T) {
-			job := func(t *testing.T, failAt int) (ts *testStore, src, scratch, counter string, before sourceState) {
-				d := t.TempDir()
-				src = filepath.Join(d, "movie.mkv")
-				mkReportMatroska(t, ffmpeg, ffprobe, src, reportShape{pictures: true})
-				before = captureSource(t, src)
-				if withScratch {
-					scratch = t.TempDir()
-				}
-				wrapper, counter := failingFFmpeg(t, t.TempDir(), ffmpeg, failAt)
-				ts = run(t, wrapper, ffprobe, d, nil, func(c *config.Config) {
-					everyGate(c)
-					c.ScratchDir = scratch
-				})
-				return ts, src, scratch, counter, before
-			}
-
-			ts, _, _, counter, _ := job(t, 0)
-			if row := onlyRow(t, ts); row.Status != store.Done {
-				t.Fatalf("the passing run did not swap (%s), so its invocations are not the job's", row.Outcome.Reason)
-			}
-			n := invocations(t, counter)
-			if n < 3 {
-				t.Fatalf("the passing run made %d ffmpeg invocation(s); the pictures and the encode alone are 3", n)
-			}
-			for k := 1; k <= n; k++ {
-				t.Run(fmt.Sprintf("invocation %d of %d fails", k, n), func(t *testing.T) {
-					ts, src, scratch, _, before := job(t, k)
-					assertNotSwapped(t, ts, src, before, scratch)
-				})
-			}
+			everyInvocationFailingKeepsTheSource(t, invocationScenario{
+				name: "movie.mkv",
+				source: func(t *testing.T, path string) {
+					mkReportMatroska(t, ffmpeg, ffprobe, path, reportShape{pictures: true})
+				},
+				mutate:  everyGate,
+				scratch: withScratch,
+				want: map[string]int{kindPicture: 2, kindEncode: 1, kindDecodeCheck: 1, kindRemux: 1,
+					kindDecoder: 2, kindVmafAvailable: 1, kindVmafScore: 1},
+			})
 		})
 	}
 }
 
 // argvLoggingFFmpeg writes a wrapper around the real ffmpeg that records each invocation's
-// argv, arguments separated by 0x1f, in a file of its own: <log>/<n>/argv, n the invocation's
+// argv, arguments separated by 0x1f, in a file of its own: <log>/<n>.argv, n the invocation's
 // number (claimInvocation). Concurrent invocations never write into one file, so no argv can
 // interleave with another, and the numbers keep the order the invocations started in.
 func argvLoggingFFmpeg(t *testing.T, dir, real string) (wrapper, log string) {
@@ -713,8 +679,8 @@ func argvLoggingFFmpeg(t *testing.T, dir, real string) (wrapper, log string) {
 	if err := os.Mkdir(log, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\n" + claimInvocation(log) +
-		"for a in \"$@\"; do printf '%s\\037' \"$a\"; done > \"" + log + "/$n/argv\"\n" +
+	script := "#!/bin/sh\n" + claimInvocation(log+"/") +
+		"for a in \"$@\"; do printf '%s\\037' \"$a\"; done > \"" + log + "/$n.argv\"\n" +
 		"exec \"" + real + "\" \"$@\"\n"
 	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
 		t.Fatalf("write the argv-logging ffmpeg wrapper: %v", err)
@@ -728,7 +694,7 @@ func loggedArgv(t *testing.T, log, root string) [][]string {
 	t.Helper()
 	var calls [][]string
 	for n, total := 1, claimed(t, log); n <= total; n++ {
-		b, err := os.ReadFile(filepath.Join(log, strconv.Itoa(n), "argv"))
+		b, err := os.ReadFile(filepath.Join(log, strconv.Itoa(n)+".argv"))
 		if err != nil {
 			t.Fatalf("read invocation %d's argv: %v", n, err)
 		}
