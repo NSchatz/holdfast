@@ -311,9 +311,9 @@ web/package.json is a build or test tool and is not distributed. web/package.jso
 pins the version, and scripts/check-pins.sh fails when the entry below names
 another. The licence text is the package's own LICENSE.md at that version.
 
-  package: svelte 5.57.1
+  package: svelte 5.57.3
        licence: MIT
-       source:  https://github.com/sveltejs/svelte (npm package svelte, version 5.57.1)
+       source:  https://github.com/sveltejs/svelte (npm package svelte, version 5.57.3)
 
        Copyright (c) 2016-2025 Svelte Contributors
        (https://github.com/sveltejs/svelte/graphs/contributors)
