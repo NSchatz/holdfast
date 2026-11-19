@@ -85,13 +85,13 @@ func Check(src, out probe.Timestamps) error {
 	// matched on one frame. A source timed by presentation timestamps is shown at them, and is
 	// held to d = 0 alone.
 	m := newMatcher(src, out)
-	at := m.mismatch(o, s)
-	if at < 0 {
+	at, moved := m.mismatch(o, s)
+	if !moved {
 		return nil
 	}
 	if src.FromDTS {
 		for d := 1; d <= min(MaxReorder, (len(s)-1)/2); d++ {
-			if m.mismatch(o, s[d:]) < 0 {
+			if _, shifted := m.mismatch(o, s[d:]); !shifted {
 				return nil
 			}
 		}
@@ -130,17 +130,17 @@ func newMatcher(src, out probe.Timestamps) *matcher {
 }
 
 // mismatch is the first frame of o not within one tick of s's frame at the same place, both read
-// from their own first frame, over the frames s has, or -1 where every one is.
-func (m *matcher) mismatch(o, s []int64) int {
+// from their own first frame, over the frames s has, and whether there is one.
+func (m *matcher) mismatch(o, s []int64) (at int, found bool) {
 	for i := range s {
 		m.a.Mul(m.a.SetInt64(o[i]-o[0]), m.outScale)
 		m.b.Mul(m.b.SetInt64(s[i]-s[0]), m.srcScale)
 		m.diff.Sub(&m.a, &m.b)
 		if m.diff.CmpAbs(m.bound) > 0 {
-			return i
+			return i, true
 		}
 	}
-	return -1
+	return 0, false
 }
 
 // repeats counts the frames of a sorted list presented at the same instant as the one before,
