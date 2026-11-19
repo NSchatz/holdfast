@@ -88,6 +88,88 @@ func TestParseTimestamps_ALineTooLongToReadIsUnanswered(t *testing.T) {
 	}
 }
 
+func TestParseFrames(t *testing.T) {
+	got, err := parseFrames(strings.NewReader("frame|best_effort_timestamp=0|\n\nframe|best_effort_timestamp=N/A\n" +
+		"frame|best_effort_timestamp=-42|side_data|\n"))
+	want := []Frame{{TS: 0, HasTS: true}, {}, {TS: -42, HasTS: true}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("parseFrames = %+v, %v; want %+v", got, err, want)
+	}
+	if got, err := parseFrames(strings.NewReader("")); err != nil || len(got) != 0 {
+		t.Errorf("an empty listing = %+v, %v; want no frame", got, err)
+	}
+	for _, tc := range []struct{ name, in, want string }{
+		{"a timestamp that is not a number", "frame|best_effort_timestamp=x\n", `a frame's best_effort_timestamp is not a timestamp: "x"`},
+		{"a frame without its timestamp", "frame|pts=0\n", "a frame line carries no best_effort_timestamp"},
+		{"a line this reader does not know", "packet|pts=0\n", "the frame listing carries a line this reader does not know"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, err := parseFrames(strings.NewReader(tc.in)); err == nil || !strings.Contains(err.Error(), tc.want) ||
+				errors.Is(err, ErrTimestampsUnanswered) || got != nil {
+				t.Errorf("parseFrames = %+v, %v; want an answer refused with %q", got, err, tc.want)
+			}
+		})
+	}
+	if _, err := parseFrames(strings.NewReader("frame|best_effort_timestamp=" + strings.Repeat("1", 70000) + "\n")); !errors.Is(err, ErrTimestampsUnanswered) {
+		t.Errorf("a listing that could not be read to its end: %v, want unanswered", err)
+	}
+}
+
+// TestVideoStart_DecodesOnlyTheFirstPackets runs the pinned ffmpeg: the decode of an MP4 cut
+// between keyframes shows a frame for each packet it keeps and none for those it flags to
+// discard, a decode of its first packets shows the frames of those alone, and a missing file
+// and a cancelled run are unanswered.
+func TestVideoStart_DecodesOnlyTheFirstPackets(t *testing.T) {
+	ffmpeg, err := exec.LookPath(envOrDefault("HOLDFAST_FFMPEG", "ffmpeg"))
+	if err != nil {
+		t.Fatalf("the pinned ffmpeg is required: %v", err)
+	}
+	p := realProber()
+	dir := t.TempDir()
+	whole, cut := filepath.Join(dir, "whole.mp4"), filepath.Join(dir, "cut.mp4")
+	for _, args := range [][]string{
+		{"-f", "lavfi", "-i", "testsrc2=duration=4:size=64x48:rate=10", "-c:v", "libx264", "-preset", "ultrafast",
+			"-g", "20", "-bf", "0", "--", whole},
+		{"-ss", "1.5", "-i", whole, "-c", "copy", "--", cut},
+	} {
+		if out, err := exec.Command(ffmpeg, append([]string{"-hide_banner", "-loglevel", "error", "-y"}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("make fixture: %v\n%s", err, out)
+		}
+	}
+	ctx := context.Background()
+	listing, err := p.VideoTimestamps(ctx, cut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discarded := 0
+	for _, k := range listing.Packets {
+		if k.Discard {
+			discarded++
+		}
+	}
+	if discarded == 0 {
+		t.Fatalf("fixture drifted: the cut flags no packet to discard (%+v)", listing)
+	}
+	all, err := p.VideoStart(ctx, cut, len(listing.Packets))
+	if err != nil || all.Packets != len(listing.Packets) || len(all.Frames) != len(listing.Packets)-discarded {
+		t.Errorf("the whole decode = %d packets, %d frames, %v; want %d frames of %d packets", all.Packets,
+			len(all.Frames), err, len(listing.Packets)-discarded, len(listing.Packets))
+	}
+	first, err := p.VideoStart(ctx, cut, discarded+3)
+	if err != nil || len(first.Frames) != 3 || !first.Frames[0].HasTS || first.Frames[0].TS != 0 {
+		t.Errorf("the decode of the first %d packets = %+v, %v; want the 3 frames after the discarded ones, from 0",
+			discarded+3, first, err)
+	}
+	if _, err := p.VideoStart(ctx, filepath.Join(dir, "missing.mp4"), 3); !errors.Is(err, ErrTimestampsUnanswered) {
+		t.Errorf("a missing file: %v, want unanswered", err)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := p.VideoStart(cancelled, cut, 3); !errors.Is(err, ErrTimestampsUnanswered) {
+		t.Errorf("a cancelled run: %v, want unanswered", err)
+	}
+}
+
 // ptsOf is the presentation timestamps of a listing's packets that carry one.
 func ptsOf(ts Timestamps) []int64 {
 	var out []int64
