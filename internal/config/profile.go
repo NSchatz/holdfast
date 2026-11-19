@@ -111,6 +111,11 @@ var profileKnobs = []string{
 	// What a job does to a Dolby Vision profile 7 source, on the same terms: it contributes
 	// only where it is not the shipped `skip`.
 	dolbyVisionP7Key,
+	// The playability gate's two keys, on the deinterlace knob's terms: each contributes only
+	// where it is not its shipped default (16 cold starts, segments on), so a root that sets
+	// neither digests as it did before they existed. They sit ahead of the hardware knobs, where
+	// their conditional rule makes the position immaterial to every existing digest.
+	playabilityColdStartsKey, playabilitySegmentsKey,
 	// What a job does where its hardware encoder is missing or fails, appended on the
 	// deinterlace knob's terms: it contributes to the digest only where it is not the
 	// shipped `skip`, so a root that sets nothing digests as it did before the key existed.
@@ -237,6 +242,13 @@ type Profile struct {
 	// Config.DolbyVisionP7.
 	DolbyVisionP7 string `yaml:"dolby_vision_p7"`
 
+	// PlayabilityColdStarts and PlayabilitySegments are the playability gate's two keys under
+	// this root. nil is each one's default (playability.DefaultColdStarts, and true), which is
+	// what a Profile assembled in Go carries: the gate runs. See Config.PlayabilityColdStarts
+	// and playability.go.
+	PlayabilityColdStarts *int  `yaml:"playability_cold_starts"`
+	PlayabilitySegments   *bool `yaml:"playability_segments"`
+
 	// HWFallback is what a job under this root does where its hardware encoder is missing
 	// or fails: HWFallbackSkip or HWFallbackSoftware. "" is the default, skip, which is
 	// what a Profile assembled in Go carries. See Config.HWFallback.
@@ -346,8 +358,9 @@ func (p Profile) values() []string {
 		strconv.FormatBool(p.DownscaleAcknowledged()),
 	}
 	vals = append(vals, p.audioValues()...)
-	return append(vals, p.SubtitleSidecarsMode(), p.CropMode(), p.DolbyVisionP7Mode(), p.HWFallbackMode(), p.HWDecodeMode(),
-		p.OpenGOPMode(), strconv.FormatBool(p.BitDepthKept()))
+	vals = append(vals, p.SubtitleSidecarsMode(), p.CropMode(), p.DolbyVisionP7Mode())
+	vals = append(vals, p.playabilityValues()...)
+	return append(vals, p.HWFallbackMode(), p.HWDecodeMode(), p.OpenGOPMode(), strconv.FormatBool(p.BitDepthKept()))
 }
 
 // renderDeinterlace is the deinterlace knob as `validate` prints it and as the digest reads
@@ -431,6 +444,9 @@ func digestSilent(knob, value string) bool {
 	if silent, ok := audioDigestSilent(knob, value); ok {
 		return silent
 	}
+	if silent, ok := playabilityDigestSilent(knob, value); ok {
+		return silent
+	}
 	switch knob {
 	case deinterlaceKey:
 		return value == deinterlace.Off
@@ -475,6 +491,9 @@ func (p Profile) validate() error {
 		return err
 	}
 	if err := p.validateKeepBitDepth(); err != nil {
+		return err
+	}
+	if err := p.validatePlayability(); err != nil {
 		return err
 	}
 	if err := p.validateAudio(); err != nil {
@@ -907,6 +926,10 @@ func parseRootMapping(i int, m map[string]any, file string) (rootEntry, error) {
 			if err := checkX265OpenGOPValue(where, val); err != nil {
 				return rootEntry{}, err
 			}
+		}
+		// So are the playability keys, a boolean and a whole number.
+		if err := checkPlayabilityValue(where, key, val); err != nil {
+			return rootEntry{}, err
 		}
 		override[key] = val
 	}

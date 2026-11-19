@@ -109,6 +109,8 @@ subtitle_sidecars: text
 crop: auto
 dolby_vision_p7: convert
 x265_open_gop: false
+playability_cold_starts: 8
+playability_segments: false
 workers: 4
 state_dir: /var/lib/holdfast
 undo_window_hours: 24
@@ -123,6 +125,7 @@ max_load: 1.5
 	// produced, spelled out so a change to any of it is a red test and not a shrug.
 	no := false
 	yes := true
+	eight := 8
 	want := Profile{
 		Encoder:           "cpu",
 		CRF:               18,
@@ -159,6 +162,9 @@ max_load: 1.5
 		Crop:              "auto",
 		DolbyVisionP7:     "convert",
 		X265OpenGOP:       &no,
+
+		PlayabilityColdStarts: &eight,
+		PlayabilitySegments:   &no,
 	}
 	roots := c.RootProfiles()
 	if len(roots) != 2 {
@@ -416,6 +422,11 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 		// converted and carried or skipped, so it is a knob; digested conditionally, so a root
 		// that sets nothing digests as it always did.
 		"dolby_vision_p7",
+		// The playability gate's two keys: how many keyframes are decoded from a cold start,
+		// and whether the output is cut into segments each decoded on its own. They decide
+		// what an output is held to before its source is deleted, so they are knobs; digested
+		// conditionally, so a root that sets neither digests as it always did.
+		"playability_cold_starts", "playability_segments",
 		// What a job does where its hardware encoder is missing or fails. It decides which
 		// encoder writes a replacement, or whether one is written at all, so it is a knob;
 		// digested conditionally, so a root that sets nothing digests as it always did.
@@ -579,6 +590,10 @@ func setDistinct(t *testing.T, f reflect.Value, n int) {
 	case reflect.Float64:
 		f.SetFloat(float64(n) + 0.5)
 	case reflect.Ptr:
+		if f.Type().Elem().Kind() == reflect.Int {
+			f.Set(reflect.ValueOf(&n))
+			break
+		}
 		b := n%2 == 0
 		f.Set(reflect.ValueOf(&b))
 	case reflect.Slice:
@@ -988,7 +1003,16 @@ func bump(t *testing.T, f reflect.Value) {
 		f.SetFloat(f.Float() + 1)
 	case reflect.Ptr:
 		// The tri-states are read RESOLVED, so the move has to be one that changes what
-		// the gate does: flip the effective value.
+		// the gate does: flip the effective value. The one pointer to a number
+		// (playability_cold_starts) resolves nil to its default, so it moves one past that.
+		if f.Type().Elem().Kind() == reflect.Int {
+			next := Profile{}.PlayabilityColdStartCount() + 1
+			if !f.IsNil() {
+				next = int(f.Elem().Int()) + 1
+			}
+			f.Set(reflect.ValueOf(&next))
+			break
+		}
 		cur := f.IsNil() || f.Elem().Bool()
 		next := !cur
 		f.Set(reflect.ValueOf(&next))

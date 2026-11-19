@@ -52,6 +52,11 @@ is the lever for a finished file you want cropped. A Dolby Vision file encoded u
 its crop could be decided (this build's earlier refusal, `dolby-vision`) is not re-opened by the
 upgrade either; `requeue` offers it back.
 
+The playability keys (`playability_cold_starts`, `playability_segments`) are the same: no guard
+reads them and no row records them, so turning the gate down re-opens no row. A file the gate
+refused is parked like any other final failure, and `holdfast requeue --failed` (or its path)
+offers it back ([docs/design/swap.md](design/swap.md#playability)).
+
 Where a library root carries [resolution rules](profiles.md#resolution-rules), the value a
 row records is the **effective** one the guard compared against - the floor the file's own
 band supplied, never the root's. So editing that rule offers the file back, and editing a
