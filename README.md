@@ -502,6 +502,16 @@ values have moved. So lowering `min_bitrate_kbps` or changing the target codec r
 previous configuration answered; an edit to a key no guard read reaches nothing; re-opening is not
 re-encoding; `holdfast requeue` is the LOCAL lever for the rest - **[docs/requeue.md](docs/requeue.md)**.
 
+### Moving a library root (`reroot`)
+
+Every path the ledger records names the root it was recorded under, so mounting the same files at a
+new path strands every row under the old one: decided files are decided again, deterministic failures
+are encoded and fail again, and retained originals fall out of the undo window's reach. With holdfast
+stopped and `library_roots` edited, `holdfast reroot --from <old> --to <new>` rewrites them in one
+transaction, after checking the new root is the same files moved, not a copy (files replaced since
+are carried as recorded); without `--apply` it only reports -
+**[docs/reroot.md](docs/reroot.md)**.
+
 ### Web API (`serve`)
 
 `holdfast serve` runs a REST API + [SSE](https://developer.mozilla.org/docs/Web/API/Server-sent_events)
