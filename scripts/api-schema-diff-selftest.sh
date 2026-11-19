@@ -212,6 +212,13 @@ mutate="$work/mutate"
 ( cd "$repo" && go build -o "$mutate" ./scripts/api-schema-selftest-mutate ) \
   || { echo "::error::selftest: the mutator did not build - it did NOT run" >&2; exit 1; }
 
+# The committed baseline records the LAST RELEASE, and additive drift between releases is
+# the normal state (AC-7 below), so it is not a baseline this tree matches exactly. The
+# pristine document every case starts from is this clone's own surface, written by the gate
+# itself, so case 1 grades "an unmutated tree matches its own baseline" whatever main has
+# added since the release.
+( cd "$repo" && "$gate" baseline -root "$repo" >/dev/null ) \
+  || { echo "::error::selftest: the gate could not write this clone's own baseline - it did NOT run" >&2; exit 1; }
 cp "$repo/$baseline" "$work/pristine.json" \
   || { echo "::error::selftest: the clone carries no baseline - it did NOT run" >&2; exit 1; }
 
