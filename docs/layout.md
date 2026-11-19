@@ -16,6 +16,8 @@ Where each part of the repository lives and what it owns.
 - `internal/probe` - ffprobe/ffmpeg inspection: codec, bitrate, duration, packets.
 - `internal/hdr` - colour, HDR and pixel-format fidelity.
 - `internal/chapters` - the chapter-parity gate: the output carries the source's chapter table.
+- `internal/playability` - the playability gate: cold starts and segment decodes over one remux into
+  fragmented MP4, and the HEVC GOP read the closed-GOP fidelity check holds an output to.
 - `internal/deinterlace`, `internal/downscale` - what a `deinterlace` or a `max_height` value means: one filter
   expression the encoder, the perceptual gate and the terminal row all read.
 - `internal/vmaf` - libvmaf via ffmpeg; the perceptual gate.

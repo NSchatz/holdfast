@@ -608,16 +608,43 @@ func TestCoverArt_AC8_LostPicturesAreRejected(t *testing.T) {
 	}
 }
 
+// claimInvocation is the shell a stand-in ffmpeg runs first: it claims the next invocation
+// number by creating the directory <dir>/<n>, and leaves the number in $n. mkdir either creates
+// a directory or fails because it exists, atomically, so concurrent invocations - the
+// playability gate runs a remux and several decoders at once - each claim a number of their
+// own, in the order they started, with none shared and none skipped. A counter read from a file
+// and written back is not that: two invocations reading it at once take the same number.
+func claimInvocation(dir string) string {
+	return "n=1\nwhile ! mkdir \"" + dir + "/$n\" 2>/dev/null; do n=$((n + 1)); done\n"
+}
+
+// claimed is how many invocation numbers were claimed in dir (claimInvocation): 1 to the result.
+func claimed(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	for n := 1; n <= len(entries); n++ {
+		if fi, err := os.Stat(filepath.Join(dir, strconv.Itoa(n))); err != nil || !fi.IsDir() {
+			t.Fatalf("invocation %d of %d claimed no number in %s: %v", n, len(entries), dir, err)
+		}
+	}
+	return len(entries)
+}
+
 // failingFFmpeg writes a wrapper around the real ffmpeg that numbers every invocation. On
 // invocation failAt it runs the real binary, so whatever that invocation writes is on disk,
 // and then exits non-zero; every other invocation is the real binary. failAt 0 fails none.
+// counter is the directory the numbers are claimed in (claimInvocation).
 func failingFFmpeg(t *testing.T, dir, real string, failAt int) (wrapper, counter string) {
 	t.Helper()
 	wrapper = filepath.Join(dir, "failing-ffmpeg.sh")
-	counter = filepath.Join(dir, "failing-ffmpeg.count")
-	script := "#!/bin/sh\n" +
-		"n=$(( $(cat \"" + counter + "\" 2>/dev/null || echo 0) + 1 ))\n" +
-		"echo \"$n\" > \"" + counter + "\"\n" +
+	counter = filepath.Join(dir, "failing-ffmpeg.calls")
+	if err := os.Mkdir(counter, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" + claimInvocation(counter) +
 		"if [ \"$n\" = \"" + strconv.Itoa(failAt) + "\" ]; then\n" +
 		"  \"" + real + "\" \"$@\"\n" +
 		"  exit 1\n" +
@@ -631,15 +658,7 @@ func failingFFmpeg(t *testing.T, dir, real string, failAt int) (wrapper, counter
 
 func invocations(t *testing.T, counter string) int {
 	t.Helper()
-	b, err := os.ReadFile(counter)
-	if err != nil {
-		t.Fatalf("read %s: %v", counter, err)
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
-		t.Fatalf("parse %s: %v", counter, err)
-	}
-	return n
+	return claimed(t, counter)
 }
 
 // [AC-9] For each ffmpeg invocation a passing run of the report-shaped source makes, a run in
@@ -683,15 +702,19 @@ func TestCoverArt_AC9_AFailedInvocationLeavesNothingBehind(t *testing.T) {
 	}
 }
 
-// argvLoggingFFmpeg writes a wrapper around the real ffmpeg that appends each invocation's
-// argv to a log, one line per invocation, arguments separated by 0x1f.
+// argvLoggingFFmpeg writes a wrapper around the real ffmpeg that records each invocation's
+// argv, arguments separated by 0x1f, in a file of its own: <log>/<n>/argv, n the invocation's
+// number (claimInvocation). Concurrent invocations never write into one file, so no argv can
+// interleave with another, and the numbers keep the order the invocations started in.
 func argvLoggingFFmpeg(t *testing.T, dir, real string) (wrapper, log string) {
 	t.Helper()
 	wrapper = filepath.Join(dir, "argv-ffmpeg.sh")
-	log = filepath.Join(dir, "argv-ffmpeg.log")
-	script := "#!/bin/sh\n" +
-		"for a in \"$@\"; do printf '%s\\037' \"$a\" >> \"" + log + "\"; done\n" +
-		"printf '\\n' >> \"" + log + "\"\n" +
+	log = filepath.Join(dir, "argv-ffmpeg.calls")
+	if err := os.Mkdir(log, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" + claimInvocation(log) +
+		"for a in \"$@\"; do printf '%s\\037' \"$a\"; done > \"" + log + "/$n/argv\"\n" +
 		"exec \"" + real + "\" \"$@\"\n"
 	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
 		t.Fatalf("write the argv-logging ffmpeg wrapper: %v", err)
@@ -699,16 +722,17 @@ func argvLoggingFFmpeg(t *testing.T, dir, real string) (wrapper, log string) {
 	return wrapper, log
 }
 
-// loggedArgv reads the log back, each per-run path under root rewritten to <ROOT>.
+// loggedArgv reads every invocation's argv back in invocation order, each per-run path under
+// root rewritten to <ROOT>.
 func loggedArgv(t *testing.T, log, root string) [][]string {
 	t.Helper()
-	b, err := os.ReadFile(log)
-	if err != nil {
-		t.Fatalf("read %s: %v", log, err)
-	}
 	var calls [][]string
-	for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
-		args := strings.Split(strings.TrimSuffix(line, "\x1f"), "\x1f")
+	for n, total := 1, claimed(t, log); n <= total; n++ {
+		b, err := os.ReadFile(filepath.Join(log, strconv.Itoa(n), "argv"))
+		if err != nil {
+			t.Fatalf("read invocation %d's argv: %v", n, err)
+		}
+		args := strings.Split(strings.TrimSuffix(string(b), "\x1f"), "\x1f")
 		for i := range args {
 			args[i] = strings.ReplaceAll(args[i], root, "<ROOT>")
 		}
@@ -770,9 +794,19 @@ func renderArgv(calls [][]string) string {
 // carries ahead of the output path, and the working file's name and the container the encode
 // names since S0177. decodeCheck and the two stream hashes are the gate's own invocations;
 // the first entry of each sequence is the encode.
+//
+// The playability gate's invocations follow the decode check on every re-encode (a remux is
+// not held to the gate): the remux of the output into fragmented MP4, and the decoders fed
+// from it - for this source's one keyframe, its segment's and its cold start's.
 var (
 	ac10DecodeCheck = []string{"-hide_banner", "-nostdin", "-v", "error", "-xerror", "-err_detect", "+explode",
 		"-i", "<ROOT>/movie.__transcoding__.mkv.holdfast-part", "-map", "0:v", "-f", "null", "-"}
+
+	ac10Remux = []string{"-hide_banner", "-nostdin", "-v", "error", "-i", "file:<ROOT>/movie.__transcoding__.mkv.holdfast-part",
+		"-map", "0:V:0", "-c", "copy", "-copyinkf", "-f", "mp4", "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "pipe:1"}
+	ac10Decoder = []string{"-hide_banner", "-nostdin", "-v", "error", "-xerror", "-err_detect", "+explode",
+		"-f", "mp4", "-i", "pipe:0", "-map", "0:v:0", "-vf", "setpts=N", "-c:v", "wrapped_avframe",
+		"-enc_time_base:v", "demux", "-stats_enc_pre", "pipe:1", "-stats_enc_pre_fmt", "{n}", "-f", "null", "-"}
 
 	ac10ReEncode = [][]string{
 		{"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", "<ROOT>/movie.mkv",
@@ -783,7 +817,7 @@ var (
 			"-max_muxing_queue_size", "128", "-muxing_queue_data_threshold", "52428800",
 			"-thread_queue_size", "8",
 			"--", "<ROOT>/movie.__transcoding__.mkv.holdfast-part"},
-		ac10DecodeCheck,
+		ac10DecodeCheck, ac10Remux, ac10Decoder, ac10Decoder,
 	}
 
 	ac10RemuxOnly = [][]string{
@@ -810,6 +844,6 @@ var (
 			"-max_muxing_queue_size", "128", "-muxing_queue_data_threshold", "52428800",
 			"-thread_queue_size", "8",
 			"--", "<ROOT>/movie.__transcoding__.mkv.holdfast-part"},
-		ac10DecodeCheck,
+		ac10DecodeCheck, ac10Remux, ac10Decoder, ac10Decoder,
 	}
 )

@@ -304,8 +304,8 @@ RUN set -eu; \
 # The UI (web/) is built here, by the same commands `make check` proves it with, on the
 # Node that web/.node-version pins: scripts/check-pins.sh section 12 holds this tag to
 # that file, and section 7 holds the reference to a tag and a digest written on this line.
-# The digest is the multi-arch index node:24.21.0-trixie-slim resolved to on
-# registry-1.docker.io, read 2026-10-03 (and unchanged from the reading of 2026-09-29).
+# The digest is the multi-arch index node:24.22.3-trixie-slim resolved to on
+# registry-1.docker.io, read 2026-11-19.
 # Node 24 is the Active LTS line until 2026-10-20 and maintained until 2028-04-30
 # (https://raw.githubusercontent.com/nodejs/Release/main/schedule.json, read 2026-09-29).
 #
@@ -313,7 +313,7 @@ RUN set -eu; \
 # HTML, the same bytes for every target architecture, so the arm64 image needs no QEMU
 # here either. Nothing of this stage reaches the runtime image but those files, embedded
 # in the Go binary: no Node, no pnpm and no node_modules ship.
-FROM --platform=$BUILDPLATFORM node:24.21.0-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe AS ui
+FROM --platform=$BUILDPLATFORM node:24.22.3-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS ui
 
 # The same question the build stage asks of its Go image, for the same reason: the digest
 # is what Docker pulls and the tag beside it is a label nothing enforces, so ask the image
