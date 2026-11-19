@@ -35,15 +35,19 @@ type Stream struct {
 func (c Checker) ReadStream(ctx context.Context, file string) (*Stream, error) {
 	cmd, out, errs := command(ctx, c.FFprobe, "-v", "error", "-select_streams", "V:0",
 		"-show_entries", "stream=time_base:packet=pts,flags", "-of", "compact=p=1:nk=0", "file:"+file)
-	// Only the exit is read: ffprobe decodes nothing here, and a clean listing is the answer
-	// whatever it printed beside it.
+	// A clean listing is the answer whatever ffprobe printed beside it: it decodes nothing here,
+	// so only a failed exit's error line is a verdict about the file.
 	runErr := cmd.Run()
-	if _, unrun := verdict(ctx, "the packet listing", runErr, ""); unrun != nil {
+	stderr := ""
+	if runErr != nil {
+		stderr = errs.String()
+	}
+	reason, unrun := verdict(ctx, "the packet listing", runErr, stderr)
+	if unrun != nil {
 		return nil, unrun
 	}
-	if runErr != nil {
-		return nil, &Failure{Check: "stream", Reason: "ffprobe could not list the video stream's packets: " +
-			reasonOf(errs.String(), exitCode(runErr))}
+	if reason != "" {
+		return nil, &Failure{Check: "stream", Reason: "ffprobe could not list the video stream's packets: " + reason}
 	}
 	s, err := parseStream(out.String())
 	if err != nil {
@@ -125,11 +129,12 @@ func parseRational(v string) (Rational, bool) {
 }
 
 // Keyframes are the decode-order indices of the packets a cold start can be aimed at: every
-// one the container flags as a keyframe that carries a presentation time.
+// one the container flags as a keyframe. A cold start is aimed by packet order, never by time,
+// so a keyframe whose container records no presentation time (AVI, ASF) is one too.
 func (s *Stream) Keyframes() []int {
 	var keys []int
 	for i, p := range s.Packets {
-		if p.Key && p.HasPTS {
+		if p.Key {
 			keys = append(keys, i)
 		}
 	}
@@ -142,7 +147,13 @@ func (s *Stream) Keyframes() []int {
 // recovery-point I picture. Decoded linearly it is decoded with every reference it has; a
 // decoder starting at the keyframe drops it (RASL) or decodes it (RADL) without the pictures
 // before the keyframe.
+//
+// A keyframe whose container records no presentation time cannot be told to lead anything, and
+// reads as leading nothing: it is still a keyframe, and the spread sample still reaches it.
 func (s *Stream) Leads(k int) bool {
+	if !s.Packets[k].HasPTS {
+		return false
+	}
 	at := s.Packets[k].PTS
 	for i := k + 1; i < len(s.Packets) && !s.Packets[i].Key; i++ {
 		if p := s.Packets[i]; p.HasPTS && p.PTS < at {
@@ -190,6 +201,15 @@ func spread(xs []int, n int) []int {
 		out[i] = xs[(2*i+1)*len(xs)/(2*n)]
 	}
 	return out
+}
+
+// keyframeAt names the keyframe at decode index k for a message: by its presentation time, or
+// by its place in decode order where the container records none.
+func (s *Stream) keyframeAt(k int) string {
+	if p := s.Packets[k]; p.HasPTS {
+		return "the keyframe at " + seconds(s.seconds(p.PTS))
+	}
+	return fmt.Sprintf("the keyframe that is picture %d in decode order", k+1)
 }
 
 // seconds is a time in the stream's time base in seconds, for messages.

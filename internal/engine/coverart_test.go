@@ -779,10 +779,10 @@ var (
 		"-i", "<ROOT>/movie.__transcoding__.mkv.holdfast-part", "-map", "0:v", "-f", "null", "-"}
 
 	ac10Remux = []string{"-hide_banner", "-nostdin", "-v", "error", "-i", "file:<ROOT>/movie.__transcoding__.mkv.holdfast-part",
-		"-map", "0:V:0", "-c", "copy", "-f", "mp4", "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "pipe:1"}
+		"-map", "0:V:0", "-c", "copy", "-copyinkf", "-f", "mp4", "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "pipe:1"}
 	ac10Decoder = []string{"-hide_banner", "-nostdin", "-v", "error", "-xerror", "-err_detect", "+explode",
-		"-f", "mp4", "-i", "pipe:0", "-map", "0:v:0", "-c:v", "wrapped_avframe", "-enc_time_base:v", "demux",
-		"-stats_enc_pre", "pipe:1", "-stats_enc_pre_fmt", "{n}", "-f", "null", "-"}
+		"-f", "mp4", "-i", "pipe:0", "-map", "0:v:0", "-vf", "setpts=N", "-c:v", "wrapped_avframe",
+		"-enc_time_base:v", "demux", "-stats_enc_pre", "pipe:1", "-stats_enc_pre_fmt", "{n}", "-f", "null", "-"}
 
 	ac10ReEncode = [][]string{
 		{"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", "<ROOT>/movie.mkv",

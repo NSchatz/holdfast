@@ -54,8 +54,8 @@ func (c Checker) decodeFragments(ctx context.Context, file string, s *Stream, n 
 	if s != nil && n > 0 {
 		keys := s.ColdStartTargets(n)
 		if len(keys) == 0 {
-			return &Failure{Check: "cold start", Reason: "the container flags no keyframe with a presentation " +
-				"time, so a player has nowhere to start the video"}
+			return &Failure{Check: "cold start", Reason: "the container flags no keyframe, so a player has " +
+				"nowhere to start the video"}
 		}
 		for _, k := range keys {
 			targets[k] = true
@@ -138,26 +138,31 @@ func (s *Stream) covered(fragments, pictures int) error {
 }
 
 // remuxArgs is the remux: the first video stream copied into fragmented MP4 on stdout, a
-// fragment starting at every keyframe.
+// fragment starting at every keyframe. -copyinkf keeps the packets ahead of the first keyframe,
+// which a stream copy otherwise drops, so the remux carries every packet the listing counts.
 func remuxArgs(file string) []string {
 	return []string{"-hide_banner", "-nostdin", "-v", "error", "-i", "file:" + file, "-map", "0:V:0", "-c", "copy",
-		"-f", "mp4", "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "pipe:1"}
+		"-copyinkf", "-f", "mp4", "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "pipe:1"}
 }
 
 // decoderArgs is one decoder: an initialisation segment and fragments on stdin, decoded with
 // -xerror and -err_detect +explode, one -stats_enc_pre line written per decoded picture (the
 // wrapped_avframe encoder costs nothing).
 //
-// -enc_time_base:v demux keeps each picture at the stream's own time base on its way to the
-// null muxer. Without it ffmpeg re-times the pictures at the frame rate it guessed from the
-// pipe, and on a variable frame rate stream (24, then 60 fps) two pictures closer together
-// than the guess land on one tick: the muxer prints "non monotonically increasing dts", and
-// every decode error line fails a decode here, so a stream that decodes cleanly would be
-// refused for a timestamp ffmpeg itself invented.
+// The decoded pictures' timestamps never reach a verdict. -vf setpts=N numbers each picture in
+// the order it is decoded, and -enc_time_base:v demux keeps those numbers in the stream's own
+// time base on their way to the null muxer, so its timestamps strictly increase whatever the
+// container recorded. Without them a stream that decodes cleanly is refused for a timestamp
+// ffmpeg itself invented: re-timed onto the frame rate guessed from the pipe, a variable frame
+// rate stream (24, then 60 fps) puts two pictures on one tick, and a stream whose container
+// records no presentation time (AVI, ASF) with B pictures repeats one, and the null muxer
+// prints "non monotonically increasing dts" - and every decode error line fails a decode here.
+// Whether an output's timestamps are right is a timing question, not playability's: this gate
+// judges whether the pictures decode.
 func decoderArgs() []string {
 	return []string{"-hide_banner", "-nostdin", "-v", "error", "-xerror", "-err_detect", "+explode",
-		"-f", "mp4", "-i", "pipe:0", "-map", "0:v:0", "-c:v", "wrapped_avframe", "-enc_time_base:v", "demux",
-		"-stats_enc_pre", "pipe:1", "-stats_enc_pre_fmt", "{n}", "-f", "null", "-"}
+		"-f", "mp4", "-i", "pipe:0", "-map", "0:v:0", "-vf", "setpts=N", "-c:v", "wrapped_avframe",
+		"-enc_time_base:v", "demux", "-stats_enc_pre", "pipe:1", "-stats_enc_pre_fmt", "{n}", "-f", "null", "-"}
 }
 
 // decodeError carries a decoder's own verdict out of the reader, apart from the errors of
@@ -302,7 +307,7 @@ func (rt *router) fragment(moof []byte) error {
 	}
 	if rt.targets[first] {
 		delete(rt.targets, first)
-		where := "the keyframe at " + seconds(rt.s.seconds(rt.s.Packets[first].PTS))
+		where := rt.s.keyframeAt(first)
 		d, err := rt.c.startDecoder(rt.ctx, "cold start", where, at, rt.init)
 		if err != nil {
 			return &decodeError{err}

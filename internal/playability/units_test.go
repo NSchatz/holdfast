@@ -31,7 +31,8 @@ func TestVerdict_HowAProcessEnded(t *testing.T) {
 		{"a clean exit that printed nothing", context.Background(), nil, " \n", "", false},
 		{"a clean exit that printed an error", context.Background(), nil, "first\nsecond\n", "first", false},
 		{"a non-zero exit", context.Background(), exitWith("3"), "\n  boom  \nafter", "boom", false},
-		{"a non-zero exit that printed nothing", context.Background(), exitWith("3"), "", "exited with status 3 and printed no error", false},
+		{"a non-zero exit that printed nothing", context.Background(), exitWith("3"), "", "", true},
+		{"ffmpeg's exit on SIGTERM: 255, nothing printed", context.Background(), exitWith("255"), " \n", "", true},
 		{"a binary that did not start", context.Background(), exec.ErrNotFound, "", "", true},
 		{"a process killed by a signal", context.Background(), killed, "", "", true},
 		{"a cancelled context", cancelled, nil, "an error", "", true},
@@ -46,9 +47,6 @@ func TestVerdict_HowAProcessEnded(t *testing.T) {
 			}
 		})
 	}
-	if exitCode(exitWith("7")) != 7 || exitCode(errors.New("x")) != 0 {
-		t.Error("exitCode misreads a status")
-	}
 }
 
 func TestReasonOf_IsTheFirstLineBoundedAndPrintable(t *testing.T) {
@@ -60,7 +58,7 @@ func TestReasonOf_IsTheFirstLineBoundedAndPrintable(t *testing.T) {
 		{long, strings.Repeat("\u00e9", maxReason) + "..."},
 		{strings.Repeat("\u00e9", maxReason), strings.Repeat("\u00e9", maxReason)},
 	} {
-		if got := reasonOf(tc.in, 1); got != tc.want {
+		if got := reasonOf(tc.in); got != tc.want {
 			t.Errorf("reasonOf(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
@@ -164,10 +162,10 @@ func TestKeyframesAndLeads(t *testing.T) {
 	// leading pictures 300 and 350; keyframe 7 at 700 with only trailing pictures, and a
 	// picture after the NEXT keyframe that is earlier than 700, which is not 7's.
 	s := pkts([]int64{0, 100, 200, 250, 400, 300, 350, 700, 800, 900, 1000, 650, -1}, 0, 4, 7, 10, 12)
-	if got := s.Keyframes(); !reflect.DeepEqual(got, []int{0, 4, 7, 10}) {
-		t.Fatalf("keyframes %v: a keyframe without a time is not one a cold start can aim at", got)
+	if got := s.Keyframes(); !reflect.DeepEqual(got, []int{0, 4, 7, 10, 12}) {
+		t.Fatalf("keyframes %v: a keyframe without a time is still one a cold start aims at, by packet order", got)
 	}
-	for k, want := range map[int]bool{0: false, 4: true, 7: false, 10: true} {
+	for k, want := range map[int]bool{0: false, 4: true, 7: false, 10: true, 12: false} {
 		if s.Leads(k) != want {
 			t.Errorf("Leads(%d) = %v", k, !want)
 		}
@@ -179,6 +177,16 @@ func TestKeyframesAndLeads(t *testing.T) {
 	// The last keyframe's group runs to the end of the stream.
 	if !pkts([]int64{0, 500, 400}, 0, 1).Leads(1) {
 		t.Error("the last keyframe's leading picture was missed")
+	}
+	// A keyframe with no time leads nothing, whatever follows it.
+	if pkts([]int64{-1, 0, 5}, 0).Leads(0) {
+		t.Error("a keyframe with no time read as leading")
+	}
+	if got := s.keyframeAt(4); got != "the keyframe at 0.400 s" {
+		t.Errorf("keyframeAt(4) = %q", got)
+	}
+	if got := s.keyframeAt(12); got != "the keyframe that is picture 13 in decode order" {
+		t.Errorf("keyframeAt(12) = %q", got)
 	}
 	// A picture presented at the keyframe's own time is not before it.
 	if pkts([]int64{500, 500, 600}, 0).Leads(0) {

@@ -128,9 +128,11 @@ decode-integrity check and the gates that follow it, and before the perceptual g
 output's first video stream (an attached picture is never it):
 
 1. It lists the stream packet by packet (ffprobe): each packet's presentation time and the
-   container's keyframe flag.
+   container's keyframe flag. A cold start is aimed by packet order, never by time, so a
+   container that records no presentation time at all (AVI, ASF) is checked as any other.
 2. It remuxes the stream, copied and never re-encoded, into fragmented MP4, the shape HLS and
-   DASH stream it in, with a fragment starting at every keyframe the container flags. The remux
+   DASH stream it in, with a fragment starting at every keyframe the container flags (and the
+   pictures ahead of the first keyframe kept, `-copyinkf`). The remux
    reads the file from its first byte to its last and seeks nothing, so a container with no
    keyframe index (MPEG-TS) is checked exactly as Matroska and MP4 are. Nothing is written to
    disk: the remux streams into holdfast, and each fragment streams on into the decoders it is
@@ -153,22 +155,30 @@ decoder exits 0, prints no error at all at `-v error`, and produces at least one
 printed beside a clean exit fails it: a decoder starting at a picture whose references it never
 decoded prints `Could not find ref with POC` and conceals, and that is exactly the failure the
 gate is for. ffprobe lists packets and is never the decoder a verdict is read from: it swallows
-decode errors and exits 0. Each decoder keeps every picture at the stream's own time base on its
-way to the null muxer (`-enc_time_base:v demux`): re-timed onto the frame rate ffmpeg guesses from
-the pipe, a variable frame rate stream (24, then 60, then 30 fps) puts two pictures on one tick and
-the muxer prints "non monotonically increasing dts", an error about a timestamp ffmpeg invented
-rather than about the stream. HDR10 and Dolby Vision profile 8.1 outputs print nothing at any cold
-start, so every error line the decoder prints still fails it.
+decode errors and exits 0.
+
+**The gate judges whether the pictures decode, not whether their timestamps are right.** Each
+decoder numbers its pictures in the order it decodes them (`-vf setpts=N`) and keeps those numbers
+in the stream's own time base (`-enc_time_base:v demux`), so no container timestamp ever reaches a
+verdict. Without that, a stream that decodes cleanly is refused for a timestamp ffmpeg invented:
+re-timed onto the frame rate it guesses from the pipe, a variable frame rate stream (24, then 60,
+then 30 fps) puts two pictures on one tick, and an AVI or ASF stream with B pictures and no
+presentation times repeats one, and the null muxer prints "non monotonically increasing dts".
+Whether an output's timestamps match its source's is a timing question for a gate of its own. HDR10
+and Dolby Vision profile 8.1 outputs print nothing at any cold start, so every error line the
+decoder prints still fails it.
 
 A failure keeps the source. A decode that ran and failed, a stream that cannot be listed, and a
 stream that cannot be remuxed into fragmented MP4 are **deterministic**: the same output fails the
-same way again, so the file parks at once. A check that could not be run at all (a binary that did
-not start, a process killed by a signal, a cancelled run, an answer this build could not read) is
-**transient**, and so is a remux that did not carry the stream the listing describes: a picture
-for every listed packet, in one fragment per keyframe. A remux that drifted from the listing leaves
-part of the stream undecoded by the checks, which proves nothing about that part. The reason names
-the check, where it failed ("the keyframe at 2069.069 s", "segment
-12 (decode time 66.000 s)") and the decoder's first error line.
+same way again, so the file parks at once. Everything that is not evidence about the file is
+**transient**: a check that could not be run at all (a binary that did not start, a process killed
+by a signal, a cancelled run, an answer this build could not read); a process that exited non-zero
+printing no error (ffmpeg stopped by SIGTERM exits 255 and says nothing at `-v error`), since only
+an error a decoder printed is a verdict; and a remux that did not carry the stream the listing
+describes - a picture for every listed packet, in one fragment per keyframe - which leaves part of
+the stream undecoded by the checks and proves nothing about it. The reason names the check, where it
+failed ("the keyframe at 2069.069 s", "segment 12 (decode time 66.000 s)") and the decoder's first
+error line.
 
 A remux is not held to the gate: its video is the source's own, bit for bit (the video-identity
 check), so it starts exactly as the source does, and refusing it would keep a source with the same
@@ -186,8 +196,9 @@ keeps the keyframes and changes the pictures: an open-GOP stream whose RASL pict
 RADL in place decodes linearly frame for frame, and a decoder starting at a keyframe decodes
 pictures that reference one it never saw (`TestColdStart_RASLPicturesRelabelledRADLFail`, in
 Matroska, MP4 and MPEG-TS). Every shape an encoder writes - open and closed GOPs, HEVC, H.264 and
-AV1, a variable frame rate, HDR10, Dolby Vision profile 8.1, in Matroska, MP4 and MPEG-TS - passes
-with a cold start at every keyframe (`TestCheck_EveryShapeAnEncoderWritesPasses`).
+AV1, a variable frame rate, HDR10, Dolby Vision profile 8.1, in Matroska, MP4, MPEG-TS, AVI and ASF
+- passes with a cold start at every keyframe, and with the segments alone
+(`TestCheck_EveryShapeAnEncoderWritesPasses`).
 
 ### What it costs
 
@@ -210,6 +221,9 @@ remain the costs that dominate a job.
 - The cold starts are a sample. With segments on, every segment start is a cold start too, so a
   keyframe is skipped only where it falls inside a segment and outside the sample; such a keyframe
   is decoded only from the keyframe before it.
+- It judges whether the pictures decode, not whether their timestamps are right: a decoder's
+  timestamps are renumbered before anything reads them, and an output's timing against its
+  source's is a separate check's to hold.
 - It exercises the decoder's start, not a demuxer's seek: the remux hands each decoder the stream
   from its keyframe, as a correct seek would. A container index that points somewhere other than
   where its keyframe flags say is not looked for. Segments are fragmented MP4 only, not MPEG-TS.

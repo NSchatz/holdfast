@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 )
@@ -284,5 +285,37 @@ func TestPlayability_TheListingIsReadOnce(t *testing.T) {
 	}
 	if n := countCalls(t, log); n != 1 {
 		t.Errorf("the listing ran ffprobe %d times, want once", n)
+	}
+}
+
+// TestClosedGOP_AnUnrunReadDoesNotHideAFoundMismatch: where the GOP read cannot be run, a field
+// the fidelity gate already found lost is still reported, deterministically; with nothing found
+// lost, the unrun read is a transient refusal.
+func TestClosedGOP_AnUnrunReadDoesNotHideAFoundMismatch(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	out := filepath.Join(d, "out.mkv")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=duration=1:size=160x120:rate=10",
+		"-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error", "-pix_fmt", "yuv420p10le", "--", out)
+	eng := buildEngine(t, ffmpeg, ffprobe, d, nil, nil)
+	eng.Probe = probe.New(filepath.Join(d, "no-such-ffmpeg"), ffprobe)
+	for _, tc := range []struct {
+		name   string
+		pixFmt string
+		class  store.FailureClass
+		want   string
+	}{
+		{"a bit depth already lost", "yuv420p", store.FailureDeterministic, "bit-depth: want 8"},
+		{"nothing else lost", "yuv420p10le", store.FailureTransient, "could not be checked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job := &EncodePlan{Output: out, Profile: eng.Cfg.TopLevelProfile()}
+			job.Video.GOP = GOP{Set: true}
+			job.Metadata.Fidelity = hdr.FidelityOf(tc.pixFmt, hdr.Color{}, "")
+			class, err := eng.outputFidelity(context.Background(), job, eng.outputListing(out))
+			if err == nil || class != tc.class || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("class %q err %v, want %q naming %q", class, err, tc.class, tc.want)
+			}
+		})
 	}
 }

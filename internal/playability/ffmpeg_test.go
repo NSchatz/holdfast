@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // The checks against the pinned ffmpeg, over files it wrote: what an encoder writes passes,
@@ -50,6 +52,8 @@ const (
 	openTS    = "open.ts"    // the open-GOP stream in MPEG-TS, which has no keyframe index
 	closedMP4 = "closed.mp4" // the closed-GOP stream in MP4
 	h264      = "h264.mkv"   // libx264 as holdfast runs it: closed GOP
+	h264AVI   = "h264.avi"   // libx264 with B pictures in AVI, whose packets carry no presentation time
+	h264WMV   = "h264.wmv"   // the same in ASF (wmv), whose packets carry none either
 	av1       = "av1.mkv"    // libsvtav1
 	noBFrames = "nob.mkv"    // libx265 with no B pictures: nothing reordered
 	crafted   = "crafted.mp4"
@@ -71,6 +75,9 @@ const (
 	mislabelMKV = "mislabel.mkv"
 	mislabelMP4 = "mislabel.mp4"
 	mislabelTS  = "mislabel.ts"
+	// The closed-GOP stream cut at 0.5 s with the pictures before its next keyframe kept: it
+	// starts with trailing pictures whose references it does not carry.
+	leading = "leading.mkv"
 )
 
 // hdr10Params are the HDR10 fixtures' colour description and static metadata in x265's spelling.
@@ -133,6 +140,14 @@ func writeFixtures(c Checker) (string, error) {
 				"-pix_fmt", "yuv420p", p(h264))...)
 		},
 		func() error {
+			return run(c.FFmpeg, append(src("4"), "-c:v", "libx264", "-preset", "ultrafast", "-bf", "3", "-g", "24",
+				"-pix_fmt", "yuv420p", p(h264AVI))...)
+		},
+		func() error {
+			return run(c.FFmpeg, append(src("4"), "-c:v", "libx264", "-preset", "ultrafast", "-bf", "3", "-g", "24",
+				"-pix_fmt", "yuv420p", "-f", "asf", p(h264WMV))...)
+		},
+		func() error {
 			return run(c.FFmpeg, append(src("4"), "-c:v", "libsvtav1", "-preset", "12", "-g", "24",
 				"-svtav1-params", "log-level=1", p(av1))...)
 		},
@@ -164,6 +179,9 @@ func writeFixtures(c Checker) (string, error) {
 		func() error { return mislabel(c, p(openGOP), p(mislabelMKV), "matroska") },
 		func() error { return run(c.FFmpeg, "-i", p(mislabelMKV), "-c", "copy", p(mislabelMP4)) },
 		func() error { return run(c.FFmpeg, "-i", p(mislabelMKV), "-c", "copy", p(mislabelTS)) },
+		func() error {
+			return run(c.FFmpeg, "-i", p(closedGOP), "-ss", "0.5", "-c", "copy", "-copyinkf", p(leading))
+		},
 	}
 	for _, step := range steps {
 		if err := step(); err != nil {
@@ -224,16 +242,18 @@ func linearDecodeOK(t *testing.T, ffmpeg, file string) bool {
 
 // TestCheck_EveryShapeAnEncoderWritesPasses: every check over every shape of stream holdfast's
 // encoders write - open and closed GOPs, reordered and not, HEVC, H.264 and AV1, in Matroska,
-// MP4 and MPEG-TS, a variable frame rate, HDR10 and Dolby Vision profile 8.1 - passes, with a
+// MP4, MPEG-TS, AVI and ASF, a variable frame rate, HDR10 and Dolby Vision profile 8.1 - passes, with a
 // cold start at EVERY keyframe. A decode error line ffmpeg prints about something other than
 // the pictures (a timestamp it guessed, side data it could not attach) would fail one of these.
 func TestCheck_EveryShapeAnEncoderWritesPasses(t *testing.T) {
 	c := tools(t)
-	for _, name := range []string{openGOP, closedGOP, openMP4, openTS, closedMP4, h264, av1, noBFrames,
-		vfrMKV, vfrMP4, vfrTS, hdr10, dv81} {
+	for _, name := range []string{openGOP, closedGOP, openMP4, openTS, closedMP4, h264, h264AVI, h264WMV, av1,
+		noBFrames, vfrMKV, vfrMP4, vfrTS, hdr10, dv81} {
 		t.Run(name, func(t *testing.T) {
-			if err := c.Check(context.Background(), fixture(t, name), nil, Options{ColdStarts: 1000, Segments: true}); err != nil {
-				t.Fatalf("a file an encoder wrote failed: %v", err)
+			for _, o := range []Options{{ColdStarts: 1000, Segments: true}, {Segments: true}} {
+				if err := c.Check(context.Background(), fixture(t, name), nil, o); err != nil {
+					t.Fatalf("a file an encoder wrote failed under %+v: %v", o, err)
+				}
 			}
 		})
 	}
@@ -474,6 +494,85 @@ func TestCheck_AListingTheRemuxDoesNotMatchIsUnrun(t *testing.T) {
 				t.Fatalf("got %v, want an *Unrun naming the remux's drift from the listing", err)
 			}
 		})
+	}
+}
+
+// TestVerdict_FFmpegStoppedBySIGTERMIsUnrun: ffmpeg catches SIGTERM, stops, and exits 255
+// having printed nothing at -v error. That says nothing about the file it was reading, so it is
+// an *Unrun (transient), never a verdict; and a check whose ffmpeg exits non-zero printing
+// nothing is an *Unrun throughout.
+func TestVerdict_FFmpegStoppedBySIGTERMIsUnrun(t *testing.T) {
+	c := tools(t)
+	cmd, _, errs := command(context.Background(), c.FFmpeg, "-hide_banner", "-nostdin", "-v", "error",
+		"-re", "-f", "lavfi", "-i", "testsrc2=size=160x128:rate=24", "-f", "null", "-")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	err := cmd.Wait()
+	if code := exitStatus(err); code != 255 || strings.TrimSpace(errs.String()) != "" {
+		t.Fatalf("fixture drifted: ffmpeg on SIGTERM exited %d (%v) printing %q, not 255 and nothing", code, err, errs.String())
+	}
+	reason, unrun := verdict(context.Background(), "the decode", err, errs.String())
+	if unrun == nil || reason != "" {
+		t.Fatalf("verdict = %q, %v; want an *Unrun", reason, unrun)
+	}
+
+	silent := filepath.Join(t.TempDir(), "silent-ffmpeg")
+	if err := os.WriteFile(silent, []byte("#!/bin/sh\nexit 255\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	broken := Checker{FFmpeg: silent, FFprobe: c.FFprobe}
+	for name, err := range map[string]error{
+		"check": broken.Check(context.Background(), fixture(t, closedGOP), nil, Options{ColdStarts: 4, Segments: true}),
+		"gop":   func() error { _, err := broken.ReadGOP(context.Background(), fixture(t, closedGOP)); return err }(),
+	} {
+		var u *Unrun
+		if !errors.As(err, &u) || IsFailure(err) || !strings.Contains(err.Error(), "exited with status 255 and printed no error") {
+			t.Errorf("%s: got %v, want an *Unrun naming the silent exit", name, err)
+		}
+	}
+}
+
+// exitStatus is the status a process exited with, or -1 where it did not exit on its own.
+func exitStatus(err error) int {
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.Exited() {
+		return exit.ExitCode()
+	}
+	return -1
+}
+
+// TestCheck_AStreamThatStartsBeforeItsFirstKeyframe: the remux and the GOP read carry the
+// pictures ahead of the first keyframe (-copyinkf), so the listing and the remux agree - the
+// stream's first fragment starts at its first picture, ahead of its first keyframe - and the
+// cold starts, at keyframes, pass. The segment that starts with those pictures does not decode
+// on its own, exactly as the linear decode of the stream fails, and the GOP read matches every
+// picture to its packet.
+func TestCheck_AStreamThatStartsBeforeItsFirstKeyframe(t *testing.T) {
+	c := tools(t)
+	file := fixture(t, leading)
+	s, err := c.ReadStream(context.Background(), file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Packets[0].Key || len(s.Keyframes()) != 7 {
+		t.Fatalf("fixture drifted: first packet key=%v, %d keyframes", s.Packets[0].Key, len(s.Keyframes()))
+	}
+	if err := c.Check(context.Background(), file, s, Options{ColdStarts: 1000}); err != nil {
+		t.Fatalf("the cold starts of a stream starting before its first keyframe: %v", err)
+	}
+	err = c.Check(context.Background(), file, s, Options{Segments: true})
+	var f *Failure
+	if !errors.As(err, &f) || f.Check != "segment" || !strings.HasPrefix(f.At, "segment 1 ") {
+		t.Errorf("the segment carrying the pictures ahead of the first keyframe: %v", err)
+	}
+	types, err := c.ReadGOP(context.Background(), file)
+	if err != nil || len(types) != len(s.Packets) || ClosedGOP(s, types) != "" {
+		t.Errorf("GOP read: %d pictures for %d packets (%v), ClosedGOP %q", len(types), len(s.Packets), err, ClosedGOP(s, types))
 	}
 }
 

@@ -29,9 +29,13 @@ func command(ctx context.Context, bin string, args ...string) (*exec.Cmd, *bytes
 
 // verdict reads how a process ended. what names the check for an Unrun. It returns an
 // *Unrun where the process did not run to an exit of its own (it did not start, it was
-// killed by a signal, or ctx was cancelled), and otherwise the reason it failed: its last
-// error line where it exited non-zero or exited 0 having printed an error, "" where it
-// exited 0 and printed nothing.
+// killed by a signal, or ctx was cancelled) or exited non-zero without printing an error,
+// and otherwise the reason it failed: its first error line where it exited non-zero or exited
+// 0 having printed an error, "" where it exited 0 and printed nothing.
+//
+// A non-zero exit with nothing printed says nothing about the file: ffmpeg catches SIGTERM and
+// SIGINT and exits 255 having printed nothing at -v error, and a binary that dies before it
+// reads its input does the same. Only an error the process printed is a verdict.
 //
 // An error printed beside a clean exit fails it. At -v error ffmpeg prints only errors,
 // and a decoder that conceals a broken reference ("Could not find ref with POC") still
@@ -46,41 +50,32 @@ func verdict(ctx context.Context, what string, err error, stderr string) (string
 		if !errors.As(err, &exit) || !exit.Exited() {
 			return "", &Unrun{What: what, Err: err}
 		}
-		return reasonOf(stderr, exit.ExitCode()), nil
+		if strings.TrimSpace(stderr) == "" {
+			return "", &Unrun{What: what, Err: fmt.Errorf("it exited with status %d and printed no error", exit.ExitCode())}
+		}
+		return reasonOf(stderr), nil
 	}
 	if strings.TrimSpace(stderr) != "" {
-		return reasonOf(stderr, 0), nil
+		return reasonOf(stderr), nil
 	}
 	return "", nil
-}
-
-// exitCode is the status a process that ran to its own exit exited with.
-func exitCode(err error) int {
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		return exit.ExitCode()
-	}
-	return 0
 }
 
 // maxReason bounds a reason: ffmpeg can print an error per frame, and the reason reaches the
 // ledger row and every surface that reads it.
 const maxReason = 300
 
-// reasonOf is the first line a process printed, made printable and bounded, or its exit
-// status where it printed nothing. The first line is the cause: a decoder that cannot find a
+// reasonOf is the first line a process printed, made printable and bounded; verdict calls it
+// only where the process printed one. The first line is the cause: a decoder that cannot find a
 // reference says so first, and what ffmpeg prints after it is the run winding down ("Task
 // finished with error", "Nothing was written into output file").
-func reasonOf(stderr string, code int) string {
+func reasonOf(stderr string) string {
 	var first string
 	for _, line := range strings.Split(stderr, "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			first = line
 			break
 		}
-	}
-	if first == "" {
-		return fmt.Sprintf("exited with status %d and printed no error", code)
 	}
 	// ffmpeg names the component that printed a line with its address in memory, which
 	// differs on every run and says nothing to a reader: "[hevc @ 0x55d0c1a2b3c0]" is

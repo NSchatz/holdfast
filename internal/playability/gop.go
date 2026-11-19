@@ -40,10 +40,11 @@ func nalName(t uint8) string {
 // ReadGOP reads the NAL unit type of every picture of file's first video stream, an HEVC
 // stream, in decode order: the stream copied (never decoded) into an Annex B byte stream,
 // and the type of each picture's first slice read off it. One picture is one access unit of
-// the base layer, so the list lines up with the stream's packets.
+// the base layer, so the list lines up with the stream's packets; -copyinkf keeps the packets
+// ahead of the first keyframe, which a stream copy otherwise drops.
 func (c Checker) ReadGOP(ctx context.Context, file string) ([]uint8, error) {
 	cmd := exec.CommandContext(ctx, c.FFmpeg, "-hide_banner", "-nostdin", "-v", "error", "-i", "file:"+file,
-		"-map", "0:V:0", "-c:v", "copy", "-bsf:v", "hevc_mp4toannexb", "-f", "hevc", "pipe:1")
+		"-map", "0:V:0", "-c:v", "copy", "-copyinkf", "-bsf:v", "hevc_mp4toannexb", "-f", "hevc", "pipe:1")
 	var scan nalScanner
 	var errs head
 	cmd.Stdout, cmd.Stderr = &scan, &errs

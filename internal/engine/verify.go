@@ -465,7 +465,8 @@ const closedGOPWant = "closed GOPs (x265_open_gop: false): every keyframe an IDR
 // declares closed GOPs it reads the output's GOP structure too (closedGOP).
 //
 // Every mismatch is DETERMINISTIC, a GOP structure that could not be read off the file
-// included; the one TRANSIENT refusal is a GOP read that could not be run at all.
+// included; the one TRANSIENT refusal is a GOP read that could not be run at all, and only
+// where no other field was found lost.
 func (e *Engine) outputFidelity(ctx context.Context, job *EncodePlan, listing func(context.Context) (*playability.Stream, error)) (store.FailureClass, error) {
 	out := e.Probe.OutputFacts(ctx, job.Output)
 	obs := hdr.Observed{
@@ -478,9 +479,12 @@ func (e *Engine) outputFidelity(ctx context.Context, job *EncodePlan, listing fu
 	if job.Video.GOP.Set && !job.Video.GOP.Open {
 		found, err := e.closedGOP(ctx, job.Output, listing)
 		switch {
-		case err != nil && !playability.IsFailure(err):
+		case err != nil && !playability.IsFailure(err) && len(m) == 0:
 			return store.FailureTransient, fmt.Errorf("output fidelity: the closed GOPs the plan declares could not "+
 				"be checked: %w. The source is kept", err)
+		case err != nil && !playability.IsFailure(err):
+			// A field already found lost is a deterministic verdict whatever the GOP read could
+			// not establish, and the refusal reports it.
 		case err != nil:
 			m = append(m, hdr.Mismatch{Field: FieldClosedGOP, Want: closedGOPWant, Got: "a GOP structure that could not be read (" + err.Error() + ")"})
 		case found != "":
