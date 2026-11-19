@@ -43,6 +43,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/health"
 	"github.com/NSchatz/holdfast/internal/node"
+	"github.com/NSchatz/holdfast/internal/playback"
 	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/version"
 )
@@ -388,6 +389,11 @@ func declaredResponses() (map[string][]Response, error) {
 
 		"GET /api/health": append([]Response{
 			jsonOK(http.StatusOK, health.Report{}),
+			text(http.StatusInternalServerError),
+		}, readGate...),
+
+		"GET " + PlaybackPath: append([]Response{
+			jsonOK(http.StatusOK, playback.Report{}),
 			text(http.StatusInternalServerError),
 		}, readGate...),
 
