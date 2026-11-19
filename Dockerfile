@@ -45,7 +45,7 @@
 # RUN cannot see the reference its own stage was built from. scripts/check-pins.sh
 # section 3 holds the two equal, so moving one without the other reds the gate instead of
 # splitting silently.
-ARG GO_IMAGE=golang:1.26.11-trixie@sha256:cff05dd6b81c901f2e8249eb6f91c69a60451d0f12c26bfef08e476a85b32d4d
+ARG GO_IMAGE=golang:1.27.3-trixie@sha256:af1bfc2614ebb1dbd31af514b78740fd678850e76498762b425ecee4c5c6ea80
 
 # --- ffmpeg: a pinned static build, verified by hash before it is trusted -----
 # BtbN's builds link only glibc (>= 2.28), so they run on the distroless runtime while
