@@ -26,6 +26,10 @@ plan declares, and the area the crop removed from the source must be black on ev
 The chapter-parity gate joins them by addition: the replacement must carry the source's
 chapter table ([chapter parity](#chapter-parity)).
 
+The playability gate joins them by addition on every encode: the replacement must decode from a
+cold start at a sample of its keyframes, and segment by segment, the way players and media
+servers start it ([playability](#playability)).
+
 Any gate failure discards the temp and leaves the source byte-for-byte intact.
 There is no half-written state left behind to clean up, and no moment at which the
 source is gone and the replacement is not yet in place.
@@ -87,6 +91,129 @@ copied faithfully. That swap passes this gate.
 The encode takes chapters from the source. A single-input command line has nowhere else to take
 them from; the one command line with a second input (a converted Dolby Vision profile 7 stream,
 `1:v:0`) names the source explicitly with `-map_chapters 0`.
+
+## Playability
+
+<a id="playability"></a>
+
+**An output replaces its source only when it decodes the way players and media servers start it:
+from a cold start at a sample of its keyframes, at the keyframes followed by leading pictures,
+and segment by segment. That proves one decoder starts it cleanly everywhere it was started; it
+does not prove every client plays it.**
+
+### Why playability is not faithfulness
+
+Every gate before this one asks whether the output is faithful to its source: the codec, the
+length, the streams, the chapters, the declared metadata, every frame decoding from the first,
+and the pictures looking like the source's. None asks whether the output starts where a player
+starts it. The decode-integrity gate is one linear decode from frame 0. A player that seeks or
+resumes, a media server cutting HLS or DASH segments for a browser, a transcoder seeking with
+`-ss`, a hardware decoder handed one segment: each starts decoding at a keyframe in the middle of
+the stream with nothing decoded before it, a path a linear decode never takes. An output can be
+faithful frame for frame and not start cleanly there.
+
+[Issue #200](https://github.com/NSchatz/holdfast/issues/200) is the case that made it a gate: a
+libx265 output coded with open GOPs (CRA keyframes, some followed by RASL pictures that reference
+the group before them) passed every gate and stalled several Plex clients about 34 minutes in,
+while the source it replaced played through. The defect in that file has not been isolated: the
+pinned ffmpeg decodes it, and the other open-GOP outputs audited beside it, cleanly in software
+and through NVDEC, linearly and from cold starts at its RASL-bearing CRAs. So this gate is not a
+fix for that one stall. It closes the class of path the gates never exercised, and it is
+deliberately honest about what it can and cannot see (below).
+
+### What the gate does
+
+The gate (`internal/playability`, gate label `playability`) runs on every encode after the
+decode-integrity check and the gates that follow it, and before the perceptual gate. On the
+output's first video stream (an attached picture is never it):
+
+1. It lists the stream packet by packet (ffprobe): each packet's presentation time and the
+   container's keyframe flag.
+2. It remuxes the stream, copied and never re-encoded, into fragmented MP4, the shape HLS and
+   DASH stream it in, with a fragment starting at every keyframe the container flags. The remux
+   reads the file from its first byte to its last and seeks nothing, so a container with no
+   keyframe index (MPEG-TS) is checked exactly as Matroska and MP4 are. Nothing is written to
+   disk: the remux streams into holdfast, and each fragment streams on into the decoders it is
+   routed to.
+3. **Cold starts** (`playability_cold_starts`, default 16): that many keyframes spread evenly
+   across the stream, and up to four times as many of the keyframes followed by leading pictures
+   (a picture after the keyframe in decode order but before it in presentation order: in HEVC a
+   RASL or RADL picture, in an open-GOP H.264 stream a B picture after a recovery point), spread
+   evenly across every such keyframe. Each is a fresh decoder handed the remux's initialisation
+   segment and the fragments from that keyframe on, three seconds of decode time, with nothing
+   before it: the decoder's start a player makes after a seek.
+4. **Segments** (`playability_segments`, default on): the fragments cut into segments of at least
+   six seconds, each starting at a keyframe (the first keyframe decoded at least six seconds past the
+   last segment's start, as an HLS or DASH segmenter cuts a stream it copies), and each decoded on
+   its own by a fresh decoder. Every picture of the output is decoded this way once more, and
+   every segment boundary is a cold start of its own.
+
+Every decode is ffmpeg with `-xerror` and `-err_detect +explode`, and it passes only where the
+decoder exits 0, prints no error at all at `-v error`, and produces at least one picture. An error
+printed beside a clean exit fails it: a decoder starting at a picture whose references it never
+decoded prints `Could not find ref with POC` and conceals, and that is exactly the failure the
+gate is for. ffprobe lists packets and is never the decoder a verdict is read from: it swallows
+decode errors and exits 0.
+
+A failure keeps the source. A decode that ran and failed, a stream that cannot be listed, and a
+stream that cannot be remuxed into fragmented MP4 are **deterministic**: the same output fails the
+same way again, so the file parks at once. A check that could not be run at all (a binary that did
+not start, a process killed by a signal, a cancelled run, an answer this build could not read) is
+**transient**. The reason names the check, where it failed ("the keyframe at 2069.069 s", "segment
+12 (decode time 66.000 s)") and the decoder's first error line.
+
+A remux is not held to the gate: its video is the source's own, bit for bit (the video-identity
+check), so it starts exactly as the source does, and refusing it would keep a source with the same
+property.
+
+The fixture that reds it is an output every gate before it passes, and the decode-integrity gate's
+linear decode in particular: an MP4 whose sync-sample table flags a trailing picture as a keyframe
+in place of the IDR before it. Every picture decodes from the first frame; a cold start at that
+keyframe, and the segment that starts there, decode a picture whose references they never had
+(`TestColdStart_AKeyframeFlaggedOnATrailingPictureFails`,
+`TestSegments_AFragmentStartingAtATrailingPictureFails`,
+`TestPlayability_AnOutputThatDoesNotStartAtAKeyframeIsRefused`). The same output passes every gate
+and replaces its source with both keys off (`TestPlayability_TheKeysTurnItOff`).
+
+### What it costs
+
+Per encode: one packet listing and one remux, each a read of the whole output; one more decode of
+the whole video (the segments), in processes of a few seconds each; and up to 16 + 64 short
+decodes, each three seconds of video or the one group of pictures it starts, where that is longer.
+The remux runs once for both checks. The perceptual gate's two full decodes and the encode itself
+remain the costs that dominate a job.
+
+### What it proves and what it does not
+
+- It proves the pinned ffmpeg's software decoder starts the output cleanly at every keyframe it was
+  started at and decodes every segment on its own. A keyframe flag on a picture that is not a random
+  access point, a segment a decoder cannot start, a stream that cannot be put into the fragmented
+  MP4 a media server streams: each is refused before the swap.
+- It does not prove that every client plays the file. ffmpeg decoding cleanly is one decoder's
+  verdict. Issue #200's output decodes cleanly in ffmpeg on every path tried and still stalled Plex
+  clients; a browser's decoder, a TV's hardware decoder and Apple's frameworks each behave in their
+  own way, and no gate here runs them. No hardware decoder is used either.
+- The cold starts are a sample. With segments on, every segment start is a cold start too, so a
+  keyframe is skipped only where it falls inside a segment and outside the sample; such a keyframe
+  is decoded only from the keyframe before it.
+- It exercises the decoder's start, not a demuxer's seek: the remux hands each decoder the stream
+  from its keyframe, as a correct seek would. A container index that points somewhere other than
+  where its keyframe flags say is not looked for. Segments are fragmented MP4 only, not MPEG-TS.
+
+What the gate cannot see is what the encode settings can avoid. For a library a media server
+streams, `x265_open_gop: false` codes closed GOPs, every keyframe an IDR that needs nothing before
+it, and the fidelity gate then holds the output to that ([closed GOPs](encode-plan.md#closed-gop));
+`keep_bit_depth: true` keeps an 8-bit source 8-bit for clients that do not decode HEVC Main 10
+([the output bit depth](encode-plan.md#bit-depth)).
+
+### The keys
+
+`playability_cold_starts` (default 16; 0 turns cold starts off) and `playability_segments`
+(default `true`) tune the gate or turn either half off, per library root
+([docs/profiles.md](../profiles.md#playability)). At their defaults they move no profile digest;
+any other value is a different profile and digests apart. No guard reads them, so changing them
+re-opens no row: a file parked by this gate comes back through `holdfast requeue --failed` or by
+its path ([docs/requeue.md](../requeue.md)).
 
 ## Where the encode is written, and why the swap shape never moves
 

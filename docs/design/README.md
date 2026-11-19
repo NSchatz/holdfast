@@ -10,6 +10,8 @@ reasoning lives in the document, not in this index.
   [`docs/design/swap.md`](swap.md#swap-invariant).
 - **An output replaces its source only when it carries the source's chapter table, and a source's own malformed table reproduced exactly passes** -
   [`docs/design/swap.md`](swap.md#chapter-parity).
+- **An output replaces its source only when it decodes from a cold start at its keyframes and segment by segment, the way players and media servers start it; that proves one decoder starts it, not that every client plays it** -
+  [`docs/design/swap.md`](swap.md#playability).
 - **The quality gate bounds the worst frame, not only the average** -
   [`docs/design/quality-gate.md`](quality-gate.md#vmaf-pooling).
 - **An unreadable figure is reported as null, never as a zero** -
@@ -20,6 +22,8 @@ reasoning lives in the document, not in this index.
   HDR10 metadata its plan declares** - [`docs/design/encode-plan.md`](encode-plan.md#fidelity).
 - **libx265 is told about GOPs only where a root sets `x265_open_gop`; unset passes nothing** -
   [`docs/design/encode-plan.md`](encode-plan.md#gop).
+- **A plan that declares closed GOPs holds its output to them: no RASL picture, and every keyframe an
+  IDR or BLA picture** - [`docs/design/encode-plan.md`](encode-plan.md#closed-gop).
 - **An 8-bit source is encoded at 10 bits unless its root says `keep_bit_depth: true`, and no
   setting plans a source shallower than it is** - [`docs/design/encode-plan.md`](encode-plan.md#bit-depth).
 - **A hardware encoder runs only after a real encode through a job's own command line came out
