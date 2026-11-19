@@ -304,8 +304,8 @@ RUN set -eu; \
 # The UI (web/) is built here, by the same commands `make check` proves it with, on the
 # Node that web/.node-version pins: scripts/check-pins.sh section 12 holds this tag to
 # that file, and section 7 holds the reference to a tag and a digest written on this line.
-# The digest is the multi-arch index node:24.21.0-trixie-slim resolved to on
-# registry-1.docker.io, read 2026-10-03 (and unchanged from the reading of 2026-09-29).
+# The digest is the multi-arch index node:24.22.3-trixie-slim resolved to on
+# registry-1.docker.io, read 2026-11-19.
 # Node 24 is the Active LTS line until 2026-10-20 and maintained until 2028-04-30
 # (https://raw.githubusercontent.com/nodejs/Release/main/schedule.json, read 2026-09-29).
 #
