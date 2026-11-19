@@ -79,6 +79,13 @@ and fixes the trust gaps:
   ([what is reported where](docs/design/health-sweep.md#reporting)). It
   **never moves, renames, deletes or repairs a file**: what to do about one is the operator's call
   ([docs/design/health-sweep.md](docs/design/health-sweep.md#health-sweep)).
+- **Playback evidence: a swapped file real viewers cannot get through is reported.** Off by default.
+  With `playback_source: tautulli`, `serve` reads Tautulli's session history, ties each session to
+  the swapped file it played, and reports a file whose sessions keep ending at one point well before
+  the end as a [suspected stall](docs/design/playback-evidence.md#verdicts) - in the log,
+  `GET /api/playback` and the `holdfast_playback_*` metrics - with the `holdfast restore` command
+  while the original is still retained. It never restores or re-encodes anything itself
+  ([docs/design/playback-evidence.md](docs/design/playback-evidence.md#playback-evidence)).
 - **Radarr, Sonarr and Plex are told, and a file being played is left alone.** Off by default.
   With a target's address and credential set, a committed swap asks the one Radarr movie or
   Sonarr series that owns the file's directory to rescan (`RescanMovie`, `RescanSeries`) and asks
@@ -444,7 +451,8 @@ through the same guards, gates and swap as a scanned one ([docs/profiles.md](doc
 Three host-fair holds, all off by default, only ever delay the hand-out of new files and never
 interrupt an encode in flight: a daily `run_window` (unset: always), a per-core load cap `max_load`
 (`0`: none), and a pause while Tautulli reports an active stream (`tautulli_url` with a
-`tautulli_api_key` reference; unset). Prometheus metrics are on (`metrics_enable: true`, at
+`tautulli_api_key` reference; unset; `tautulli_pause: false` keeps Tautulli for playback evidence
+without the pause). Prometheus metrics are on (`metrics_enable: true`, at
 `/metrics`), and notifications are off until `notify_url` carries a reference
 ([docs/api-reference.md](docs/api-reference.md)).
 
