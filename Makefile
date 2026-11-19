@@ -5,8 +5,8 @@
 # used to be restated in ci.yml, which meant bumping one drifted the PR gate away from
 # the release gate. (CI adds two things on top: a config-schema self-test, and the image
 # smoke gate — scripts/smoke-image.sh — which needs Docker.)
-STATICCHECK_VERSION ?= 2025.1.1
-GOVULNCHECK_VERSION ?= v1.1.4
+STATICCHECK_VERSION ?= 2026.2.2
+GOVULNCHECK_VERSION ?= v1.10.0
 GREMLINS_VERSION ?= v0.6.0
 
 # Where a mutation run publishes its machine-readable result. The workflow uploads this
