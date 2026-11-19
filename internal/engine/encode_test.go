@@ -73,9 +73,10 @@ func hasArgPair(args []string, flag, value string) bool {
 	return false
 }
 
-// TestEncode_FpsModePassthroughWired proves -fps_mode passthrough is present on
-// every CPU encode invocation. REDS if that flag is ever dropped from
-// FFmpegEncoder.Encode — a VFR source would otherwise silently be forced to CFR.
+// TestEncode_FpsModePassthroughWired proves -fps_mode passthrough and -enc_time_base:v demux
+// are present on every CPU encode invocation. REDS if either is ever dropped from
+// FFmpegEncoder.Encode - a VFR source would otherwise silently be forced to CFR, or have its
+// timestamps rounded onto the frame rate the demuxer guessed (docs/design/encode-plan.md#timestamps).
 func TestEncode_FpsModePassthroughWired(t *testing.T) {
 	realFFmpeg, realFFprobe := tools(t)
 	d := t.TempDir()
@@ -95,6 +96,9 @@ func TestEncode_FpsModePassthroughWired(t *testing.T) {
 	args := readArgv(t, argvLog)
 	if !hasArgPair(args, "-fps_mode", "passthrough") {
 		t.Errorf("ffmpeg argv missing -fps_mode passthrough: %v", args)
+	}
+	if !hasArgPair(args, "-enc_time_base:v", "demux") {
+		t.Errorf("ffmpeg argv missing -enc_time_base:v demux: %v", args)
 	}
 }
 
@@ -145,6 +149,7 @@ func TestEncode_SingleVideoStreamArgvUnchanged(t *testing.T) {
 			"-pix_fmt", "yuv420p10le",
 			"-color_range", "tv",
 			"-fps_mode", "passthrough",
+			"-enc_time_base:v", "demux",
 			"-preset", "ultrafast",
 			"-crf", "22",
 			"-x265-params", "log-level=error",
@@ -384,8 +389,8 @@ func TestEncode_SVTAV1WiresCodecColorAndPreset(t *testing.T) {
 	if !hasArgPair(args, "-colorspace", "bt709") {
 		t.Errorf("ffmpeg argv missing universal -colorspace bt709: %v", args)
 	}
-	if !hasArgPair(args, "-fps_mode", "passthrough") {
-		t.Errorf("ffmpeg argv missing universal -fps_mode passthrough: %v", args)
+	if !hasArgPair(args, "-fps_mode", "passthrough") || !hasArgPair(args, "-enc_time_base:v", "demux") {
+		t.Errorf("ffmpeg argv missing universal -fps_mode passthrough -enc_time_base:v demux: %v", args)
 	}
 	for _, a := range args {
 		if a == "-x265-params" {
@@ -447,8 +452,8 @@ func TestBuildArgs_HardwareEncoderShapes(t *testing.T) {
 	// Every hardware Spec still gets the universal args (pix_fmt/fps_mode), and
 	// none of them get x265-params (libx265-only).
 	for _, args := range [][]string{nvencArgs, av1NvencArgs, qsvArgs, vaapiArgs, amfArgs} {
-		if !hasArgPair(args, "-fps_mode", "passthrough") {
-			t.Errorf("hardware buildArgs missing universal -fps_mode passthrough: %v", args)
+		if !hasArgPair(args, "-fps_mode", "passthrough") || !hasArgPair(args, "-enc_time_base:v", "demux") {
+			t.Errorf("hardware buildArgs missing universal -fps_mode passthrough -enc_time_base:v demux: %v", args)
 		}
 		for _, a := range args {
 			if a == "-x265-params" {

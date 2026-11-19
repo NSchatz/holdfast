@@ -8,6 +8,7 @@ package engine
 // plan declares and it cannot perform, and that each gate's verdict moves with the plan.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -300,12 +301,16 @@ func TestEncodePlan_EveryGateReadsThePlan(t *testing.T) {
 	withAudio := filepath.Join(d, "with-audio.mkv")
 	mkSourceWithStreams(t, ffmpeg, withAudio, audioStream("eng"))
 
-	// The files the three gates with no job-specific expectation measure: an output that is
-	// not there to measure, a source twice the output's length, and an output whose video does
-	// not decode. The damaged one is an hevc elementary stream of the source - encoded without
-	// B-frames, so a raw stream muxes back with timestamps - with bytes in its middle flipped,
-	// muxed at its own frame rate; the same mux of the undamaged stream passes every gate, so
-	// the damage is the one thing the decode gate can be rejecting.
+	// The files the gates with no job-specific expectation measure: an output that is not
+	// there to measure, a source twice the output's length, a source as long with twice its
+	// frames (the timing half of the length gate), and an output whose video does not decode. The damaged one is a Matroska mux of an hevc elementary stream of the source -
+	// encoded without B-frames, so a raw stream muxes back with timestamps, at its own frame
+	// rate - with the bytes of ONE frame in its middle flipped, its length prefix included, and
+	// nothing else touched: the container still lists every frame at its time, so the timing
+	// gate passes it as it passes the undamaged mux, and the damage is the one thing the decode
+	// gate can be rejecting. (Damage that runs across frames also destroys the boundaries the
+	// muxer split the stream on, and the output comes out frames short, which the timing gate
+	// refuses first.)
 	empty := filepath.Join(d, "empty.mkv")
 	if err := os.WriteFile(empty, nil, 0o644); err != nil {
 		t.Fatalf("write the empty output: %v", err)
@@ -314,30 +319,22 @@ func TestEncodePlan_EveryGateReadsThePlan(t *testing.T) {
 	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
 		"-i", "testsrc2=duration=4:size=320x240:rate=10", "-c:v", "libx264", "-preset", "ultrafast",
 		"-b:v", "8M", "-pix_fmt", "yuv420p", "--", long)
+	// The source the timing gate is shown reading: as long as the output, at twice its rate.
+	doubled := filepath.Join(d, "doubled.mkv")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=2:size=320x240:rate=20", "-c:v", "libx264", "-preset", "ultrafast",
+		"-b:v", "8M", "-pix_fmt", "yuv420p", "--", doubled)
 	elementary := filepath.Join(d, "out.hevc")
 	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-map", "0:v",
 		"-c:v", "libx265", "-preset", "ultrafast", "-crf", "28", "-x265-params", "bframes=0:log-level=error",
 		"-pix_fmt", "yuv420p10le", "-f", "hevc", "--", elementary)
-	raw, err := os.ReadFile(elementary)
-	if err != nil {
-		t.Fatalf("read the elementary stream: %v", err)
+	cleanMux := filepath.Join(d, "clean.mkv")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-framerate", "10", "-i", elementary,
+		"-c", "copy", "--", cleanMux)
+	damaged := filepath.Join(d, "damaged.mkv")
+	if err := os.WriteFile(damaged, oneFrameFlipped(t, elementary, cleanMux), 0o644); err != nil {
+		t.Fatalf("write the damaged output: %v", err)
 	}
-	if len(raw) < 8192 {
-		t.Fatalf("the elementary stream is %d bytes - too small to damage its middle", len(raw))
-	}
-	for i := len(raw) / 2; i < len(raw)/2+len(raw)/8; i++ {
-		raw[i] ^= 0xff
-	}
-	damagedStream := filepath.Join(d, "damaged.hevc")
-	if err := os.WriteFile(damagedStream, raw, 0o644); err != nil {
-		t.Fatalf("write the damaged elementary stream: %v", err)
-	}
-	remux := func(stream, to string) string {
-		ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-framerate", "10", "-i", stream,
-			"-c", "copy", "--", to)
-		return to
-	}
-	cleanMux, damaged := remux(elementary, filepath.Join(d, "clean.mkv")), remux(damagedStream, filepath.Join(d, "damaged.mkv"))
 
 	eng := buildEngine(t, ffmpeg, ffprobe, d, nil, nil)
 	prober := probe.New(ffmpeg, ffprobe)
@@ -369,6 +366,7 @@ func TestEncodePlan_EveryGateReadsThePlan(t *testing.T) {
 		}, GateFidelity},
 		{"the output the plan names: nothing there", func(p *EncodePlan) { p.Output = empty }, GateEncode},
 		{"the source the plan names: twice the output's length", func(p *EncodePlan) { p.Source = long }, GateLength},
+		{"the source the plan names: as long, at twice the rate", func(p *EncodePlan) { p.Source = doubled }, GateLength},
 		{"the output the plan names: a stream that does not decode", func(p *EncodePlan) { p.Output = damaged }, GateDecode},
 	}
 	clean := *job
@@ -539,4 +537,52 @@ func pointerText(b *bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+// oneFrameFlipped returns the bytes of mux, a Matroska mux of the hevc elementary stream in
+// elementary, with one frame in the middle of it inverted - the frame's length prefix and its
+// coded bytes - and every other byte as it was. The frame is found by its content: the slice
+// NAL units of the elementary stream are the frames, Matroska stores each as a 4-byte length
+// and the same bytes, so the middle slice's bytes, found in the mux, name exactly the region
+// that is that frame.
+func oneFrameFlipped(t *testing.T, elementary, mux string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(elementary)
+	if err != nil {
+		t.Fatalf("read the elementary stream: %v", err)
+	}
+	b, err := os.ReadFile(mux)
+	if err != nil {
+		t.Fatalf("read the mux: %v", err)
+	}
+	startCode := []byte{0, 0, 1}
+	var units [][]byte
+	for rest := raw; ; {
+		i := bytes.Index(rest, startCode)
+		if i < 0 {
+			break
+		}
+		rest = rest[i+len(startCode):]
+		end := bytes.Index(rest, startCode)
+		if end < 0 {
+			end = len(rest)
+		}
+		// A 4-byte start code leaves its leading zero on the unit before it.
+		nal := bytes.TrimSuffix(rest[:end], []byte{0})
+		if len(nal) > 64 && (nal[0]>>1)&0x3f < 32 { // a VCL (slice) NAL unit
+			units = append(units, nal)
+		}
+	}
+	if len(units) < 10 {
+		t.Fatalf("the elementary stream holds %d slices, want the 20 frames it was encoded from", len(units))
+	}
+	frame := units[len(units)/2]
+	at := bytes.Index(b, frame[:64])
+	if at < 4 || bytes.Contains(b[at+1:], frame[:64]) || !bytes.Equal(b[at:at+len(frame)], frame) {
+		t.Fatalf("the middle frame is not stored once, whole, in the mux (at %d) - the damage could not be placed", at)
+	}
+	for i := at - 4; i < at+len(frame); i++ {
+		b[i] ^= 0xff
+	}
+	return b
 }

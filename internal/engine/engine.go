@@ -356,7 +356,9 @@ const (
 	GateEncode = "encode"
 	// GateCodec: the output is not the codec this job was asked to produce.
 	GateCodec = "codec"
-	// GateLength: duration parity or packet-count parity failed - a truncated encode.
+	// GateLength: duration parity or packet-count parity failed - a truncated encode - or
+	// timing parity did: the output's video is not presented at the source's times, packet
+	// for packet, or that could not be established (docs/design/swap.md#timing-parity).
 	GateLength = "length"
 	// GateSize: the min-savings reject. An output that did not reclaim enough space.
 	GateSize = "size"

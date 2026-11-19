@@ -63,8 +63,8 @@ The working file inside `scratch_dir` is not in a library folder and keeps the n
 1. The encoder writes its output into `scratch_dir` under a per-job working name
    (`<stem>.<tag>.__transcoding__.<ext>`; the tag is derived from the source's path,
    so two files that share a basename in different directories cannot collide).
-2. The acceptance gates run against that file - codec, duration and packet parity,
-   strictly-smaller, per-type stream-count parity, full decode integrity, VMAF mean,
+2. The acceptance gates run against that file - codec, duration, packet and timestamp
+   parity, strictly-smaller, per-type stream-count parity, full decode integrity, VMAF mean,
    worst-frame floor and chroma floor. Nothing at all has been written under the
    source's directory yet.
 3. **Only once the gates have accepted**, the result is copied into a temp beside

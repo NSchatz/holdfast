@@ -811,7 +811,7 @@ var (
 	ac10ReEncode = [][]string{
 		{"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", "<ROOT>/movie.mkv",
 			"-map", "0", "-map", "-0:d?", "-c", "copy", "-c:v", "libx265",
-			"-pix_fmt", "yuv420p10le", "-color_range", "tv", "-fps_mode", "passthrough",
+			"-pix_fmt", "yuv420p10le", "-color_range", "tv", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 			"-preset", "ultrafast", "-crf", "22", "-x265-params", "log-level=error",
 			"-f", "matroska",
 			"-max_muxing_queue_size", "128", "-muxing_queue_data_threshold", "52428800",
@@ -838,7 +838,7 @@ var (
 		{"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", "<ROOT>/movie.mkv",
 			"-map", "0:0", "-map", "0:1", "-map", "0:2", "-map", "0:4", "-map", "0:5",
 			"-map", "0:6", "-map", "0:7", "-map", "0:8", "-c", "copy", "-c:v", "libx265",
-			"-pix_fmt", "yuv420p10le", "-color_range", "tv", "-fps_mode", "passthrough",
+			"-pix_fmt", "yuv420p10le", "-color_range", "tv", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 			"-preset", "ultrafast", "-crf", "22", "-x265-params", "log-level=error",
 			"-f", "matroska",
 			"-max_muxing_queue_size", "128", "-muxing_queue_data_threshold", "52428800",

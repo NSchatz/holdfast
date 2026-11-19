@@ -731,9 +731,31 @@ func closeProgressPipe(r, w *os.File) {
 	}
 }
 
+// timestampArgs carry every source frame through an encode at the time the source presents
+// it (docs/design/encode-plan.md#timestamps), on every encoder and both quality paths alike.
+//
+//   - -fps_mode passthrough: every decoded frame is encoded, none dropped or duplicated to
+//     make a variable-frame-rate source constant.
+//   - -enc_time_base:v demux: the encoder's time base is the source stream's own. Without
+//     it, fftools gives a video encoder 1/<frame rate>, the rate the demuxer guessed for the
+//     stream, and rescales every frame's timestamp onto that grid (choose_out_timebase,
+//     fftools/ffmpeg_filter.c:2386-2458 at https://github.com/FFmpeg/FFmpeg/tree/5d4d3bdc61 ,
+//     read 2026-11-18). A constant-rate source's frames sit on that grid, so the rescale
+//     gives every one its own time back; a variable-rate source's do not, and the rounding
+//     moves them and stacks two frames on one instant. A source of 6 s at 24 fps, then 1 s at
+//     60 and 1 s at 30, guessed at 24 fps, came out with 42 of its 234 frames on another's
+//     timestamp in Matroska and 29 in MP4 (measured with the pinned N-125875-g5d4d3bdc61),
+//     and passthrough kept every one. On the source's own base each timestamp is carried
+//     exactly, whatever the rate.
+//
+// The `:v` scope is deliberate: an audio encoder keeps its default, 1/<sample rate>. A copied
+// stream has no encoder, and fftools reads the option only for a stream it encodes
+// (fftools/ffmpeg_mux_init.c:1250-1345, inside `if (ost->enc)`); a remux never reaches this.
+var timestampArgs = []string{"-fps_mode", "passthrough", "-enc_time_base:v", "demux"}
+
 // videoArgs assembles the per-encoder ffmpeg args (everything after `-c:v
-// <codec>`, before the trailing `-- <out>`). Every Spec gets the -color_* flags and
-// -fps_mode passthrough, and every Spec but VAAPI an explicit -pix_fmt (VAAPI names its
+// <codec>`, before the trailing `-- <out>`). Every Spec gets the -color_* flags and the
+// timestamp options (timestampArgs), and every Spec but VAAPI an explicit -pix_fmt (VAAPI names its
 // format in the upload chain instead). Of the -color_* flags only -colorspace and
 // -color_range take effect on the pinned ffmpeg: the encoder takes primaries and transfer
 // from the frames, which is why EncodePlan.args stamps them (hdr.Color.SetParams) for every
@@ -786,7 +808,7 @@ func closeProgressPipe(r, w *os.File) {
 // no -rc cqp - because a rate control and a quality target are two different
 // instructions and passing both leaves which one wins to the encoder's own
 // precedence rules rather than to the operator. Everything else is unchanged: the
-// pixel format, the colour tags, -fps_mode passthrough and the libx265 preset and
+// pixel format, the colour tags, the timestamp options and the libx265 preset and
 // x265Extra block are the same on both paths, so a bitrate-targeted encode carries
 // exactly the same source fidelity, and the same parallelism, as a quality-targeted one.
 func videoArgs(v VideoPlan, colorArgs []string, x265Extra string) []string {
@@ -795,7 +817,7 @@ func videoArgs(v VideoPlan, colorArgs []string, x265Extra string) []string {
 		args = []string{"-pix_fmt", v.InputFormat}
 	}
 	args = append(args, colorArgs...)
-	args = append(args, "-fps_mode", "passthrough") // a VFR source is not forced to CFR
+	args = append(args, timestampArgs...)
 
 	q := v.Quality
 	if q.TargetsBitrate() {

@@ -9,7 +9,7 @@ names the invariant and links here rather than restating it.
 <a id="swap-invariant"></a>
 
 **No source is mutated until a replacement has passed every gate.** The gates are
-correct codec, duration and packet parity, strictly-smaller output, per-type
+correct codec, duration, packet and timestamp parity, strictly-smaller output, per-type
 stream-count parity, full decode-integrity, and VMAF. The encode goes to a
 same-directory temp, and the swap itself is the only filesystem mutation there
 is: an atomic same-filesystem rename(2) out of that temp onto the source. This is
@@ -25,6 +25,10 @@ plan declares, and the area the crop removed from the source must be black on ev
 
 The chapter-parity gate joins them by addition: the replacement must carry the source's
 chapter table ([chapter parity](#chapter-parity)).
+
+The timing-parity check joins them by addition, as the second half of the length gate: the
+replacement's video must be presented at the source's times, frame for frame
+([timing parity](#timing-parity)).
 
 The playability gate joins them by addition on every encode: the replacement must decode from a
 cold start at a sample of its keyframes, and segment by segment, the way players and media
@@ -91,6 +95,115 @@ copied faithfully. That swap passes this gate.
 The encode takes chapters from the source. A single-input command line has nowhere else to take
 them from; the one command line with a second input (a converted Dolby Vision profile 7 stream,
 `1:v:0`) names the source explicitly with `-map_chapters 0`.
+
+## Timing parity
+
+<a id="timing-parity"></a>
+
+An encode that keeps every frame but moves when frames are shown passes every other gate. The
+duration and packet counts are the source's, the output decodes cleanly from its first frame to its
+last, and the perceptual gate compares frame by frame without asking when each is shown. That is
+what a variable-frame-rate source looked like after an encode that rounded its timestamps onto one
+rate: frames presented off their times, and runs of two frames presented at the same instant
+([the encode's timestamps](encode-plan.md#timestamps)). The timing-parity check
+(`internal/timing`, under the length gate's label `length`) runs after the output fidelity gate and
+before the decode-integrity gate, on every job including a remux. It reads each file's first
+video stream that is not an attached picture (`V:0`, the stream the playability gate lists too) as
+the frames a decoder shows of it (below), and refuses the output unless:
+
+- it shows as many frames as the source shows: an encode makes one frame of each;
+- no more of its frames are presented at the same instant as the frame before them than the
+  source's are: a faithful encode adds none, and reproduces any a source carries itself (a remux
+  copies them; a re-encode keeps them);
+- each frame, taken in presentation order and read as a position from its file's own first frame,
+  is presented within **one tick of the coarser of the two time bases** of the source's frame at
+  the same place.
+
+Positions are read from each file's first frame because an encode may move the whole timeline:
+ffmpeg rebases a copy to start at 0 and a muxer may delay it, and a constant move changes nothing a
+viewer sees. A constant move against the other streams is not this check's question.
+
+The tolerance is one tick because a faithful encode moves no timestamp: it rescales each one from
+the source's time base into the output's, and the only difference that can leave is the rounding of
+that rescale - at most half a tick of the coarser base at a frame and half again at the first frame
+its position is read from (1 ms in Matroska, 1/90000 s in MPEG-TS). Measured with the pinned build
+on a 24, then 60, then 30 fps source, holdfast's command line lands every frame on the source's
+exact tick written back into Matroska, MP4, MOV, FLV and WebM, and within the tolerance written
+from one container into another, MPEG-TS, M2TS, AVI and WMV among them; the same command line
+without its encoder time base is refused in every one (`internal/engine/timing_test.go`). Half a
+source frame, the other bound considered, is too loose for the class the check exists for: an
+encoder that rounds a 24 fps stretch onto a 30 fps grid moves frames by up to 16.7 ms, under half a
+24 fps frame (20.8 ms), and no two of them collide. The comparison is exact, in integers, so a
+frame exactly one tick off passes and one a finer tick further does not.
+
+The cost is one ffprobe packet listing of each file: every packet of that video stream with
+its timestamps, and the stream's time base, read by demuxing and never by decoding. It reads each
+file once more end to end, which is why it runs after the gates that cost a header read and before
+the full decode.
+
+Which frames a decoder shows. A packet the demuxer flags to discard is decoded and never shown -
+an MP4 cut between keyframes keeps, behind an edit list, the packets it needs from the keyframe
+before the cut and flags them - so it is not counted. And where the output shows fewer frames than
+the source has left, the source is read once more without the packets a decoder starting at its
+first packet cannot show: those before its first keyframe in file order (a stream cut between
+keyframes), and those after it presented before it (an open GOP's leading pictures, an HEVC CRA's
+skipped leading pictures, which Matroska reads back with no timestamp when they were timed before
+zero). That reading is accepted only where it accounts for the difference exactly. Each case was
+measured with the pinned build, and each output matches what a player shows to the tick: an MP4 cut
+mid-GOP, H.264 starting at an open GOP's I-frame, MPEG-2 starting at an open GOP, HEVC starting at a
+CRA, and a transport stream cut mid-GOP with its leading packets copied
+(`TestTiming_ASourceWhoseFirstPacketsADecoderCannotShowIsNotRefused`). A frame a decoder drops in the
+middle of a film - a damaged frame it conceals by dropping - is not explained by anything at the
+start, and the source is refused, kept as it is: a count a reading cannot account for is not
+guessed at.
+
+How each frame is timed, and what of it is checkable:
+
+- every shown packet carries a presentation timestamp: those are its times, compared frame for frame;
+- otherwise every packet carries a decode timestamp: AVI, which times each frame by its chunk's
+  slot, ASF (WMV), which times it by a send time, and an MPEG-4 Part 2 stream whose B-frames
+  carry no presentation timestamp. The decode timestamps are read instead. An output read this
+  way is compared as it stands. A source read this way is shown by a decoder at its decode
+  timestamps moved along by its reordering delay - the frame shown i-th at the decode timestamp
+  of packet i+d, d being how many frames the decoder holds back (measured with the pinned build:
+  an H.264 AVI with two B-frames is shown at dts[i+2], an MPEG-4 Part 2 one at dts[i+1]). The
+  delay is not in a packet listing, so each d from 0 to 16 (the most H.264 and HEVC reorder) is
+  tried, never one that leaves out more frames than it compares, and the output must match one
+  of them exactly; the last d frames, which a decoder times by extrapolation at the end of the
+  stream, are held to the count and to never sharing an instant;
+- otherwise some packet carries no timestamp of either kind: a raw elementary stream (`.h264`),
+  which stores frames and no times and which ffmpeg times at one guessed rate as it reads it, or
+  a stream timed only in part. A source like that is not refused for what it does not carry: it is
+  held to what is checkable, the count and an output that never presents two frames at once. An
+  output like that is refused: an output whose frames cannot be placed in time cannot be shown to
+  carry the source's;
+- a listing that cannot be read at all - no time base, a line or a value the reader does not know -
+  is refused, never read as a match. The lines ffprobe adds beside the stream - a transport
+  stream's programs, and the stream group an MP4 or MOV links its video to a timecode track with
+  (a Matroska file carrying a timecode tag gets one when it is written into MP4) - are skipped.
+
+What a packet listing cannot show is which picture is shown at each time: an output carrying the
+source's times in another order of pictures is the perceptual gate's to see, since it compares
+pictures. And where the coarser time base is a whole frame - an AVI at the film's own rate - a
+frame moved by one slot is within the tolerance; a collapse still shows as two frames on one slot.
+
+A mismatch is deterministic: the same source, configuration and ffmpeg build time the same frames
+the same way. A listing ffprobe never produced (it could not run, was killed, or failed) is
+transient. The source is kept either way.
+
+What it refuses that no earlier gate did, and that a faithful encode can also produce, each with
+the source kept and both counts or both times named: a source whose decoder drops a damaged frame
+mid-film, or whose fields are stored as separate packets, each of which comes out with fewer frames
+than the source shows; a variable-frame-rate source with B-frames in AVI written back into AVI,
+whose frames the AVI muxer re-slots at the rate changes; and libsvtav1 written into AVI from an AVI
+source, whose hidden frames shift the output's slots by two. That is the fail-safe direction.
+
+The output's listing is read twice over: here, and by the playability gate, which lists the same
+stream's presentation timestamps and keyframe flags. One listing could serve both and save one demux
+of the output. That is left as a follow-up: the playability gate's reader carries no decode
+timestamps and no discard flags, reads its listing whole rather than as it streams, and classifies
+an unreadable listing in its own vocabulary, so sharing it means changing that reader and the point
+it first runs at.
 
 ## Playability
 

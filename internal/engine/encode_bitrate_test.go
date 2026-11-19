@@ -25,68 +25,72 @@ import (
 // to VAAPI as the p010le software frames it uploads, with the Main 10 profile and no
 // contradicting -pix_fmt, where it used to upload 8-bit nv12. libx265 and libsvtav1 list
 // yuv420p10le and are handed it unchanged.
+//
+// Another is the encoder's time base, -enc_time_base:v demux beside -fps_mode passthrough on
+// every encoder (timestampArgs): a variable-frame-rate source's timestamps are carried on the
+// source's own base rather than rounded onto its guessed frame rate.
 var pinArgs = map[string][]string{
 	"cpu": {
-		"-pix_fmt", "yuv420p10le", "-fps_mode", "passthrough",
+		"-pix_fmt", "yuv420p10le", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-preset", "slow", "-crf", "22", "-x265-params", "log-level=error",
 	},
 	"svtav1": {
-		"-pix_fmt", "yuv420p10le", "-fps_mode", "passthrough",
+		"-pix_fmt", "yuv420p10le", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-preset", "6", "-crf", "22",
 	},
 	"nvenc": {
-		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-rc", "vbr", "-cq", "22", "-b:v", "0", "-preset", "p5",
 	},
 	"av1_nvenc": {
-		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-rc", "vbr", "-cq", "22", "-b:v", "0", "-preset", "p5",
 	},
 	"qsv": {
-		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-global_quality", "22",
 	},
 	"vaapi": {
-		"-fps_mode", "passthrough",
+		"-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-vf", "format=p010le,hwupload", "-profile:v", "main10", "-qp", "22",
 	},
 	"amf": {
-		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-rc", "cqp", "-qp_i", "22", "-qp_p", "22",
 	},
 
 	// The T27 encoders, pinned from their first build. h264_qsv and h264_vaapi carry no
 	// 10-bit format, so they are pinned at the 8-bit plan (pinPlan).
 	"x264": {
-		"-pix_fmt", "yuv420p10le", "-fps_mode", "passthrough",
+		"-pix_fmt", "yuv420p10le", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-preset", "slow", "-crf", "22",
 	},
 	"h264_nvenc": {
-		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-rc", "vbr", "-cq", "22", "-b:v", "0", "-preset", "p5",
 	},
 	"h264_qsv": {
-		"-pix_fmt", "nv12", "-fps_mode", "passthrough",
+		"-pix_fmt", "nv12", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-global_quality", "22",
 	},
 	"h264_vaapi": {
-		"-fps_mode", "passthrough",
+		"-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-vf", "format=nv12,hwupload", "-qp", "22",
 	},
 	"h264_amf": {
-		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-rc", "cqp", "-qp_i", "22", "-qp_p", "22",
 	},
 	"av1_qsv": {
-		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-global_quality", "22",
 	},
 	"av1_vaapi": {
-		"-fps_mode", "passthrough",
+		"-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-vf", "format=p010le,hwupload", "-rc_mode", "CQP", "-global_quality", "22",
 	},
 	"av1_amf": {
-		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
 		"-rc", "cqp", "-qp_i", "22", "-qp_p", "22",
 	},
 }
@@ -202,7 +206,8 @@ func TestBitrateKbps_TargetsTheBitrateAndPassesNoQualityTarget_ForEveryEncoder(t
 			// bitrate-targeted encode carries the same colour and frame-timing
 			// fidelity as a quality-targeted one - the same explicit pixel format
 			// the quality path names (pinArgs), for every encoder.
-			if !hasPixelFormatOf(got, pinArgs[key]) || !hasArgPair(got, "-fps_mode", "passthrough") {
+			if !hasPixelFormatOf(got, pinArgs[key]) || !hasArgPair(got, "-fps_mode", "passthrough") ||
+				!hasArgPair(got, "-enc_time_base:v", "demux") {
 				t.Errorf("%s: a target-bitrate encode lost a universal fidelity arg: %v", key, got)
 			}
 		})

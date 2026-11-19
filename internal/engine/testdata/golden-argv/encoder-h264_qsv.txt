@@ -131,14 +131,14 @@ error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le o
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
 == crf-30/preset-fast/pixel-format-yuv420p
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 30 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 30 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == pixel-format-yuv420p10le
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
 == pixel-format-yuv420p
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == pixel-format-nv12
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == source-full-range
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/full-range.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
@@ -194,7 +194,7 @@ error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv444p10le o
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv444p12le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
 == pixel-format-yuvj420p
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == pixel-format-p010le
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format p010le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
@@ -214,7 +214,7 @@ error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format gray of "<fix
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv422p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
 == pixel-format-yuv420p/bitrate-8000k
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -b:v 8000k -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -b:v 8000k -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == quality-set
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
@@ -663,7 +663,7 @@ error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le o
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mp4": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
 == encode-profile/matched
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 30 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 30 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == encode-profile/matched/bitrate-3000k
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
@@ -671,9 +671,9 @@ error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le o
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
 == encode-profile/to-svtav1
--hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -enc_time_base:v demux -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == encode-profile/to-cpu
--hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 26 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -enc_time_base:v demux -preset slow -crf 26 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == hw-decode
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
@@ -687,7 +687,7 @@ error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le o
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/ffv1-pq.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
 == hw-decode/pixel-format-yuv420p
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -hwaccel vaapi -hwaccel_device hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -hwaccel vaapi -hwaccel_device hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == hw-decode/bitrate-8000k
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
@@ -755,17 +755,17 @@ error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le o
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
 == keep-bit-depth
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == keep-bit-depth/stream-plan-handed
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == keep-bit-depth/bitrate-8000k
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -b:v 8000k -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -b:v 8000k -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == keep-bit-depth/hw-decode
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -hwaccel vaapi -hwaccel_device hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -hwaccel vaapi -hwaccel_device hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == keep-bit-depth/x265-3cpu
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == keep-bit-depth/source-full-range
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/full-range.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range pc -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/full-range.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range pc -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == keep-bit-depth/source-422
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv422p of "<fixtures>/422.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
@@ -779,9 +779,9 @@ error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le o
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p12le of "<fixtures>/12bit.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
 == keep-bit-depth/source-mpeg4
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == keep-bit-depth/colour-bt709
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/bt709.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -colorspace bt709 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <fixtures>/bt709.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -colorspace bt709 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == keep-bit-depth/colour-hlg
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/hlg.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)

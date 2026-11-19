@@ -1766,8 +1766,9 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 
 // ---- S0030: live progress, and what it must not cost -------------------------
 
-// The per-job subprocess budget for one done job with the VMAF gate off: 13 ffprobe
-// invocations and 2 ffmpeg invocations (the encode and the decode-integrity check).
+// The per-job subprocess budget for one done job with the VMAF gate off: 18 ffprobe
+// invocations and 5 ffmpeg invocations (the encode, the decode-integrity check, and the
+// playability gate's remux and its two decoders).
 //
 // The ffprobe side is the source snapshot, the source's stream-shape probe that the
 // multi-video-stream guard reads, the source's full stream list that the intended stream
@@ -1810,6 +1811,13 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 // fed by the one remux. A plan declaring closed GOPs pays one ffmpeg more, the copy its GOP
 // structure is read off; this fixture's root does not declare them.
 //
+// It went UP from 16 for the timing half of the length gate (docs/design/swap.md#timing-parity),
+// re-measured in the commit that moved it: ffprobe 16 -> 18, one packet listing of each file's
+// video timestamps, which demuxes the file and decodes nothing, paid only by a job that
+// encoded. It is one per file, not more: the listing carries the packet count, the timestamps
+// and the time base together. It is not the playability gate's listing of the output, which
+// reads keyframe flags and no decode timestamps, and is not read for the source.
+//
 // These constants are NOT the evidence for AC12 and must not be read as it — they are a
 // long-run ceiling, so that a per-PR "no worse than last time" cannot ratchet the cost up
 // one probe at a time across many changes. The criterion itself is proved by MEASURING
@@ -1817,7 +1825,7 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 // fails if these numbers ever stop matching what it measures, so they cannot decay into
 // folklore.
 const (
-	probeBudgetFFprobe = 16
+	probeBudgetFFprobe = 18
 	probeBudgetFFmpeg  = 5
 )
 

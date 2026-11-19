@@ -41,7 +41,7 @@ row: skipped already-at-target-codec
 (no invocation)
 row: skipped already-at-target-codec
 == quality-set/encode-profile-to-nvenc
--hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_nvenc -pix_fmt p010le -color_range tv -fps_mode passthrough -rc vbr -cq 24 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_nvenc -pix_fmt p010le -color_range tv -fps_mode passthrough -enc_time_base:v demux -rc vbr -cq 24 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
 row: failed temp missing or empty
 == crf-0
 (no invocation)
@@ -80,7 +80,7 @@ row: skipped already-at-target-codec
 (no invocation)
 row: skipped exotic-pixel-format
 == source-mpeg4/pixel-format-yuv420p/every-encoder
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
 row: failed temp missing or empty
 == source-hevc/every-encoder
 (no invocation)
@@ -92,13 +92,13 @@ row: skipped better-codec-family
 (no invocation)
 row: skipped exotic-pixel-format
 == source-mpeg4/quality-set-t27
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 29 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 29 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
 row: failed temp missing or empty
 == hw-decode/source-ffv1-pq/every-encoder
 (no invocation)
 row: skipped exotic-pixel-format
 == hw-decode/source-mpeg4/pixel-format-yuv420p/every-encoder
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -hwaccel vaapi -hwaccel_device hfva -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -hwaccel vaapi -hwaccel_device hfva -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
 row: failed temp missing or empty
 == hw-decode/top-level/source-hdr10
 (no invocation)
@@ -122,11 +122,11 @@ row: skipped already-at-target-codec
 (no invocation)
 row: skipped already-at-target-codec
 == keep-bit-depth/source-mpeg4/every-encoder
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
 row: failed temp missing or empty
 == keep-bit-depth/source-ffv1-pq/every-encoder
 (no invocation)
 row: skipped exotic-pixel-format
 == keep-bit-depth/top-level/source-mpeg4
--hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -enc_time_base:v demux -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
 row: failed temp missing or empty

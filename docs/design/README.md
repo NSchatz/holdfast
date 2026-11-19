@@ -10,6 +10,8 @@ reasoning lives in the document, not in this index.
   [`docs/design/swap.md`](swap.md#swap-invariant).
 - **An output replaces its source only when it carries the source's chapter table, and a source's own malformed table reproduced exactly passes** -
   [`docs/design/swap.md`](swap.md#chapter-parity).
+- **An output replaces its source only when its video is presented at the source's times, frame for frame, within one tick of the coarser time base** -
+  [`docs/design/swap.md`](swap.md#timing-parity).
 - **An output replaces its source only when it decodes from a cold start at its keyframes and segment by segment, the way players and media servers start it; that proves one decoder starts it, not that every client plays it** -
   [`docs/design/swap.md`](swap.md#playability).
 - **The quality gate bounds the worst frame, not only the average** -
@@ -20,6 +22,8 @@ reasoning lives in the document, not in this index.
   plan** - [`docs/design/encode-plan.md`](encode-plan.md#encode-plan).
 - **An output replaces its source only when it carries the bit depth, chroma, colour tags and
   HDR10 metadata its plan declares** - [`docs/design/encode-plan.md`](encode-plan.md#fidelity).
+- **Every re-encode carries each source frame at its own time, on the source's own time base** -
+  [`docs/design/encode-plan.md`](encode-plan.md#timestamps).
 - **libx265 is told about GOPs only where a root sets `x265_open_gop`; unset passes nothing** -
   [`docs/design/encode-plan.md`](encode-plan.md#gop).
 - **A plan that declares closed GOPs holds its output to them: no RASL picture, and every keyframe an
