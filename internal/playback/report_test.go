@@ -25,7 +25,7 @@ func TestReport_CountsEveryCurrentSwapByVerdict(t *testing.T) {
 	s1.StoppedAt = &stopped
 	led := &memLedger{
 		files: []store.SwappedFile{
-			{Path: "/lib/stall.mkv", Fingerprint: "old", SwappedAt: 100}, {Path: "/lib/stall.mkv", Fingerprint: "new", SwappedAt: 200},
+			{Path: "/lib/stall.mkv", Fingerprint: "new", SwappedAt: 200}, {Path: "/lib/stall.mkv", Fingerprint: "old", SwappedAt: 100},
 			{Path: "/lib/played.mkv", Fingerprint: "1:1", SwappedAt: 300},
 			{Path: "/lib/partial.mkv", Fingerprint: "1:1", SwappedAt: 300},
 			{Path: "/lib/covered.mkv", Fingerprint: "1:1", SwappedAt: 400},

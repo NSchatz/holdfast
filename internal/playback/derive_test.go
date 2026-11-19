@@ -141,6 +141,11 @@ func TestDerive_TheToleranceIsInclusiveAndTheClusterTheLargest(t *testing.T) {
 	if e.Stall == nil || e.Stall.FromMS != 1_000_000 || e.Stall.AtMS != 1_000_000 || e.Stall.ToMS != 1_050_000 {
 		t.Fatalf("tie: %+v", e.Stall)
 	}
+	// Sessions ending at the same millisecond keep the order they were given in.
+	e = Derive([]store.PlaybackSession{at("first", 500_000, film), at("second", 500_000, film)}, true, rules)
+	if e.Stall == nil || e.Stall.Members[0].SessionID != "first" || e.Stall.Members[1].SessionID != "second" {
+		t.Fatalf("equal ends: %+v", e.Stall)
+	}
 	// A window anchored on each session in turn: 0, 80 and 160 s are two pairs and no triple.
 	ss = []store.PlaybackSession{at("x", 0, film), at("y", 80_000, film), at("z", 160_000, film)}
 	e = Derive(ss, true, rules)

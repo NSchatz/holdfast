@@ -16,7 +16,8 @@
 package playback
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
@@ -162,7 +163,7 @@ func (r Rules) cluster(early []store.PlaybackSession) *Stall {
 		return nil
 	}
 	sorted := append([]store.PlaybackSession(nil), early...)
-	sort.SliceStable(sorted, func(i, j int) bool { return *sorted[i].OffsetMS < *sorted[j].OffsetMS })
+	slices.SortStableFunc(sorted, func(a, b store.PlaybackSession) int { return cmp.Compare(*a.OffsetMS, *b.OffsetMS) })
 	tol := r.StallTolerance.Milliseconds()
 	bestFrom, bestLen := 0, 0
 	j := 0

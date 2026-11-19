@@ -1,8 +1,9 @@
 package playback
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/NSchatz/holdfast/internal/config"
@@ -53,12 +54,15 @@ func Suspects(ctx context.Context, r Reader, rules Rules) ([]Suspect, error) {
 }
 
 func sortSuspects(s []Suspect) {
-	sort.Slice(s, func(i, j int) bool {
-		if s[i].Path != s[j].Path {
-			return s[i].Path < s[j].Path
-		}
-		return s[i].Fingerprint < s[j].Fingerprint
+	slices.SortFunc(s, func(a, b Suspect) int {
+		return cmp.Or(strings.Compare(a.Path, b.Path), strings.Compare(a.Fingerprint, b.Fingerprint))
 	})
+}
+
+// newerSwap orders two swaps of one path: the later swap, and the greater fingerprint between two
+// in the same second, is the newer.
+func newerSwap(a, b store.SwappedFile) int {
+	return cmp.Or(cmp.Compare(a.SwappedAt, b.SwappedAt), strings.Compare(a.Fingerprint, b.Fingerprint))
 }
 
 // restoreCommand is `holdfast restore <path>` when a live retention of this very swap - its
@@ -195,12 +199,13 @@ func BuildReport(ctx context.Context, r Reader, cfg *config.Config) (Report, err
 	if err != nil {
 		return Report{}, err
 	}
-	current := map[string]store.SwappedFile{}
+	byPath := map[string][]store.SwappedFile{}
 	for _, f := range files {
-		if c, ok := current[f.Path]; !ok || f.SwappedAt > c.SwappedAt ||
-			(f.SwappedAt == c.SwappedAt && f.Fingerprint > c.Fingerprint) {
-			current[f.Path] = f
-		}
+		byPath[f.Path] = append(byPath[f.Path], f)
+	}
+	current := make(map[string]store.SwappedFile, len(byPath))
+	for p, fs := range byPath {
+		current[p] = slices.MaxFunc(fs, newerSwap)
 	}
 	ev, err := r.PlaybackEvidence(ctx)
 	if err != nil {
