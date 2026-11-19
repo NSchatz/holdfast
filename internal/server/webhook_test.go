@@ -528,6 +528,7 @@ func TestWebhook_IsAuthenticated(t *testing.T) {
 			{http.MethodGet, "/api/queue", ""},
 			{http.MethodGet, "/api/history", ""},
 			{http.MethodGet, "/api/health", ""},
+			{http.MethodGet, "/api/playback", ""},
 			{http.MethodGet, "/api/events", ""},
 		} {
 			for name, auth := range map[string]func(*http.Request){

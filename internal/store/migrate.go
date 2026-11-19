@@ -730,6 +730,58 @@ CREATE INDEX IF NOT EXISTS idx_node_leases_state ON node_leases(state);
 CREATE INDEX IF NOT EXISTS idx_node_leases_ended ON node_leases(ended_at);
 `,
 	},
+	{
+		// v26 - playback evidence (docs/design/playback-evidence.md#playback-evidence): the
+		// sessions a media server's history says were played on a file holdfast swapped, and
+		// where the poll that reads that history has got to.
+		//
+		// TABLES OF THEIR OWN and no column on jobs, for the reason the health sweep's are: a
+		// session is a REPORT about bytes that already replaced their source, and nothing in the
+		// encode pipeline reads either table, so what a viewer's player did can hold no file
+		// back, license no encode and move no gate.
+		//
+		// A session is keyed (source, session_id, path): the source's own id for the history
+		// row, and the swapped file it was played on, as holdfast knows it. fingerprint is the
+		// done row's, so a session is evidence about THOSE bytes and not about whatever later
+		// sits at the path. stopped_at, offset_ms and duration_ms are NULL when the source did
+		// not say: an offset of 0 is a session that never got past the first frame, which is a
+		// reading and not an absence.
+		//
+		// A poll row carries the cursor the next poll reads from, and covered_through, the time
+		// the newest poll that read the history to its end began; it is NULL until one has, so
+		// a file nobody could ask about reads as unknown and never as unplayed.
+		name: "playback evidence",
+		// Two empty tables and one index. A session is recorded by the daemon's poll, never by
+		// a migration, and a fabricated one would be evidence about a playback nobody watched.
+		rows: noRowChange,
+		sql: `
+CREATE TABLE IF NOT EXISTS playback_polls (
+	source          TEXT PRIMARY KEY,
+	cursor          INTEGER NOT NULL,
+	covered_through INTEGER,
+	last_attempt_at INTEGER NOT NULL,
+	last_failure    TEXT NOT NULL,
+	schema_version  INTEGER
+);
+CREATE TABLE IF NOT EXISTS playback_sessions (
+	source         TEXT NOT NULL,
+	session_id     TEXT NOT NULL,
+	path           TEXT NOT NULL,
+	fingerprint    TEXT NOT NULL,
+	started_at     INTEGER NOT NULL,
+	stopped_at     INTEGER,
+	offset_ms      INTEGER,
+	duration_ms    INTEGER,
+	platform       TEXT NOT NULL,
+	player         TEXT NOT NULL,
+	decision       TEXT NOT NULL,
+	recorded_at    INTEGER NOT NULL,
+	schema_version INTEGER,
+	PRIMARY KEY (source, session_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_playback_sessions_file ON playback_sessions(path, fingerprint);
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

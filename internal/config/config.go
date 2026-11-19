@@ -65,6 +65,7 @@ var knownKeys = map[string]bool{
 	"scratch_dir": true, "scratch_min_free_gb": true,
 	queueOrderKey:          true,
 	healthSweepIntervalKey: true, healthSweepWorkersKey: true,
+	playbackSourceKey: true, playbackPollKey: true, playbackFractionKey: true,
 	radarrURLKey: true, radarrAPIKeyKey: true, radarrPathMapKey: true,
 	sonarrURLKey: true, sonarrAPIKeyKey: true, sonarrPathMapKey: true,
 	plexURLKey: true, plexTokenKey: true, plexPathMapKey: true,
@@ -158,6 +159,11 @@ func defaultLayer() map[string]any {
 		// configuration schedules no decode it did not schedule before.
 		healthSweepIntervalKey: 0,
 		healthSweepWorkersKey:  1,
+		// Playback evidence is OFF unless a source is written (I5): an existing configuration
+		// asks Tautulli for nothing it did not ask before.
+		playbackSourceKey:   "",
+		playbackPollKey:     DefaultPlaybackPollMinutes,
+		playbackFractionKey: DefaultPlaybackPlayedFraction,
 		// The media-server clients are OFF until a target's address and credential are both
 		// written (I5): an existing configuration sends no request it did not send before.
 		radarrURLKey: "", radarrAPIKeyKey: "",
@@ -812,6 +818,19 @@ type Config struct {
 	HealthSweepIntervalHours int `yaml:"health_sweep_interval_hours"`
 	// HealthSweepWorkers is how many sweep decodes run at once (default 1).
 	HealthSweepWorkers int `yaml:"health_sweep_workers"`
+
+	// --- playback evidence (`serve` only; docs/design/playback-evidence.md) ---
+
+	// PlaybackSource, when "tautulli", makes `serve` read Tautulli's session history every
+	// PlaybackPollMinutes and tie each session played on a swapped file to that file, so a
+	// replacement that stalls for real viewers is reported. "" (default) = off. It reports
+	// only: nothing is restored, re-encoded or released on the strength of it.
+	PlaybackSource string `yaml:"playback_source"`
+	// PlaybackPollMinutes is the time between two polls (default 15).
+	PlaybackPollMinutes int `yaml:"playback_poll_minutes"`
+	// PlaybackPlayedFraction is the fraction of a file a session must reach to count as
+	// played through (default 0.9).
+	PlaybackPlayedFraction float64 `yaml:"playback_played_fraction"`
 
 	// --- the media-server clients (docs/design/media-clients.md, docs/post-swap-hook.md) ---
 
@@ -1983,6 +2002,9 @@ func (c *Config) validateRest() error {
 		return err
 	}
 	if err := c.validateWebhookToken(); err != nil {
+		return err
+	}
+	if err := c.validatePlayback(); err != nil {
 		return err
 	}
 	if err := c.validateNodes(); err != nil {

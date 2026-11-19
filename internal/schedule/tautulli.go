@@ -55,7 +55,11 @@ func NewTautulli(baseURL string, ref secret.Ref, apiKey secret.Value) *Tautulli 
 // path printed the api key on every Tautulli outage. An error STATUS is the same failure
 // from the other side: an HTTP 401 from Tautulli MEANS this key is wrong, so the report an
 // operator reads has to say which key and which reference to go and fix.
-func (t *Tautulli) sanitize(err error) error {
+func (t *Tautulli) sanitize(err error) error { return t.sanitizeAs("the activity check", err) }
+
+// sanitizeAs is sanitize for a request named by what: the activity check, or one API command
+// another caller sent through API.
+func (t *Tautulli) sanitizeAs(what string, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -64,9 +68,9 @@ func (t *Tautulli) sanitize(err error) error {
 	if errors.As(err, &ue) {
 		cause = ue.Op + ": " + unwrapMessage(ue)
 	}
-	return fmt.Errorf("tautulli: the activity check against %s failed: %s (tautulli_api_key "+
+	return fmt.Errorf("tautulli: %s against %s failed: %s (tautulli_api_key "+
 		"is %s; neither the key nor the request URL is reported, because the URL carries the key)",
-		t.destination(), cause, label(t.ref))
+		what, t.destination(), cause, label(t.ref))
 }
 
 // destination is the most of the configured Tautulli URL a failure may name: scheme, host
@@ -121,6 +125,30 @@ func (t *Tautulli) httpGet(ctx context.Context, rawURL string) ([]byte, error) {
 		return nil, fmt.Errorf("it answered HTTP %d", resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+}
+
+// API sends one Tautulli API v2 command with its parameters and returns the response body, for
+// a reader of Tautulli other than the streaming pause (playback evidence reads get_history and
+// get_metadata through it). It is the same request the activity check sends - the api key in
+// the query, the 5 second timeout, the 1 MiB bound on the body - and every failure leaves
+// through the same sanitizer, naming the command and the key's reference and never the URL.
+// A params entry named apikey or cmd is refused: those two are this method's to set.
+func (t *Tautulli) API(ctx context.Context, cmd string, params url.Values) ([]byte, error) {
+	what := "the " + cmd + " request"
+	q := url.Values{}
+	for k, vs := range params {
+		if k == "apikey" || k == "cmd" {
+			return nil, t.sanitizeAs(what, fmt.Errorf("the caller passed %s, which only this client sets", k))
+		}
+		q[k] = append([]string(nil), vs...)
+	}
+	q.Set("apikey", t.apiKey.Expose())
+	q.Set("cmd", cmd)
+	body, err := t.get(ctx, t.baseURL+"/api/v2?"+q.Encode())
+	if err != nil {
+		return nil, t.sanitizeAs(what, err)
+	}
+	return body, nil
 }
 
 // activityResponse is the subset of Tautulli's get_activity payload we read.

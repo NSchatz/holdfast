@@ -146,10 +146,10 @@ func TestResolution_AMigrationThatCannotCompleteRefusesToOpenAndMovesNothing(t *
 	// It names a table the NEWEST step creates, for the reason every wind-back fixture in
 	// this package tracks the end of the migrations slice: a step appended after this line
 	// moves it, and pre-creating a shape an EARLIER step already created would break the
-	// fixture rather than the migration under test. The step's table is already there
-	// WITHOUT the column its second index needs, so the step's create of it is a no-op, its
-	// first index is built and its second cannot be.
-	execRaw(t, dbPath, `CREATE TABLE node_leases (id TEXT PRIMARY KEY, state TEXT NOT NULL)`)
+	// fixture rather than the migration under test. The step's second table is already there
+	// WITHOUT the column its index needs, so the step's first table is created, its create of
+	// the second is a no-op and its index cannot be built.
+	execRaw(t, dbPath, `CREATE TABLE playback_sessions (source TEXT NOT NULL, path TEXT NOT NULL)`)
 
 	st, err := Open(dbPath)
 	if err == nil {
@@ -169,21 +169,24 @@ func TestResolution_AMigrationThatCannotCompleteRefusesToOpenAndMovesNothing(t *
 	// The other half of "rather than run against a half-migrated database": the columns the
 	// step would have added are not there, so nothing wrote into a shape that half exists.
 	// Every column the newest step adds, read off the step's own SQL so the check follows
-	// the end of the migrations slice. A step that creates a table (v25, the node leases)
-	// adds none, and the index and table checks below are then the proof.
+	// the end of the migrations slice. A step that creates tables (v26, playback evidence)
+	// adds none, and the table checks below are then the proof.
 	added := regexp.MustCompile(`ADD COLUMN (\w+)`).FindAllStringSubmatch(migrations[len(migrations)-1].sql, -1)
 	for i, m := range added {
 		if i > 0 && columnExists(t, dbPath, m[1]) {
 			t.Errorf("the failed step left %s behind: the transaction did not roll back", m[1])
 		}
 	}
-	// The step's FIRST index was built before its second failed, so its absence now is the
+	// The step's FIRST table was created before its index failed, so its absence now is the
 	// proof the step's transaction rolled back. What was already there is still there: the
 	// failed step moved nothing.
-	if rawIndexExists(t, dbPath, "idx_node_leases_state") {
-		t.Error("the failed step left idx_node_leases_state behind: the transaction did not roll back")
+	if rawTableExists(t, dbPath, "playback_polls") {
+		t.Error("the failed step left playback_polls behind: the transaction did not roll back")
 	}
-	if !rawTableExists(t, dbPath, "node_leases") {
+	if rawIndexExists(t, dbPath, "idx_playback_sessions_file") {
+		t.Error("the failed step left idx_playback_sessions_file behind: the transaction did not roll back")
+	}
+	if !rawTableExists(t, dbPath, "playback_sessions") {
 		t.Error("the failed step removed a table it did not create")
 	}
 }

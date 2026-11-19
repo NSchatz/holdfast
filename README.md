@@ -79,6 +79,13 @@ and fixes the trust gaps:
   ([what is reported where](docs/design/health-sweep.md#reporting)). It
   **never moves, renames, deletes or repairs a file**: what to do about one is the operator's call
   ([docs/design/health-sweep.md](docs/design/health-sweep.md#health-sweep)).
+- **Playback evidence: a swapped file real viewers cannot get through is reported.** Off by default.
+  With `playback_source: tautulli`, `serve` reads Tautulli's session history, ties each session to
+  the swapped file it played, and reports a file whose sessions keep ending at one point well before
+  the end as a [suspected stall](docs/design/playback-evidence.md#verdicts) - in the log,
+  `GET /api/playback` and the `holdfast_playback_*` metrics - with the `holdfast restore` command
+  while the original is still retained. It never restores or re-encodes anything itself
+  ([docs/design/playback-evidence.md](docs/design/playback-evidence.md#playback-evidence)).
 - **Radarr, Sonarr and Plex are told, and a file being played is left alone.** Off by default.
   With a target's address and credential set, a committed swap asks the one Radarr movie or
   Sonarr series that owns the file's directory to rescan (`RescanMovie`, `RescanSeries`) and asks

@@ -17,6 +17,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/health"
 	"github.com/NSchatz/holdfast/internal/node"
+	"github.com/NSchatz/holdfast/internal/playback"
 	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
 	"github.com/NSchatz/holdfast/internal/store"
@@ -188,6 +189,10 @@ func (s *Server) routes() *chi.Mux {
 			// The library health sweep's report (docs/design/health-sweep.md). A read,
 			// and only a read: there is no route that acts on what a sweep found.
 			r.Get("/health", s.handleHealth)
+			// Playback evidence (docs/design/playback-evidence.md): the swapped files real
+			// viewers' sessions say stall. A read, and only a read: no route restores, re-encodes
+			// or releases anything on the strength of it.
+			r.Get(PlaybackPath[len("/api"):], s.handlePlayback)
 			// The worker nodes and their leases (nodes_read.go). A read like the others
 			// here, and deliberately NOT under the lease prefix below: the node token
 			// opens that group and must not open this.
@@ -724,6 +729,21 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	rep, err := health.BuildReport(r.Context(), s.reads(), s.cfg.HealthSweepInterval(), live)
 	if err != nil {
 		s.fail(w, "health", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// PlaybackPath is the playback evidence report.
+const PlaybackPath = "/api/playback"
+
+// handlePlayback answers GET /api/playback from the reporting door: whether evidence is
+// collected, where its poll has got to, every current swap by verdict, and every suspected
+// stall with the restore command while the original is retained.
+func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
+	rep, err := playback.BuildReport(r.Context(), s.reads(), &s.cfg)
+	if err != nil {
+		s.fail(w, "playback", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, rep)

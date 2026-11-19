@@ -1225,6 +1225,9 @@ type Store interface {
 	// HealthLedger is the library health sweep's record (docs/design/health-sweep.md).
 	HealthLedger
 
+	// PlaybackLedger is playback evidence's record (docs/design/playback-evidence.md).
+	PlaybackLedger
+
 	// Close releases the underlying database handle.
 	Close() error
 }
