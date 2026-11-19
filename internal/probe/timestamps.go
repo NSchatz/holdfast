@@ -153,19 +153,19 @@ func field(fields []string, key string) (string, bool) {
 	return "", false
 }
 
-// tickField reads the `<key>=<value>` timestamp field of a packet line: ok is false for
-// ffprobe's N/A, and a field that is missing or not an integer is an error.
+// tickField reads the `<key>=<value>` timestamp field of a packet or frame line: ok is false
+// for ffprobe's N/A, and a field that is missing or not an integer is an error.
 func tickField(fields []string, key string) (v int64, ok bool, err error) {
 	val, found := field(fields, key)
 	if !found {
-		return 0, false, fmt.Errorf("a packet line carries no %s: %q", key, strings.Join(fields, "|"))
+		return 0, false, fmt.Errorf("a %s line carries no %s: %q", fields[0], key, strings.Join(fields, "|"))
 	}
 	if val == "N/A" {
 		return 0, false, nil
 	}
 	n, perr := strconv.ParseInt(val, 10, 64)
 	if perr != nil {
-		return 0, false, fmt.Errorf("a packet's %s is not a timestamp: %q", key, val)
+		return 0, false, fmt.Errorf("a %s's %s is not a timestamp: %q", fields[0], key, val)
 	}
 	return n, true, nil
 }
@@ -184,4 +184,69 @@ func timeBaseField(fields []string) (num, den int64, err error) {
 		return 0, 0, fmt.Errorf("the video stream's time base is not a ratio of positive integers: %q", val)
 	}
 	return num, den, nil
+}
+
+// Start is what a decoder shows of the first packets of a file's first moving-picture video
+// stream, decoded from the file's start: the frames it outputs from them, in the order it shows
+// them, each with the timestamp it gives the frame.
+type Start struct {
+	// Packets is how many of the stream's packets the decode read, from its first (fewer where
+	// the stream has fewer).
+	Packets int
+	// Frames are the frames the decoder showed of them, in the order it showed them.
+	Frames []Frame
+}
+
+// Frame is one decoded frame's timestamp, in the stream's time base: the decoder's best-effort
+// timestamp, the one ffmpeg times an encoded frame by. HasTS is false where it gives none (a
+// leading picture Matroska reads back with no timestamp).
+type Frame struct {
+	TS    int64
+	HasTS bool
+}
+
+// VideoStart decodes the first packets of f's first moving-picture video stream, and nothing
+// past them, in ONE ffprobe (`-read_intervals %+#<packets>` counts the selected stream's packets
+// and flushes the decoder at the end), and lists the frames the decoder shows of them. It is the
+// one answer a packet listing cannot give: which of a stream's first packets a decoder starting
+// at them actually shows. Errors are classified as VideoTimestamps' are.
+func (p *Prober) VideoStart(ctx context.Context, f string, packets int) (Start, error) {
+	out, err := exec.CommandContext(ctx, p.FFprobe, "-v", "error", "-select_streams", "V:0",
+		"-read_intervals", "%+#"+strconv.Itoa(packets), "-show_entries", "frame=best_effort_timestamp",
+		"-of", "compact=p=1:nk=0", "--", f).Output()
+	if ctx.Err() != nil || err != nil {
+		return Start{}, fmt.Errorf("%w: %v", ErrTimestampsUnanswered, errors.Join(ctx.Err(), err))
+	}
+	frames, err := parseFrames(strings.NewReader(string(out)))
+	if err != nil {
+		return Start{}, err
+	}
+	return Start{Packets: packets, Frames: frames}, nil
+}
+
+// parseFrames reads VideoStart's listing: one `frame|best_effort_timestamp=<n>` line per frame
+// shown (N/A where the decoder gives none), each possibly with trailing empty subsections.
+func parseFrames(r io.Reader) ([]Frame, error) {
+	var frames []Frame
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		fields := strings.Split(line, "|")
+		switch {
+		case line == "":
+			continue
+		case fields[0] == "frame":
+			ts, ok, err := tickField(fields, "best_effort_timestamp")
+			if err != nil {
+				return nil, err
+			}
+			frames = append(frames, Frame{TS: ts, HasTS: ok})
+		default:
+			return nil, fmt.Errorf("the frame listing carries a line this reader does not know: %q", line)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrTimestampsUnanswered, err)
+	}
+	return frames, nil
 }
