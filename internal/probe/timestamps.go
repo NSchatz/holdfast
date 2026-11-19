@@ -11,32 +11,31 @@ import (
 	"strings"
 )
 
-// Timestamps is the presentation timing of a file's first moving-picture video stream (`V:0`:
-// the first video stream that is not an attached picture, the one the playability gate lists
-// too, so a cover picture stored first is never the stream timed): one timestamp per packet, in
-// file order, in ticks of the stream's own time base. It is read by demuxing alone, never by
-// decoding.
+// Timestamps is the packet listing of a file's first moving-picture video stream (`V:0`: the
+// first video stream that is not an attached picture, the one the playability gate lists too, so
+// a cover picture stored first is never the stream timed): every packet in file order with its
+// timestamps and flags, in ticks of the stream's own time base. It is read by demuxing alone,
+// never by decoding, and it is what the file stores: what a decoder shows of it is the timing
+// gate's question (timing.Check).
 type Timestamps struct {
 	// TimeBaseNum and TimeBaseDen are the stream's time base: one tick is
 	// TimeBaseNum/TimeBaseDen seconds. Both are positive.
 	TimeBaseNum, TimeBaseDen int64
-	// Packets is how many packets the stream carries.
-	Packets int
-	// Ticks holds each packet's presentation timestamp, in the order the packets are stored:
-	// Packets of them, or none where the stream is Untimed.
-	Ticks []int64
-	// FromDTS is true where not every packet carries a presentation timestamp but every packet
-	// carries a decode timestamp, and Ticks are the decode timestamps. That is how AVI and ASF
-	// (WMV) are stored: AVI times each frame by the slot its chunk sits in, ASF by a send time,
-	// and the demuxer reports either as the dts alone, and an MPEG-4 Part 2 stream with B-frames
-	// leaves its B-frames without one. A decoder shows such a stream at its decode timestamps
-	// moved along by its reordering delay, which the gate allows for (timing.Check).
-	FromDTS bool
-	// Untimed is true where some packet carries a timestamp of neither kind: a raw elementary
-	// stream (`.h264`, `.hevc`), which stores frames and no times and which ffmpeg times at the
-	// one rate it guesses when it reads it, or a stream timed only in part. Ticks is empty: when
-	// such a stream's frames are shown cannot be read from its packets.
-	Untimed bool
+	// Packets are the stream's packets in the order the file stores them.
+	Packets []Packet
+}
+
+// Packet is one packet of the listing.
+type Packet struct {
+	// PTS and DTS are its presentation and decode timestamps, where HasPTS and HasDTS say the
+	// file carries them (ffprobe prints N/A for one it does not). AVI and ASF store no
+	// presentation timestamp, a raw elementary stream stores neither, and a Matroska block
+	// timed before zero is read back with none.
+	PTS, DTS       int64
+	HasPTS, HasDTS bool
+	// Key is the keyframe flag, and Discard the flag a demuxer sets on a packet the decoder
+	// decodes and never shows (an MP4 edit list starting after the keyframe a cut began at).
+	Key, Discard bool
 }
 
 // ErrTimestampsUnanswered is what VideoTimestamps wraps when ffprobe produced no listing at
@@ -46,18 +45,17 @@ type Timestamps struct {
 var ErrTimestampsUnanswered = errors.New("ffprobe did not answer")
 
 // VideoTimestamps lists every packet of f's first moving-picture video stream with its
-// presentation and decode timestamps, and the stream's time base, in ONE ffprobe that demuxes
-// the file and decodes nothing. The listing is read as it streams, so a film's hundreds of
-// thousands of packets are never buffered as text.
+// presentation and decode timestamps and its flags, and the stream's time base, in ONE ffprobe
+// that demuxes the file and decodes nothing. The listing is read as it streams, so a film's
+// hundreds of thousands of packets are never buffered as text.
 //
 // It refuses rather than guesses: a listing with no packet, no time base, a line this reader
-// does not know or a timestamp that is not a number is an error, never a partial answer. A
-// stream that does not time every packet is not an error: it is read by what it does time
-// (FromDTS), or reported as not readable in time (Untimed), and the gate decides what that
-// means for a source and for an output.
+// does not know or a value that does not read is an error, never a partial answer. A packet
+// that carries no timestamp is not an error: N/A is what the file stores, and the gate decides
+// what it means.
 func (p *Prober) VideoTimestamps(ctx context.Context, f string) (Timestamps, error) {
 	cmd := exec.CommandContext(ctx, p.FFprobe, "-v", "error", "-select_streams", "V:0",
-		"-show_entries", "packet=pts,dts:stream=time_base", "-of", "compact=p=1:nk=0", "--", f)
+		"-show_entries", "packet=pts,dts,flags:stream=time_base", "-of", "compact=p=1:nk=0", "--", f)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return Timestamps{}, fmt.Errorf("%w: %v", ErrTimestampsUnanswered, err)
@@ -76,41 +74,30 @@ func (p *Prober) VideoTimestamps(ctx context.Context, f string) (Timestamps, err
 	return ts, parseErr
 }
 
-// parseTimestamps reads VideoTimestamps' listing: one `packet|pts=<n>|dts=<n>` line per
-// packet (either value may be N/A) and one `stream|time_base=<num>/<den>` line. A transport
-// stream also lists its programs' streams (`program|stream|...`), which are skipped; the
-// stream line itself may carry trailing empty subsections, which are ignored.
+// parseTimestamps reads VideoTimestamps' listing: one `packet|pts=<n>|dts=<n>|flags=<f>` line
+// per packet (either timestamp may be N/A; the flags are K for a keyframe and D for a packet to
+// discard, `_` where unset) and one `stream|time_base=<num>/<den>` line. A transport stream also
+// lists its programs' streams (`program|stream|...`) and an MP4 or MOV whose video is linked to a
+// timecode track its stream group's (`stream_group|stream|...`), which are skipped; a line may
+// carry trailing empty subsections, which are ignored.
 func parseTimestamps(r io.Reader) (Timestamps, error) {
 	var (
-		ts           Timestamps
-		pts, dts     []int64
-		withPTS, all int
-		tbSeen       bool
+		ts     Timestamps
+		tbSeen bool
 	)
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		fields := strings.Split(line, "|")
 		switch {
-		case line == "" || fields[0] == "program":
+		case line == "" || fields[0] == "program" || fields[0] == "stream_group":
 			continue
 		case fields[0] == "packet":
-			p, okP, err := tickField(fields, "pts")
+			pkt, err := packetFields(fields)
 			if err != nil {
 				return Timestamps{}, err
 			}
-			d, okD, err := tickField(fields, "dts")
-			if err != nil {
-				return Timestamps{}, err
-			}
-			all++
-			if okP {
-				withPTS++
-				pts = append(pts, p)
-			}
-			if okD {
-				dts = append(dts, d)
-			}
+			ts.Packets = append(ts.Packets, pkt)
 		case fields[0] == "stream":
 			if tbSeen {
 				return Timestamps{}, fmt.Errorf("the listing names more than one video stream")
@@ -127,57 +114,74 @@ func parseTimestamps(r io.Reader) (Timestamps, error) {
 	if err := sc.Err(); err != nil {
 		return Timestamps{}, fmt.Errorf("%w: %v", ErrTimestampsUnanswered, err)
 	}
-	switch {
-	case !tbSeen:
+	if !tbSeen {
 		return Timestamps{}, fmt.Errorf("the listing names no video stream time base")
-	case all == 0:
-		return Timestamps{}, fmt.Errorf("the video stream carries no packets")
-	case withPTS == all:
-		ts.Ticks = pts
-	case len(dts) == all:
-		ts.Ticks, ts.FromDTS = dts, true
-	default:
-		ts.Untimed = true
 	}
-	ts.Packets = all
+	if len(ts.Packets) == 0 {
+		return Timestamps{}, fmt.Errorf("the video stream carries no packets")
+	}
 	return ts, nil
 }
 
-// tickField reads the `<key>=<value>` field of a packet line: ok is false for ffprobe's N/A,
-// and a field that is missing or not an integer is an error.
-func tickField(fields []string, key string) (v int64, ok bool, err error) {
-	for _, f := range fields[1:] {
-		val, found := strings.CutPrefix(f, key+"=")
-		if !found {
-			continue
-		}
-		if val == "N/A" {
-			return 0, false, nil
-		}
-		n, perr := strconv.ParseInt(val, 10, 64)
-		if perr != nil {
-			return 0, false, fmt.Errorf("a packet's %s is not a timestamp: %q", key, val)
-		}
-		return n, true, nil
+// packetFields reads one packet line.
+func packetFields(fields []string) (Packet, error) {
+	var (
+		pkt Packet
+		err error
+	)
+	if pkt.PTS, pkt.HasPTS, err = tickField(fields, "pts"); err != nil {
+		return Packet{}, err
 	}
-	return 0, false, fmt.Errorf("a packet line carries no %s: %q", key, strings.Join(fields, "|"))
+	if pkt.DTS, pkt.HasDTS, err = tickField(fields, "dts"); err != nil {
+		return Packet{}, err
+	}
+	flags, ok := field(fields, "flags")
+	if !ok {
+		return Packet{}, fmt.Errorf("a packet line carries no flags: %q", strings.Join(fields, "|"))
+	}
+	pkt.Key, pkt.Discard = strings.Contains(flags, "K"), strings.Contains(flags, "D")
+	return pkt, nil
+}
+
+// field is the value of the `<key>=<value>` field of a line, and whether it carries one.
+func field(fields []string, key string) (string, bool) {
+	for _, f := range fields[1:] {
+		if val, found := strings.CutPrefix(f, key+"="); found {
+			return val, true
+		}
+	}
+	return "", false
+}
+
+// tickField reads the `<key>=<value>` timestamp field of a packet line: ok is false for
+// ffprobe's N/A, and a field that is missing or not an integer is an error.
+func tickField(fields []string, key string) (v int64, ok bool, err error) {
+	val, found := field(fields, key)
+	if !found {
+		return 0, false, fmt.Errorf("a packet line carries no %s: %q", key, strings.Join(fields, "|"))
+	}
+	if val == "N/A" {
+		return 0, false, nil
+	}
+	n, perr := strconv.ParseInt(val, 10, 64)
+	if perr != nil {
+		return 0, false, fmt.Errorf("a packet's %s is not a timestamp: %q", key, val)
+	}
+	return n, true, nil
 }
 
 // timeBaseField reads the `time_base=<num>/<den>` field of a stream line; both parts must be
 // positive integers.
 func timeBaseField(fields []string) (num, den int64, err error) {
-	for _, f := range fields[1:] {
-		val, found := strings.CutPrefix(f, "time_base=")
-		if !found {
-			continue
-		}
-		n, d, cut := strings.Cut(val, "/")
-		num, errN := strconv.ParseInt(n, 10, 64)
-		den, errD := strconv.ParseInt(d, 10, 64)
-		if !cut || errN != nil || errD != nil || num <= 0 || den <= 0 {
-			return 0, 0, fmt.Errorf("the video stream's time base is not a ratio of positive integers: %q", val)
-		}
-		return num, den, nil
+	val, found := field(fields, "time_base")
+	if !found {
+		return 0, 0, fmt.Errorf("the stream line carries no time base: %q", strings.Join(fields, "|"))
 	}
-	return 0, 0, fmt.Errorf("the stream line carries no time base: %q", strings.Join(fields, "|"))
+	n, d, cut := strings.Cut(val, "/")
+	num, errN := strconv.ParseInt(n, 10, 64)
+	den, errD := strconv.ParseInt(d, 10, 64)
+	if !cut || errN != nil || errD != nil || num <= 0 || den <= 0 {
+		return 0, 0, fmt.Errorf("the video stream's time base is not a ratio of positive integers: %q", val)
+	}
+	return num, den, nil
 }

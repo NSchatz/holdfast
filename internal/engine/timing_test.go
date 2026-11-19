@@ -89,8 +89,8 @@ func vfrFixture(t *testing.T, ffmpeg, ffprobe, ext string, codec ...string) (roo
 			"exercise the grid an encode rounded onto", ext, rate)
 	}
 	times = timesOf(t, ffprobe, src)
-	if len(times.Ticks) != 234 {
-		t.Fatalf("fixture drifted: the %s source carries %d video packets, want 234", ext, len(times.Ticks))
+	if len(times.Packets) != 234 {
+		t.Fatalf("fixture drifted: the %s source carries %d video packets, want 234", ext, len(times.Packets))
 	}
 	return root, src, times
 }
@@ -120,12 +120,22 @@ func timesOf(t *testing.T, ffprobe, path string) probe.Timestamps {
 // positions are a listing's presentation times as positions from its first frame, in
 // presentation order, in its own ticks.
 func positions(ts probe.Timestamps) []int64 {
-	s := slices.Sorted(slices.Values(ts.Ticks))
+	var pts []int64
+	for _, k := range ts.Packets {
+		pts = append(pts, k.PTS)
+	}
+	s := slices.Sorted(slices.Values(pts))
 	out := make([]int64, len(s))
 	for i := range s {
 		out[i] = s[i] - s[0]
 	}
 	return out
+}
+
+// decodeTimed reports whether a listing carries decode timestamps and no presentation
+// timestamp, as AVI and ASF do.
+func decodeTimed(ts probe.Timestamps) bool {
+	return !slices.ContainsFunc(ts.Packets, func(k probe.Packet) bool { return k.HasPTS || !k.HasDTS })
 }
 
 // timingRun runs one oneshot pass over root, its configuration changed by mutate where it is
@@ -306,7 +316,7 @@ func TestTiming_AContainerThatStoresNoPresentationTimeIsReadByItsDecodeTimes(t *
 		t.Run(tc.name, func(t *testing.T) {
 			for _, before := range []bool{false, true} {
 				root, _, want := vfrFixture(t, ffmpeg, ffprobe, tc.from, tc.codec...)
-				if tc.from == "avi" && !want.FromDTS {
+				if tc.from == "avi" && !decodeTimed(want) {
 					t.Fatalf("fixture drifted: the AVI source carries presentation timestamps (%+v)", want)
 				}
 				bin := ffmpeg
@@ -356,7 +366,7 @@ func TestTiming_AContainerThatStoresNoPresentationTimeIsReadByItsDecodeTimes(t *
 				if err := (FFmpegEncoder{FFmpeg: bin, Cfg: cfg, Probe: probe.New(bin, ffprobe)}).Encode(ctx, src, out, nil); err != nil {
 					t.Fatalf("encode: %v", err)
 				}
-				if got := timesOf(t, ffprobe, out); !got.FromDTS {
+				if got := timesOf(t, ffprobe, out); !decodeTimed(got) {
 					t.Fatalf("fixture drifted: libx264 into %s carries presentation timestamps (%+v)", to, got)
 				}
 				class, err := eng.timingParity(ctx, src, out)
@@ -367,6 +377,141 @@ func TestTiming_AContainerThatStoresNoPresentationTimeIsReadByItsDecodeTimes(t *
 					!strings.Contains(err.Error(), "the encode moved the source's frame timing")) {
 					t.Fatalf("the encode without -enc_time_base: %q %v, want refused as moved", class, err)
 				}
+			}
+		})
+	}
+}
+
+// leadingSource is one source that starts where a decoder cannot show every packet it stores,
+// and the property of its listing that makes it one.
+type leadingSource struct {
+	name, ext, encoder string
+	make               func(t *testing.T, ffmpeg, dir, path string)
+	starts             func(ts probe.Timestamps) bool
+}
+
+// cutFrom writes a source with args into dir and copies it from at seconds into path, the way a
+// clip cut out of a longer file is made.
+func cutFrom(at string, args ...string) func(t *testing.T, ffmpeg, dir, path string) {
+	return func(t *testing.T, ffmpeg, dir, path string) {
+		t.Helper()
+		whole := filepath.Join(dir, "whole"+filepath.Ext(args[len(args)-1]))
+		ff(t, ffmpeg, append(append([]string{"-hide_banner", "-loglevel", "error", "-y"}, args[:len(args)-1]...), "--", whole)...)
+		ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", at, "-i", whole, "-map", "0:v", "-c", "copy", "--", path)
+	}
+}
+
+// afterKeyBeforeIt reports whether a packet after the first keyframe is presented before it,
+// or carries no presentation timestamp: an open GOP's leading pictures.
+func afterKeyBeforeIt(ts probe.Timestamps) bool {
+	k := slices.IndexFunc(ts.Packets, func(q probe.Packet) bool { return q.Key })
+	return k >= 0 && slices.ContainsFunc(ts.Packets[k+1:], func(q probe.Packet) bool {
+		return !q.HasPTS || q.PTS < ts.Packets[k].PTS
+	})
+}
+
+var leadingSources = []leadingSource{
+	{"an MP4 cut between keyframes, its edit list discarding the packets before the cut", "mp4", "cpu",
+		cutFrom("2.5", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24:duration=10", "-c:v", "libx264", "-preset",
+			"ultrafast", "-g", "48", "-bf", "2", "-b:v", "8M", "-pix_fmt", "yuv420p", "whole.mp4"),
+		func(ts probe.Timestamps) bool {
+			return slices.ContainsFunc(ts.Packets, func(q probe.Packet) bool { return q.Discard })
+		}},
+	{"H.264 starting at an open GOP's I-frame", "mkv", "cpu",
+		cutFrom("4", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24:duration=12", "-c:v", "libx264", "-preset",
+			"fast", "-x264-params", "open-gop=1:keyint=48:min-keyint=48:scenecut=0:bframes=3", "-b:v", "8M",
+			"-pix_fmt", "yuv420p", "whole.mkv"), afterKeyBeforeIt},
+	{"MPEG-2 starting at an open GOP", "mkv", "cpu",
+		cutFrom("4", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=12", "-c:v", "mpeg2video", "-g", "15",
+			"-bf", "2", "-b:v", "8M", "whole.ts"), afterKeyBeforeIt},
+	{"HEVC starting at a CRA with leading pictures", "mkv", "svtav1",
+		cutFrom("4", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24:duration=12", "-c:v", "libx265", "-preset",
+			"fast", "-x265-params", "log-level=error:keyint=48:min-keyint=48:scenecut=0:bframes=3", "-b:v", "4M",
+			"-pix_fmt", "yuv420p", "whole.mkv"), afterKeyBeforeIt},
+	{"a transport stream cut between keyframes, its leading packets copied", "mkv", "cpu",
+		func(t *testing.T, ffmpeg, dir, path string) {
+			t.Helper()
+			whole, cut := filepath.Join(dir, "whole.ts"), filepath.Join(dir, "cut.ts")
+			ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+				"testsrc2=size=320x240:rate=24:duration=12", "-c:v", "libx264", "-preset", "ultrafast", "-g", "48",
+				"-bf", "2", "-b:v", "8M", "-pix_fmt", "yuv420p", "--", whole)
+			b, err := os.ReadFile(whole)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A cut on a transport packet boundary a fifth of the way in, mid-GOP.
+			if err := os.WriteFile(cut, b[len(b)/188/5*188:], 0o644); err != nil {
+				t.Fatal(err)
+			}
+			ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", cut, "-map", "0:v", "-c", "copy",
+				"-copyinkf", "--", path)
+		},
+		func(ts probe.Timestamps) bool { return !ts.Packets[0].Key }},
+}
+
+// TestTiming_ASourceWhoseFirstPacketsADecoderCannotShowIsNotRefused runs whole passes over the
+// sources that store more packets than a decoder shows when it starts at their first: an MP4
+// edit list's discarded packets, an open GOP's and a CRA's leading pictures, and the packets
+// before a cut stream's first keyframe. Each encode is exactly what a player shows of the
+// source, and the timing gate passes it: the discarded packets are not counted, and the leading
+// ones are left out where that accounts for the difference exactly.
+func TestTiming_ASourceWhoseFirstPacketsADecoderCannotShowIsNotRefused(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	for _, tc := range leadingSources {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			src := filepath.Join(root, "movie."+tc.ext)
+			tc.make(t, ffmpeg, t.TempDir(), src)
+			want := timesOf(t, ffprobe, src)
+			if !tc.starts(want) {
+				t.Fatalf("fixture drifted: the source starts where a decoder shows every packet (%d packets)", len(want.Packets))
+			}
+			st, _ := timingRun(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) {
+				c.ContainerExt, c.Encoder, c.VideoExts = "source", tc.encoder, []string{tc.ext}
+			})
+			row := onlyRow(t, st)
+			if row.Status != store.Done {
+				t.Fatalf("row %s %q, want done", row.Status, row.Outcome.Reason)
+			}
+			if err := timing.Check(want, timesOf(t, ffprobe, src)); err != nil {
+				t.Fatalf("the replacement's timing is not what a player shows of the source: %v", err)
+			}
+		})
+	}
+}
+
+// TestTiming_ASourceThatCarriesFramesOnOneInstantIsNotRefusedForThem: a source that stores two
+// frames on one timestamp itself, re-encoded and remuxed. Either output reproduces the pair and
+// nothing more, so the gate, which refuses only frames on one instant beyond the source's own,
+// passes both, and each replaces the source.
+func TestTiming_ASourceThatCarriesFramesOnOneInstantIsNotRefusedForThem(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	for _, remux := range []bool{false, true} {
+		t.Run(map[bool]string{false: "encode", true: "remux"}[remux], func(t *testing.T) {
+			root := t.TempDir()
+			src := filepath.Join(root, "movie.mkv")
+			// Frame 5 is stamped with frame 4's time; two audio tracks, one for a remux to drop.
+			ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+				"-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24:duration=2",
+				"-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-f", "lavfi", "-i", "sine=frequency=880:duration=2",
+				"-map", "0:v", "-map", "1:a", "-map", "2:a", "-vf", "setpts='if(eq(N,5),4,N)/24/TB'",
+				"-c:v", "libx264", "-preset", "ultrafast", "-bf", "0", "-b:v", "8M", "-fps_mode", "passthrough",
+				"-c:a", "aac", "-b:a", "192k", "-metadata:s:a:0", "language=eng", "-metadata:s:a:1", "language=fre",
+				"--", src)
+			want := timesOf(t, ffprobe, src)
+			if p := positions(want); p[4] != p[5] {
+				t.Fatalf("fixture drifted: the source does not carry two frames on one instant (%v)", p)
+			}
+			st, _ := timingRun(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) {
+				c.AudioLanguages = []string{"eng"}
+				c.RemuxOnly = boolPtr(remux)
+			})
+			if row := onlyRow(t, st); row.Status != store.Done {
+				t.Fatalf("row %s %q, want done", row.Status, row.Outcome.Reason)
+			}
+			got := timesOf(t, ffprobe, src)
+			if !slices.Equal(positions(got), positions(want)) {
+				t.Fatalf("the replacement is not at the source's ticks:\n got %v\nwant %v", positions(got), positions(want))
 			}
 		})
 	}

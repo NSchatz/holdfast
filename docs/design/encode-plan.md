@@ -157,6 +157,17 @@ build, and the Dolby Vision, deinterlace, crop and scale suites pass the timing 
 A hardware encoder's command line carries the same two options (the golden argv holds it); no
 device is reachable here to measure one, and the timing check measures whatever it wrote.
 
+What it changes on a constant-rate encode, where no frame's time moves: the encoder's time base is
+now the source's rather than one over the frame rate, and two encoders and one muxer write it down
+(measured with the pinned build, a 24 fps Matroska source). libx264 writes its VUI timing from the
+time base, so its stream now says `time_scale=2000`, `num_units_in_tick=1` (it said 48 and 1); the
+frame rate a demuxer reports is unchanged (24/1), and libx265's VUI is unchanged (it writes the frame
+rate). A Matroska source written into MP4 (`container_ext: mp4`) gets the MP4 muxer's timescale
+for a millisecond base, 1/16000 (it was 1/12288 for 1/24), and frames carry the source's own
+millisecond times, so their durations alternate 41 and 42 ms where they were all 41.667 ms; the
+reported frame rates are unchanged. Both are the source's own times written exactly, which is the
+point; neither is a gate's concern.
+
 The timing-parity check holds the result ([swap](swap.md#timing-parity)): an encode that moved a
 frame or stacked two on one instant is refused, whatever its command line said.
 

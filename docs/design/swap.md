@@ -107,12 +107,14 @@ what a variable-frame-rate source looked like after an encode that rounded its t
 rate: frames presented off their times, and runs of two frames presented at the same instant
 ([the encode's timestamps](encode-plan.md#timestamps)). The timing-parity check
 (`internal/timing`, under the length gate's label `length`) runs after the output fidelity gate and
-before the decode-integrity gate, on every job including a remux, and refuses the output unless:
+before the decode-integrity gate, on every job including a remux. It reads each file's first
+video stream that is not an attached picture (`V:0`, the stream the playability gate lists too) as
+the frames a decoder shows of it (below), and refuses the output unless:
 
-- its first video stream that is not an attached picture (`V:0`, the stream the playability gate
-  lists too) carries the same number of packets as the source's: an encode makes one frame of each
-  source frame;
-- no two of its video packets are presented at the same instant;
+- it shows as many frames as the source shows: an encode makes one frame of each;
+- no more of its frames are presented at the same instant as the frame before them than the
+  source's are: a faithful encode adds none, and reproduces any a source carries itself (a remux
+  copies them; a re-encode keeps them);
 - each frame, taken in presentation order and read as a position from its file's own first frame,
   is presented within **one tick of the coarser of the two time bases** of the source's frame at
   the same place.
@@ -139,9 +141,25 @@ its timestamps, and the stream's time base, read by demuxing and never by decodi
 file once more end to end, which is why it runs after the gates that cost a header read and before
 the full decode.
 
-How a file is read, and what of it is checkable:
+Which frames a decoder shows. A packet the demuxer flags to discard is decoded and never shown -
+an MP4 cut between keyframes keeps, behind an edit list, the packets it needs from the keyframe
+before the cut and flags them - so it is not counted. And where the output shows fewer frames than
+the source has left, the source is read once more without the packets a decoder starting at its
+first packet cannot show: those before its first keyframe in file order (a stream cut between
+keyframes), and those after it presented before it (an open GOP's leading pictures, an HEVC CRA's
+skipped leading pictures, which Matroska reads back with no timestamp when they were timed before
+zero). That reading is accepted only where it accounts for the difference exactly. Each case was
+measured with the pinned build, and each output matches what a player shows to the tick: an MP4 cut
+mid-GOP, H.264 starting at an open GOP's I-frame, MPEG-2 starting at an open GOP, HEVC starting at a
+CRA, and a transport stream cut mid-GOP with its leading packets copied
+(`TestTiming_ASourceWhoseFirstPacketsADecoderCannotShowIsNotRefused`). A frame a decoder drops in the
+middle of a film - a damaged frame it conceals by dropping - is not explained by anything at the
+start, and the source is refused, kept as it is: a count a reading cannot account for is not
+guessed at.
 
-- every packet carries a presentation timestamp: those are its times, compared frame for frame;
+How each frame is timed, and what of it is checkable:
+
+- every shown packet carries a presentation timestamp: those are its times, compared frame for frame;
 - otherwise every packet carries a decode timestamp: AVI, which times each frame by its chunk's
   slot, ASF (WMV), which times it by a send time, and an MPEG-4 Part 2 stream whose B-frames
   carry no presentation timestamp. The decode timestamps are read instead. An output read this
@@ -160,7 +178,9 @@ How a file is read, and what of it is checkable:
   output like that is refused: an output whose frames cannot be placed in time cannot be shown to
   carry the source's;
 - a listing that cannot be read at all - no time base, a line or a value the reader does not know -
-  is refused, never read as a match.
+  is refused, never read as a match. The lines ffprobe adds beside the stream - a transport
+  stream's programs, and the stream group an MP4 or MOV links its video to a timecode track with
+  (a Matroska file carrying a timecode tag gets one when it is written into MP4) - are skipped.
 
 What a packet listing cannot show is which picture is shown at each time: an output carrying the
 source's times in another order of pictures is the perceptual gate's to see, since it compares
@@ -172,12 +192,18 @@ the same way. A listing ffprobe never produced (it could not run, was killed, or
 transient. The source is kept either way.
 
 What it refuses that no earlier gate did, and that a faithful encode can also produce, each with
-the source kept and both counts or both times named: a source whose first packets cannot be decoded
-(a broadcast recording cut between keyframes), whose fields are stored as separate packets, or whose
-decoder drops a damaged frame, each of which comes out with fewer frames than the source has
-packets; a variable-frame-rate source with B-frames in AVI written back into AVI, whose frames the
-AVI muxer re-slots at the rate changes; and libsvtav1 written into AVI from an AVI source, whose
-hidden frames shift the output's slots by two. That is the fail-safe direction.
+the source kept and both counts or both times named: a source whose decoder drops a damaged frame
+mid-film, or whose fields are stored as separate packets, each of which comes out with fewer frames
+than the source shows; a variable-frame-rate source with B-frames in AVI written back into AVI,
+whose frames the AVI muxer re-slots at the rate changes; and libsvtav1 written into AVI from an AVI
+source, whose hidden frames shift the output's slots by two. That is the fail-safe direction.
+
+The output's listing is read twice over: here, and by the playability gate, which lists the same
+stream's presentation timestamps and keyframe flags. One listing could serve both and save one demux
+of the output. That is left as a follow-up: the playability gate's reader carries no decode
+timestamps and no discard flags, reads its listing whole rather than as it streams, and classifies
+an unreadable listing in its own vocabulary, so sharing it means changing that reader and the point
+it first runs at.
 
 ## Playability
 

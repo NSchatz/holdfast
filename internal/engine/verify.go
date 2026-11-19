@@ -251,9 +251,10 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 	}
 
 	// 5c. TIMING PARITY, the second half of gate 3 and under its token: the output's video is
-	// presented at the source's own times - the same number of packets, no two presented at
-	// one instant, and each where the source's frame at the same place in presentation order
-	// is, within one tick of the coarser time base (docs/design/swap.md#timing-parity). The
+	// presented at the source's own times - as many frames as a decoder shows of the source,
+	// no more of them on one instant than the source has, and each where the source's frame at
+	// the same place in presentation order is, within one tick of the coarser time base
+	// (docs/design/swap.md#timing-parity). The
 	// duration and packet counts above hold when an encode rounds a variable-frame-rate
 	// source's timestamps onto one rate, and nothing below asks when a frame is shown. It runs
 	// here rather than beside them because it lists every packet of both files, a read of each
