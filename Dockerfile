@@ -45,7 +45,7 @@
 # RUN cannot see the reference its own stage was built from. scripts/check-pins.sh
 # section 3 holds the two equal, so moving one without the other reds the gate instead of
 # splitting silently.
-ARG GO_IMAGE=golang:1.26.11-trixie@sha256:cff05dd6b81c901f2e8249eb6f91c69a60451d0f12c26bfef08e476a85b32d4d
+ARG GO_IMAGE=golang:1.27.4-trixie@sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d
 
 # --- ffmpeg: a pinned static build, verified by hash before it is trusted -----
 # BtbN's builds link only glibc (>= 2.28), so they run on the distroless runtime while
@@ -347,7 +347,7 @@ RUN set -eu; \
     ls -lR dist
 
 # --- build the binary --------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.26.11-trixie@sha256:cff05dd6b81c901f2e8249eb6f91c69a60451d0f12c26bfef08e476a85b32d4d AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.4-trixie@sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d AS build
 
 # The DIGEST is what Docker pulls; the tag beside it is a label the registry does not
 # enforce. scripts/check-pins.sh holds the Go version together across this file, ci.yml

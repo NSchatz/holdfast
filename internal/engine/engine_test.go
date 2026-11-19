@@ -2646,15 +2646,9 @@ type declaredConst struct {
 func packageConstants(t *testing.T, dir string) map[string]declaredConst {
 	t.Helper()
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatalf("parse %s: %v", dir, err)
-	}
 	out := map[string]declaredConst{}
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
+	for _, files := range parseNonTestFiles(t, fset, dir, parser.SkipObjectResolution) {
+		for _, file := range files {
 			for _, decl := range file.Decls {
 				gd, ok := decl.(*ast.GenDecl)
 				if !ok || gd.Tok != token.CONST {
@@ -4616,4 +4610,28 @@ func TestS0172_AC8_AGuardThatFiresBeforeTheClaimEncodesNothingEither(t *testing.
 	if after := fileDigestOf(t, candidate); after != before {
 		t.Errorf("the file is not byte-identical after the live run: sha-256 %s, was %s", after, before)
 	}
+}
+
+// parseNonTestFiles parses every non-test .go file in dir, grouped by package name, as
+// go/parser.ParseDir did (deprecated since Go 1.25). Like ParseDir it ignores build tags,
+// which is what these source-shape checks want: they read every file the package holds.
+func parseNonTestFiles(t *testing.T, fset *token.FileSet, dir string, mode parser.Mode) map[string][]*ast.File {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	out := map[string][]*ast.File{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, mode)
+		if err != nil {
+			t.Fatalf("parse %s: %v", filepath.Join(dir, name), err)
+		}
+		out[f.Name.Name] = append(out[f.Name.Name], f)
+	}
+	return out
 }
