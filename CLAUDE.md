@@ -42,10 +42,11 @@ session, never as an issue. Write "the owner" in this public repository, never a
 ## Siblings
 
 - Before writing new code, search shopkit's index:
-  `git -C /workspace/shopkit show origin/main:docs/INDEX.md | grep -i <word>`; reuse or extend
+  `git -C <a clone of shopkit> show origin/main:docs/INDEX.md | grep -i <word>`; reuse or extend
   shopkit instead of writing it again.
 - Work a sibling repo must do goes to that repo as an exact spec; read its card first:
-  `git -C /workspace/<repo> show origin/main:CARD.md`.
+  `git -C <a clone of <repo>> show origin/main:CARD.md`. Where sibling clones live, and how a spec
+  reaches another repo's session, depend on the development setup, which is not decided yet.
 
 ## Details
 
