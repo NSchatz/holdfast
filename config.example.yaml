@@ -624,7 +624,9 @@ dry_run: false
 #     colour primaries/transfer/matrix/range tags — an SDR source is never wrongly
 #     tagged HDR, and an HDR source never has metadata invented that it didn't signal
 #   - 4:2:2 / 4:4:4 chroma subsampling (not flattened to 4:2:0)
-#   - variable frame-rate timing (`-fps_mode passthrough` — not forced to CFR)
+#   - variable frame-rate timing (`-fps_mode passthrough -enc_time_base:v demux`: not forced
+#     to CFR, and every frame kept at its source timestamp; the timing gate refuses an output
+#     whose frames are not)
 
 # --- data-safety guards (do not loosen without understanding them) ---
 # min_bitrate_kbps: 2500     # skip sources below this — re-encoding them only bloats

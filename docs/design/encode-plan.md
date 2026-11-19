@@ -118,6 +118,45 @@ encoders moved to name their input format (and VAAPI to upload `p010le`), and ev
 held by `TestGoldenArgv_EveryArgvNamesItsPixelFormat` to name a format its encoder lists.
 libx265 and libsvtav1 are handed every format they list unchanged.
 
+## The timestamps
+
+<a id="timestamps"></a>
+
+**Every re-encode carries each source frame at the time the source presents it, on the source's
+own time base.** Every encoder's command line, on the quality and the bitrate path alike, names
+`-fps_mode passthrough -enc_time_base:v demux` (`timestampArgs` in `internal/engine/encode.go`): the
+first encodes every decoded frame, none dropped or duplicated to make a variable-frame-rate source
+constant; the second makes the encoder's time base the source stream's own. It is not on the plan
+because it is not a per-job choice: no job has a reason to encode on any other base.
+
+Without the second, fftools gives a video encoder a time base of one over the frame rate the
+demuxer guessed for the stream, and rescales every frame's timestamp onto that grid
+(`choose_out_timebase`, `fftools/ffmpeg_filter.c:2386-2458` at the pinned revision,
+https://github.com/FFmpeg/FFmpeg/tree/5d4d3bdc61 , read 2026-11-18). A constant-rate source's frames
+sit on that grid and come back at their own times. A variable-rate source's do not: measured with
+the pinned `N-125875-g5d4d3bdc61` on a source of 6 s at 24 fps, 1 s at 60 and 1 s at 30, which every
+demuxer guesses at 24 fps, the encode presented frames up to 17 ms off their times and stacked 42
+of its 234 frames on another's timestamp in Matroska and FLV, and 29 in MP4, MOV and MPEG-TS -
+libx265, libx264 and libsvtav1 alike, since the rounding happens before the encoder. Every gate
+then in place passed such an output: its duration and packet count are the source's, it decodes,
+and the perceptual gate compares frame by frame. With the source's base every frame lands on its
+own tick in all five containers, and an MP4 source written into Matroska on the nearest
+millisecond.
+
+The `:v` scope keeps an audio encoder on its default of one over the sample rate. fftools reads
+the option only for a stream it encodes (`fftools/ffmpeg_mux_init.c:1250-1345`, inside
+`if (ost->enc)`), so a copied stream and a remux are untouched. `demux` is the decoder's own base,
+so it holds under a deinterlace (yadif and bwdif halve the filter's time base and double its
+timestamps, which divide back exactly: `ff_yadif_config_output_common`,
+`libavfilter/yadif_common.c:214-223`, which `vf_bwdif.c` shares), a crop, a scale, `setparams`, a
+hardware upload, and the converted Dolby Vision profile 7 stream, whose raw input is timed at its
+declared rate on the raw demuxer's 1/1200000 base (`libavformat/rawdec.c:89`). Each was measured
+with the pinned build, and the Dolby Vision, deinterlace, crop and scale suites pass the timing
+check unchanged.
+
+The timing-parity check holds the result ([swap](swap.md#timing-parity)): an encode that moved a
+frame or stacked two on one instant is refused, whatever its command line said.
+
 ## Open and closed GOPs
 
 <a id="gop"></a>
@@ -285,10 +324,11 @@ that. The libx265 thread pools, the progress channel and the mux queue bounds ar
 parameters of the run: the encoder joins them to the command line, and no gate reads them. The
 resident-memory watchdog and the ffmpeg binary the encoder runs are the run's too, and are not
 on the plan; the gates take their measurements through the prober, whatever the encoder ran.
-The length gate's two thresholds
+The length gate's thresholds
 are not on the plan either: its tolerance (`duration_tolerance_sec`) is a run-wide setting,
 read from the engine's configuration exactly as the stray-temp sweep that asks the same
-question reads it, and its packet-count bound is a constant. The guards are not part of it either: they decide
+question reads it, its packet-count bound is a constant, and its timing check's tolerance is one
+tick of the coarser of the two files' own time bases ([swap](swap.md#timing-parity)). The guards are not part of it either: they decide
 whether a file is encoded at all, run before a plan exists, and read the same probe snapshot
 the derivation reads.
 
@@ -318,6 +358,10 @@ to move with the plan it is handed (`TestEncodePlan_EveryGateReadsThePlan`): the
 length, size, stream-parity and decode gates, the perceptual gate's three floors, and the
 video-identity check a stream copy is held to. The perceptual gate is also shown to build its
 comparison through the plan's picture operations.
+
+A golden command line moves only by a recorded argv change, regenerated in the commit that makes
+it. The timestamp change is one: `-enc_time_base:v demux` after `-fps_mode passthrough` on every
+re-encode line, and nothing else on any line ([above](#timestamps)).
 
 One recorded fact changed, deliberately, and it is not a decision or a command line. A
 remux-only job under a `max_height` below its source used to record that its picture was

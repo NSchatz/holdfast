@@ -5,8 +5,8 @@ It re-encodes bloated video smaller and never destroys a source until a replacem
 
 ## Dangers and never-do rules
 
-- **Never mutate a source until a replacement passed every gate** (codec, duration and packet
-  parity, strictly smaller, per-type stream counts, fidelity, full decode, VMAF). The swap is an
+- **Never mutate a source until a replacement passed every gate** (codec, duration, packet and
+  timestamp parity, strictly smaller, per-type stream counts, fidelity, full decode, VMAF). The swap is an
   atomic same-filesystem `rename()` from the source's own directory; do not weaken it.
 - Fail safe: ambiguous, malformed or unsupported input SKIPS with a logged reason or returns a
   typed error. Never a confident wrong result, never a silent loss.

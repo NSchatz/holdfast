@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
+	"github.com/NSchatz/holdfast/internal/timing"
 	"github.com/NSchatz/holdfast/internal/vmaf"
 )
 
@@ -101,10 +103,11 @@ type vmafProof struct {
 // parameter: a gate that resolved any of those for itself - down to which file it measured -
 // would be answering a different question than the encoder was asked, and the two answers
 // would differ on exactly the file nobody tested (docs/design/encode-plan.md#encode-plan).
-// The length gate's two thresholds are the only ones not on the plan: its tolerance
+// The length gate's thresholds are the only ones not on the plan: its tolerance
 // (duration_tolerance_sec) is a run-wide setting, read from the engine's configuration exactly
-// as the stray-temp sweep that asks the same question reads it, and its packet-count bound is
-// a constant (lengthParity).
+// as the stray-temp sweep that asks the same question reads it, its packet-count bound is a
+// constant (lengthParity), and its timing check's tolerance is one tick of the coarser of the
+// two files' own time bases (timingParity).
 //
 // job.Profile is the profile of the root the source was enumerated under: every threshold
 // comes from it, so a film library and a grainy-anime library each meet the bar their
@@ -233,6 +236,21 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 		if err := e.outputFidelity(ctx, job); err != nil {
 			return none, GateFidelity, store.FailureDeterministic, err
 		}
+	}
+
+	// 5c. TIMING PARITY, the second half of gate 3 and under its token: the output's video is
+	// presented at the source's own times - the same number of packets, no two presented at
+	// one instant, and each where the source's frame at the same place in presentation order
+	// is, within one tick of the coarser time base (docs/design/swap.md#timing-parity). The
+	// duration and packet counts above hold when an encode rounds a variable-frame-rate
+	// source's timestamps onto one rate, and nothing below asks when a frame is shown. It runs
+	// here rather than beside them because it lists every packet of both files, a read of each
+	// whole file that every cheaper gate above may spare; it decodes nothing, so it still goes
+	// before the decode. A REMUX is held to it as well: a copy carries timestamps exactly, and
+	// the bit-identity check below compares bytes, not times. timingParity classifies its own
+	// rejections.
+	if class, err := e.timingParity(ctx, in, tmp); err != nil {
+		return none, GateLength, class, err
 	}
 
 	// 6. decode-integrity healthcheck on EVERY encode. TRANSIENT: an output that does not
@@ -513,6 +531,41 @@ func (e *Engine) lengthParity(ctx context.Context, in, out string) (store.Failur
 		}
 	}
 	return "", nil
+}
+
+// timingParity is gate 3's timestamp half on its own: out's video is presented at in's times
+// (timing.Check). A mismatch is DETERMINISTIC: the same source, configuration and ffmpeg build
+// time the same frames the same way. A listing that is ffprobe's own answer but cannot be
+// compared - only some packets timed, no time base - is deterministic for the same reason, and
+// refused: an unknown timing is not a matching one. Only a listing ffprobe never produced (it
+// could not run, was killed, or failed) is TRANSIENT, since that is a condition of the run.
+//
+// It is not part of lengthParity, which the stray-temp sweep also asks: the sweep's question is
+// whether a temp is finished, and a stricter answer there would only license deleting more.
+func (e *Engine) timingParity(ctx context.Context, in, out string) (store.FailureClass, error) {
+	src, err := e.Probe.VideoTimestamps(ctx, in)
+	if err != nil {
+		return listingClass(err), fmt.Errorf("timing parity could not be established: the source's video "+
+			"timestamps could not be listed (%v). The source is kept", err)
+	}
+	got, err := e.Probe.VideoTimestamps(ctx, out)
+	if err != nil {
+		return listingClass(err), fmt.Errorf("timing parity could not be established: the output's video "+
+			"timestamps could not be listed (%v). The source is kept", err)
+	}
+	if err := timing.Check(src, got); err != nil {
+		return store.FailureDeterministic, fmt.Errorf("%w. The source is kept", err)
+	}
+	return "", nil
+}
+
+// listingClass is the class of a packet listing that could not be compared: transient where
+// ffprobe never answered, deterministic where it answered about the file.
+func listingClass(err error) store.FailureClass {
+	if errors.Is(err, probe.ErrTimestampsUnanswered) {
+		return store.FailureTransient
+	}
+	return store.FailureDeterministic
 }
 
 // chapterParity is gate 5a on its own: out carries in's chapter table (chapters.Check). A

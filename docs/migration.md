@@ -193,7 +193,7 @@ is in [docs/docker.md](docker.md#worker-nodes).
   [#511](https://github.com/HaveAGitGat/Tdarr/issues/511),
   [#683](https://github.com/HaveAGitGat/Tdarr/issues/683)). `holdfast` encodes to a temp file
   beside the source, and the source is replaced only by an atomic same-filesystem rename, only
-  after the output passes *every* gate: correct codec, duration and packet parity, strictly
+  after the output passes *every* gate: correct codec, duration, packet and timestamp parity, strictly
   smaller, per-type stream-count parity, full decode-integrity, and VMAF. Any failure discards
   the temp and leaves the source untouched.
 - **Config-as-code.** Your configuration is a reviewable YAML file in git, not UI state in a

@@ -42,7 +42,8 @@ and fixes the trust gaps:
 - **Never replace before verify.** Encode to a same-directory temp; the source is replaced only by an
   **atomic same-filesystem rename** ([docs/design/swap.md](docs/design/swap.md#swap-invariant)), and
   only after the output passes *every* gate: correct codec,
-  duration/packet parity, strictly smaller, per-type stream-count parity, **output fidelity** (the bit
+  duration/packet parity, **timestamp parity** (the video presented at the source's times, frame for frame -
+  [docs/design/swap.md](docs/design/swap.md#timing-parity)), strictly smaller, per-type stream-count parity, **output fidelity** (the bit
   depth, chroma, colour tags and HDR10 metadata the job's plan declares -
   [docs/design/encode-plan.md](docs/design/encode-plan.md#fidelity)), full decode-integrity, and a
   **VMAF** perceptual-quality check - its **average** (`min_vmaf`, default `95`), its **worst frame**

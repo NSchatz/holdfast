@@ -1766,7 +1766,7 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 
 // ---- S0030: live progress, and what it must not cost -------------------------
 
-// The per-job subprocess budget for one done job with the VMAF gate off: 13 ffprobe
+// The per-job subprocess budget for one done job with the VMAF gate off: 17 ffprobe
 // invocations and 2 ffmpeg invocations (the encode and the decode-integrity check).
 //
 // The ffprobe side is the source snapshot, the source's stream-shape probe that the
@@ -1801,6 +1801,12 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 // re-measured in the commit that moved it: one probe of each file's chapter table, start
 // time and duration, paid only by a job that encoded.
 //
+// It went UP from 15 for the timing half of the length gate (docs/design/swap.md#timing-parity),
+// re-measured in the commit that moved it: one packet listing of each file's video timestamps,
+// which demuxes the file and decodes nothing, paid only by a job that encoded. It is one per
+// file, not more: the listing carries the packet count, the timestamps and the time base
+// together.
+//
 // These constants are NOT the evidence for AC12 and must not be read as it — they are a
 // long-run ceiling, so that a per-PR "no worse than last time" cannot ratchet the cost up
 // one probe at a time across many changes. The criterion itself is proved by MEASURING
@@ -1808,7 +1814,7 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 // fails if these numbers ever stop matching what it measures, so they cannot decay into
 // folklore.
 const (
-	probeBudgetFFprobe = 15
+	probeBudgetFFprobe = 17
 	probeBudgetFFmpeg  = 2
 )
 
