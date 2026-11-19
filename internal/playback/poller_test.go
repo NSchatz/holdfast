@@ -384,18 +384,35 @@ func TestPoller_ClientsAreNamedOnceEach(t *testing.T) {
 	}
 }
 
-// TestPoller_RunPollsAtOnceAndStopsWithItsContext.
+// signalSource is a fakeSource that says, once, that it has been asked.
+type signalSource struct {
+	*fakeSource
+	asked chan struct{}
+}
+
+func (s *signalSource) Sessions(ctx context.Context, since time.Time) ([]Observed, bool, error) {
+	select {
+	case s.asked <- struct{}{}:
+	default:
+	}
+	return s.fakeSource.Sessions(ctx, since)
+}
+
+// TestPoller_RunPollsAtOnceAndStopsWithItsContext. The test reads the ledger and the source only
+// after Run has returned, so nothing here races the poll.
 func TestPoller_RunPollsAtOnceAndStopsWithItsContext(t *testing.T) {
 	led := &memLedger{files: []store.SwappedFile{{Path: "/lib/a.mkv", Fingerprint: "1:1", SwappedAt: 3000}}}
-	src := &fakeSource{complete: true}
-	p, buf := newTestPoller(src, led, nil, 9000)
-	p.Interval = time.Hour
+	src := &signalSource{fakeSource: &fakeSource{complete: true}, asked: make(chan struct{}, 1)}
+	var buf bytes.Buffer
+	p := NewPoller(src, led, led, nil, rules, time.Hour, slog.New(slog.NewTextHandler(&buf, nil)))
+	p.now = func() time.Time { return time.Unix(9000, 0) }
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { p.Run(ctx); close(done) }()
-	deadline := time.Now().Add(5 * time.Second)
-	for led.poll == nil && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	select {
+	case <-src.asked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not poll at once")
 	}
 	cancel()
 	select {
@@ -403,11 +420,11 @@ func TestPoller_RunPollsAtOnceAndStopsWithItsContext(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return when its context ended")
 	}
-	if led.poll == nil || len(src.asked) != 1 {
-		t.Errorf("Run did not poll at once: %v", src.asked)
+	if led.poll == nil || len(src.fakeSource.asked) != 1 {
+		t.Errorf("one poll at once and no other: state %+v, asked %v", led.poll, src.fakeSource.asked)
 	}
 	if !strings.Contains(buf.String(), "poll_interval=1h0m0s") || !strings.Contains(buf.String(), "source=tautulli") {
-		t.Errorf("start record:\n%s", buf)
+		t.Errorf("start record:\n%s", buf.String())
 	}
 }
 

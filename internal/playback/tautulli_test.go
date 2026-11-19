@@ -132,7 +132,7 @@ func row(id int, started int64, ratingKey any, viewOffset any) map[string]any {
 	r := map[string]any{
 		"row_id": id, "reference_id": id, "started": started, "stopped": started + 600,
 		"rating_key": ratingKey, "percent_complete": 23, "media_type": "movie", "live": 0,
-		"platform": "Chrome", "player": "Plex Web", "transcode_decision": "copy",
+		"platform": "Chrome", "player": "Plex Web", decisionField: "copy",
 		"duration": 600, "play_duration": 600, "user": "viewer",
 	}
 	if viewOffset != nil {

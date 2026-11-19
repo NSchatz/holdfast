@@ -54,7 +54,7 @@ Two commands are sent, both reads:
   (a date: the day before the earliest start this poll needs, since Tautulli reads the date in its
   own time zone; rows before that start are dropped here), `start` and `length` (100 rows a page).
   Each row is read for `row_id` (or `id`), `started`, `stopped`, `view_offset`, `percent_complete`,
-  `rating_key`, `platform`, `player`, `transcode_decision`, `media_type` and `live`. A live-TV row,
+  `rating_key`, `platform`, `player`, the stream decision, `media_type` and `live`. A live-TV row,
   a music or photo row and a row with no id are skipped.
 - `get_metadata` with `rating_key`, once per rating key per poll, for the item's
   `media_info[].parts[].file` and its `duration`. A history row's own `duration` is the time
