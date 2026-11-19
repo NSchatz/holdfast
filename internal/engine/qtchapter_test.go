@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -24,29 +25,31 @@ const qtChapterLine = "Referenced QT chapter track not found"
 // movDemuxerLine is one line the mov demuxer logged, its message captured.
 var movDemuxerLine = regexp.MustCompile(`^\[mov,mp4,m4a,3gp,3g2,mj2 @ 0x[0-9a-f]+\] (.*)$`)
 
-// mkDanglingChapterMP4 writes a 2 s h264 and AAC MP4 muxed with two titled chapters, which
-// ffmpeg writes twice: as a QuickTime chapter track every other track references (`tref`
-// `chap`), and as Nero `chpl` chapters. It then frees the chapter track (its box renamed
-// `free`, which every reader skips and which moves no byte), leaving the reference dangling:
-// the shape a real library's MP4s were found in. nero also frees the Nero chapters, so the
-// file has no chapter table at all; stts also frees the audio track's `stts`, a real demuxer
-// error beside the benign one.
+// mkChapterMP4 writes a 2 s h264 and AAC MP4 muxed with two titled chapters, which ffmpeg
+// writes twice: as a QuickTime chapter track every other track references (`tref` `chap`), and
+// as Nero `chpl` chapters. faststart puts the movie before the media. edit then changes the
+// file's bytes in place (freeChapterTrack leaves the reference dangling, the shape a real
+// library's MP4s were found in).
 //
 // It returns the mov demuxer's messages, read off the pinned ffprobe directly, and fails the
 // test if ffprobe wrote any line the mov demuxer did not.
-func mkDanglingChapterMP4(t *testing.T, ffmpeg, ffprobe, path string, nero, stts bool) []string {
+func mkChapterMP4(t *testing.T, ffmpeg, ffprobe, path string, faststart bool, edit func(*testing.T, []byte)) []string {
 	t.Helper()
 	meta := chapterMeta(t, filepath.Join(t.TempDir(), "chapters.txt"),
 		[3]string{"0", "1000", "Opening"}, [3]string{"1000", "2000", "Close"})
-	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+	args := []string{"-hide_banner", "-loglevel", "error", "-y",
 		"-f", "lavfi", "-i", "testsrc2=duration=2:size=320x240:rate=10", "-f", "lavfi", "-i", "sine=duration=2",
 		"-i", meta, "-map", "0:v", "-map", "1:a", "-map_chapters", "2",
-		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", "8M", "-pix_fmt", "yuv420p", "-c:a", "aac", "--", path)
+		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", "8M", "-pix_fmt", "yuv420p", "-c:a", "aac"}
+	if faststart {
+		args = append(args, "-movflags", "+faststart")
+	}
+	ff(t, ffmpeg, append(args, "--", path)...)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	freeChapterTrack(t, b, nero, stts)
+	edit(t, b)
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +66,31 @@ func mkDanglingChapterMP4(t *testing.T, ffmpeg, ffprobe, path string, nero, stts
 		lines = append(lines, m[1])
 	}
 	return lines
+}
+
+// dangle leaves the chapter reference dangling, the Nero chapters kept (nero false) or freed.
+func dangle(nero, stts bool) func(*testing.T, []byte) {
+	return func(t *testing.T, b []byte) { freeChapterTrack(t, b, nero, stts) }
+}
+
+// audioTrack finds, in the MP4 ffmpeg wrote, its audio track and the movie holding it.
+func audioTrack(t *testing.T, b []byte) (trak, moov mp4Box) {
+	t.Helper()
+	for _, x := range mp4Boxes(t, b, 0, len(b)) {
+		if x.typ == "moov" {
+			moov = x
+		}
+	}
+	for _, x := range mp4Boxes(t, b, moov.off+8, moov.end) {
+		if x.typ != "trak" {
+			continue
+		}
+		if hdlr, ok := mp4Path(t, b, x, "mdia", "hdlr"); ok && string(b[hdlr.off+16:hdlr.off+20]) == "soun" {
+			return x, moov
+		}
+	}
+	t.Fatal("fixture: ffmpeg wrote no audio track")
+	return
 }
 
 // freeChapterTrack frees, in the MP4 ffmpeg wrote, the track each `tref` `chap` names, and
@@ -175,29 +203,30 @@ func mp4Path(t *testing.T, b []byte, parent mp4Box, typs ...string) (mp4Box, boo
 func mp4Free(b []byte, x mp4Box) { copy(b[x.off+4:x.off+8], "free") }
 
 // TestSourceDamaged_ADanglingQTChapterReferenceIsEncoded runs the real pipeline over an MP4
-// whose only demuxer line is the dangling chapter reference. It was recorded source-damaged and
-// flagged for a human; it is not damaged, so it is encoded and faces every gate like any other
-// source, and it passes them: the full decode, the intended-stream check, chapter parity
-// against the chapter table ffmpeg reads (the Nero chapters where the file has them, none where
-// it does not) and VMAF, into Matroska and back into MP4. The replacement carries exactly that table and
-// no dangling reference of its own.
+// whose only demuxer line is the dangling chapter reference and whose movie proves it. It was
+// recorded source-damaged and flagged for a human; it is not damaged, so it is encoded and faces
+// every gate like any other source, and it passes them: the full decode, the intended-stream
+// check, chapter parity against the chapter table ffmpeg reads (the Nero chapters where the file
+// has them, none where it does not) and VMAF, into Matroska and back into MP4, with the movie
+// after the media and before it. The replacement carries exactly that table and no dangling
+// reference of its own.
 func TestSourceDamaged_ADanglingQTChapterReferenceIsEncoded(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 	for _, tc := range []struct {
-		name      string
-		nero      bool // the Nero chapters freed too
-		container string
-		chapters  int
+		name            string
+		nero, faststart bool // the Nero chapters freed too; the movie before the media
+		container       string
+		chapters        int
 	}{
 		{name: "the Nero chapters kept, into Matroska", container: "mkv", chapters: 2},
-		{name: "the Nero chapters kept, into MP4", container: "source", chapters: 2},
-		{name: "no chapter table at all, into Matroska", nero: true, container: "mkv"},
+		{name: "the Nero chapters kept, the movie first, into MP4", faststart: true, container: "source", chapters: 2},
+		{name: "no chapter table at all, the movie first, into Matroska", nero: true, faststart: true, container: "mkv"},
 		{name: "no chapter table at all, into MP4", nero: true, container: "source"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			src := filepath.Join(dir, "movie.mp4")
-			if got := mkDanglingChapterMP4(t, ffmpeg, ffprobe, src, tc.nero, false); len(got) != 1 || got[0] != qtChapterLine {
+			if got := mkChapterMP4(t, ffmpeg, ffprobe, src, tc.faststart, dangle(tc.nero, false)); len(got) != 1 || got[0] != qtChapterLine {
 				t.Fatalf("precondition: the mov demuxer logged %q, want only %q", got, qtChapterLine)
 			}
 			prober := probe.New(ffmpeg, ffprobe)
@@ -249,7 +278,7 @@ func TestSourceDamaged_ADanglingQTChapterReferenceBesideDamageIsStillDamaged(t *
 	dir := t.TempDir()
 	src := filepath.Join(dir, "movie.mp4")
 	const broken = "stream 1, missing mandatory atoms, broken header"
-	if got := mkDanglingChapterMP4(t, ffmpeg, ffprobe, src, true, true); len(got) != 2 ||
+	if got := mkChapterMP4(t, ffmpeg, ffprobe, src, false, dangle(true, true)); len(got) != 2 ||
 		got[0] != broken || got[1] != qtChapterLine {
 		t.Fatalf("precondition: the mov demuxer logged %q, want %q then %q", got, broken, qtChapterLine)
 	}
@@ -276,4 +305,88 @@ func TestSourceDamaged_ADanglingQTChapterReferenceBesideDamageIsStillDamaged(t *
 	if len(flagged) != 1 || flagged[0]["diagnostic"] != broken {
 		t.Errorf("want one error record carrying diagnostic %q, got %v", broken, flagged)
 	}
+}
+
+// TestSourceDamaged_ATrackLostToAZeroedBoxIsStillDamaged: the dangling-chapter line is also the
+// ONLY thing ffprobe says about a movie that lost a real track. Zeroing the first 146 bytes of
+// the audio track turns it into a box of size 0, which the mov demuxer reads as running to the
+// end of the movie: the audio track and the chapter track behind it vanish, ffprobe reads one
+// video stream, and every later gate would measure the encode against that. Zeroing the audio
+// track from its first child to the end of the movie leaves it read as a data stream, so the
+// stream count still matches. Neither movie proves the dangling shape, so each is recorded
+// source-damaged, flagged for a human with the line as its diagnostic, with no ffmpeg run and
+// the source untouched, with the movie after the media and before it.
+func TestSourceDamaged_ATrackLostToAZeroedBoxIsStillDamaged(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	head := func(t *testing.T, b []byte) {
+		trak, _ := audioTrack(t, b)
+		clear(b[trak.off : trak.off+146])
+	}
+	tail := func(t *testing.T, b []byte) {
+		trak, moov := audioTrack(t, b)
+		clear(b[trak.off+8 : moov.end])
+	}
+	for _, tc := range []struct {
+		name      string
+		faststart bool
+		edit      func(*testing.T, []byte)
+		streams   string // the stream types ffprobe reads from the damaged file
+	}{
+		{name: "the audio track's head zeroed", edit: head, streams: "video"},
+		{name: "the audio track's head zeroed, the movie first", faststart: true, edit: head, streams: "video"},
+		{name: "the audio track zeroed to the end of the movie", edit: tail, streams: "video,data"},
+		{name: "the audio track zeroed to the end of the movie, the movie first", faststart: true, edit: tail, streams: "video,data"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, "movie.mp4")
+			if got := mkChapterMP4(t, ffmpeg, ffprobe, src, tc.faststart, tc.edit); len(got) != 1 || got[0] != qtChapterLine {
+				t.Fatalf("precondition: the mov demuxer logged %q, want only %q", got, qtChapterLine)
+			}
+			if got := streamTypes(t, ffprobe, src); got != tc.streams {
+				t.Fatalf("precondition: ffprobe reads streams %q, want %q: the audio track is not lost", got, tc.streams)
+			}
+			before := md5f(t, src)
+
+			eng, ts, ffmpegCalls, records := damageEngine(t, ffmpeg, ffprobe, dir, func(c *config.Config) {
+				c.ContainerExt = "mkv"
+				everyGate(c)
+			})
+			oneshot(t, eng)
+
+			if got := skipReason(t, ts, "movie.mp4"); got != SkipSourceDamaged {
+				t.Fatalf("skip reason = %q, want %q: a source that lost its audio track was let through", got, SkipSourceDamaged)
+			}
+			if n := ffmpegCalls(); n != 0 {
+				t.Errorf("ffmpeg ran %d time(s) for a source the probe found damaged", n)
+			}
+			if md5f(t, src) != before {
+				t.Error("the damaged source changed")
+			}
+			if _, err := os.Stat(filepath.Join(dir, "movie.mkv")); !os.IsNotExist(err) {
+				t.Errorf("a replacement was written beside the damaged source: %v", err)
+			}
+			var flagged []map[string]any
+			for _, rec := range records() {
+				if rec["file"] == src && rec["level"] == "ERROR" && rec["guard"] == SkipSourceDamaged {
+					flagged = append(flagged, rec)
+				}
+			}
+			if len(flagged) != 1 || flagged[0]["diagnostic"] != qtChapterLine {
+				t.Errorf("want one error record carrying diagnostic %q, got %v", qtChapterLine, flagged)
+			}
+		})
+	}
+}
+
+// streamTypes is the codec_type of every stream ffprobe reads from path, comma-separated, read
+// off the pinned ffprobe directly.
+func streamTypes(t *testing.T, ffprobe, path string) string {
+	t.Helper()
+	out, err := exec.Command(ffprobe, "-v", "quiet", "-show_entries", "stream=codec_type",
+		"-of", "csv=p=0", "--", path).Output()
+	if err != nil {
+		t.Fatalf("precondition: ffprobe did not run to completion on %s: %v", path, err)
+	}
+	return strings.Join(strings.Fields(string(out)), ",")
 }

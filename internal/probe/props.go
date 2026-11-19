@@ -68,9 +68,11 @@ type VideoProps struct {
 type ContainerDiagnostic struct {
 	// Demuxer is the demuxer that logged, as ffprobe names it (format_name).
 	Demuxer string
-	// First is the first message it logged, without ffmpeg's context prefix.
+	// First is the first message it logged that counts as damage, without ffmpeg's context
+	// prefix.
 	First string
-	// Count is how many error-level lines it logged in all.
+	// Count is how many error-level lines it logged that count as damage: every line but those
+	// on benignDemuxerLines, or, where it logged only those, the lines whose proof did not hold.
 	Count int
 }
 
@@ -99,7 +101,11 @@ const scalarStreamEntries = "codec_name,bit_rate,field_order,codec_tag_string,pi
 // `format=format_name` rides along for the same reason: it names the demuxer, which is how a
 // line on this process's stderr is attributed to the container rather than to a decoder (see
 // ContainerDamage). No stream section prints that key, so it overwrites nothing.
-const snapshotEntries = "stream=" + scalarStreamEntries + ":format=duration,format_name"
+//
+// `format=nb_streams` rides along too: how many streams of every type the demuxer read, which
+// a benign demuxer line's proof compares with the file's own structure (benignDemuxerLines).
+// No stream section prints that key either.
+const snapshotEntries = "stream=" + scalarStreamEntries + ":format=duration,format_name,nb_streams"
 
 // VideoProps takes one snapshot of f's source properties. The constructor runs a
 // single ffprobe (all scalar stream fields at once); the side-data probes and the
@@ -115,8 +121,9 @@ func (p *Prober) VideoProps(ctx context.Context, f string) *VideoProps {
 	// deferred to first access — an already-target-codec file returns at the codec
 	// guard having paid exactly this one probe.
 	fields, diag := p.scalarFields(ctx, f)
+	proven := func(b benignLine) bool { return b.proven(f, fields) }
 	return &VideoProps{p: p, ctx: ctx, f: f, fields: fields,
-		demuxErr: diag.fromDemuxer(fields["format_name"], fields["codec_name"])}
+		demuxErr: diag.fromDemuxer(fields["format_name"], fields["codec_name"], proven)}
 }
 
 // scalarFields fetches every scalar stream entry (plus the container duration) in one
@@ -170,43 +177,60 @@ func (p *Prober) scalarFields(ctx context.Context, f string) (map[string]string,
 // attributed to the demuxer. An unestablished answer here sends the file on to the encode and
 // the full gate, which is where it went before this signal existed.
 //
-// A line on benignDemuxerLines is set aside as though it had not been logged: it is neither
-// the First nor in the Count, so a demuxer that logged only such lines reports no damage. Any
-// other line from the demuxer is damage, alone or alongside one of them.
+// A line on benignDemuxerLines is set aside only where the file itself proves the shape the
+// line describes, and a demuxer that logged nothing else then reports no damage. Any other line
+// from the demuxer is damage, alone or alongside one of them, and is what is reported (First,
+// and the Count of such lines); a benign line whose proof does not hold is damage too, and is
+// then the First.
 func (vp *VideoProps) ContainerDamage() (ContainerDiagnostic, bool) {
 	return vp.demuxErr, vp.demuxErr.Count > 0
 }
 
-// benignDemuxerLines is the CLOSED list of demuxer lines that are not damage: messages a
-// demuxer logs at error level about a file whose every stream it demuxes whole. An entry is
-// matched on the demuxer that logged it AND its whole message, never a part of either, so it
-// cannot swallow another diagnostic that shares its words or another demuxer's line. Each
-// entry carries its argument; a line joins only with one, and a line nobody has argued for is
-// damage.
+// benignDemuxerLines is the CLOSED list of demuxer lines that are not damage when the file
+// shows the shape the line describes. An entry is matched on the demuxer that logged it AND its
+// whole message, never a part of either, so it cannot swallow another diagnostic that shares its
+// words or another demuxer's line. Then it is excused only on POSITIVE evidence read off the
+// file (proven): a line can be both a harmless note and the only symptom of real damage, and only
+// the file can say which. Each entry carries its argument and its proof; a line nobody has argued
+// for, or whose proof does not hold, is damage.
 //
 // Passing this guard decides nothing about the swap: a file it lets through still faces every
 // gate after the encode (the full decode, the intended-stream check, chapter parity, VMAF).
 // The argument and the proof: docs/design/source-damage.md#benign-demuxer-lines.
-var benignDemuxerLines = []struct{ demuxer, message string }{
-	// The movie's track reference (`tref` `chap`) names a QuickTime chapter track the file
+var benignDemuxerLines = []benignLine{
+	// The movie's track reference (`tref` `chap`) names a QuickTime chapter track the movie
 	// does not carry, as a remux that dropped the chapter track and kept the reference leaves
-	// it. The mov demuxer logs this, reads no chapters from the missing track and carries on:
-	// every stream demuxes and decodes cleanly, a strict full decode (`-xerror -err_detect
-	// +explode`) included. Nothing the encode reads is missing, and the chapter table ffmpeg
-	// does read (none, or the file's Nero `chpl` chapters) is the one the encode copies and
-	// the chapter-parity gate holds the output to.
-	{demuxer: "mov,mp4,m4a,3gp,3g2,mj2", message: "Referenced QT chapter track not found"},
+	// it. The mov demuxer logs this, reads no chapters from the missing track and carries on.
+	// But it logs the same line when a damaged movie lost the chapter track: a zero-size box
+	// swallows the rest of the movie, a real track with it. So the line is excused only where
+	// the movie's own boxes show it whole and the reference dangling
+	// (chapterReferenceDangles). Then nothing the encode reads is missing, and the chapter
+	// table ffmpeg does read (none, or the file's Nero `chpl` chapters) is the one the encode
+	// copies and the chapter-parity gate holds the output to.
+	{demuxer: "mov,mp4,m4a,3gp,3g2,mj2", message: "Referenced QT chapter track not found",
+		proven: func(f string, fields map[string]string) bool {
+			n, ok := positiveInt(fields["nb_streams"])
+			return ok && chapterReferenceDangles(f, n)
+		}},
 }
 
-// benignDemuxerLine reports whether msg, logged by the context named name, is on
-// benignDemuxerLines.
-func benignDemuxerLine(name, msg string) bool {
-	for _, b := range benignDemuxerLines {
+// benignLine is one entry of benignDemuxerLines.
+type benignLine struct {
+	demuxer, message string
+	// proven reports whether the file f, whose snapshot probe read fields, shows the shape the
+	// line describes. False on any doubt.
+	proven func(f string, fields map[string]string) bool
+}
+
+// benignDemuxerLine returns the index on benignDemuxerLines of msg logged by the context named
+// name, or -1 where it is not on the list.
+func benignDemuxerLine(name, msg string) int {
+	for i, b := range benignDemuxerLines {
 		if name == b.demuxer && msg == b.message {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
 }
 
 // decoderNamedAsDemuxer maps a video codec to the name its ffmpeg decoder logs under, for
@@ -227,6 +251,9 @@ type diagnostics struct {
 	partial []byte
 	first   map[string]string
 	count   map[string]int
+	// benign counts, per context, the lines it logged that are on benignDemuxerLines, by
+	// their index there. They are kept out of first and count until their proof is asked.
+	benign map[string][]int
 }
 
 // Write takes stderr as ffprobe writes it; it never fails, so the probe is never stopped by
@@ -252,14 +279,25 @@ func (d *diagnostics) keep(b []byte) {
 	}
 }
 
-// flush records the line being read, if there is one and it is not a benign demuxer line.
+// flush records the line being read, if there is one: a line on benignDemuxerLines apart
+// from the others.
 func (d *diagnostics) flush() {
 	if len(d.partial) == 0 {
 		return
 	}
 	name, msg, ok := logContext(string(d.partial))
 	d.partial = d.partial[:0]
-	if !ok || benignDemuxerLine(name, msg) {
+	if !ok {
+		return
+	}
+	if i := benignDemuxerLine(name, msg); i >= 0 {
+		if d.benign == nil {
+			d.benign = map[string][]int{}
+		}
+		if d.benign[name] == nil {
+			d.benign[name] = make([]int, len(benignDemuxerLines))
+		}
+		d.benign[name][i]++
 		return
 	}
 	if d.count == nil {
@@ -272,12 +310,22 @@ func (d *diagnostics) flush() {
 }
 
 // fromDemuxer is what the context named format logged, when that context can only be the
-// demuxer (see ContainerDamage), and nothing otherwise.
-func (d *diagnostics) fromDemuxer(format, codec string) ContainerDiagnostic {
-	if format == "" || format == codec || format == decoderNamedAsDemuxer[codec] || d.count[format] == 0 {
+// demuxer (see ContainerDamage), and nothing otherwise. Its lines that are not on
+// benignDemuxerLines are reported first; failing those, a benign line proven does not hold for
+// is reported; a demuxer that logged only benign lines, each proven, reports nothing.
+func (d *diagnostics) fromDemuxer(format, codec string, proven func(benignLine) bool) ContainerDiagnostic {
+	if format == "" || format == codec || format == decoderNamedAsDemuxer[codec] {
 		return ContainerDiagnostic{}
 	}
-	return ContainerDiagnostic{Demuxer: format, First: d.first[format], Count: d.count[format]}
+	if n := d.count[format]; n > 0 {
+		return ContainerDiagnostic{Demuxer: format, First: d.first[format], Count: n}
+	}
+	for i, n := range d.benign[format] {
+		if n > 0 && !proven(benignDemuxerLines[i]) {
+			return ContainerDiagnostic{Demuxer: format, First: benignDemuxerLines[i].message, Count: n}
+		}
+	}
+	return ContainerDiagnostic{}
 }
 
 // logContext splits one line of ffmpeg's log into the name of the context that logged it and

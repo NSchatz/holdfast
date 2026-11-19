@@ -10,7 +10,7 @@ reasoning lives in the document, not in this index.
   [`docs/design/swap.md`](swap.md#swap-invariant).
 - **An output replaces its source only when it carries the source's chapter table, and a source's own malformed table reproduced exactly passes** -
   [`docs/design/swap.md`](swap.md#chapter-parity).
-- **A source is skipped as damaged only on a line its demuxer logged, and a line on the closed benign list is not damage on its own** -
+- **A source is skipped as damaged only on a line its demuxer logged, and a line on the closed benign list is excused only where the file's own structure proves the shape it describes** -
   [`docs/design/source-damage.md`](source-damage.md#source-damaged).
 - **The quality gate bounds the worst frame, not only the average** -
   [`docs/design/quality-gate.md`](quality-gate.md#vmaf-pooling).
