@@ -58,18 +58,33 @@ const rerootMinCoverage = 0.5
 // rerootEvidence is what the files at the two paths say about the plan.
 type rerootEvidence struct {
 	// Checked is every recorded file read; Matched those found as recorded, SameFile the
-	// part of Matched proven by one identity at both paths; Absent those at neither path.
+	// part of Matched proven by one identity at both paths; Absent those carried as gone.
 	Checked, Matched, SameFile, Absent int
 	// Replaced are media files at --to only that match no fingerprint recorded for their
 	// path: replaced since under the same name, and carried as recorded.
 	Replaced []rerootFinding
-	// RetainedMismatched are retained originals not the recorded size, or unreadable. Any
-	// one refuses: a restore renames that file over a library file.
+	// RetainedMismatched are retained originals not the recorded size, not a regular file,
+	// or unreadable. Any one refuses: a restore renames that file over a library file.
 	RetainedMismatched []rerootFinding
 	// Copies are files at both paths with two identities, or whose identity could not be
 	// read at one of them. LeftBehind are files at --from only. Any one refuses.
 	Copies, LeftBehind []rerootFinding
+
+	// FromSeen is whether --from is a directory this process can see, and Witnesses how many
+	// recorded files are there. The identity check ran only where both hold: an old mount
+	// point left empty is a directory that proves nothing.
+	FromSeen  bool
+	Witnesses int
+	// MissingRetained are live retained originals absent under --to while the identity check
+	// could not run, so nothing shows whether the original is gone or only out of sight. They
+	// refuse unless --carry-missing-retained acknowledges them; CarriedMissingRetained counts
+	// the ones it carried (they are in Absent too).
+	MissingRetained        []rerootFinding
+	CarriedMissingRetained int
 }
+
+// identityChecked reports whether the old tree was there to compare against.
+func (r rerootEvidence) identityChecked() bool { return r.FromSeen && r.Witnesses > 0 }
 
 // rerootFinding is one file that is not what the ledger recorded, or not where it should be.
 type rerootFinding struct {
@@ -96,56 +111,109 @@ func notThere(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
-// checkRerootEvidence reads every recorded file at its old path and its new one. The stat
-// FOLLOWS a symbolic link, as probe.Fingerprint does, and the attributes are read through
-// probe.AttributesOf, the one derivation every recorded fingerprint came from.
-func checkRerootEvidence(evidence []store.RerootEvidence) rerootEvidence {
+// checkRerootEvidence reads every recorded file at its old path and its new one.
+//
+// Presence and identity are read with Lstat, of the ENTRY at each path: one file on two mounts
+// is one entry, the same device and inode at both paths, while a --to tree of symbolic links
+// into a still-present --from is a different entry from the file it points at, and refuses as
+// a copy. Where only --to holds the file its attributes are read with Stat, FOLLOWING a link
+// as probe.Fingerprint does, through probe.AttributesOf, the one derivation every recorded
+// fingerprint came from.
+func checkRerootEvidence(evidence []store.RerootEvidence, from string, carryMissingRetained bool) rerootEvidence {
 	var res rerootEvidence
-	for _, e := range evidence {
+	if fi, err := os.Stat(from); err == nil && fi.IsDir() {
+		res.FromSeen = true
+	}
+	type seen struct {
+		atNew, atOld   os.FileInfo
+		errNew, errOld error
+	}
+	reads := make([]seen, len(evidence))
+	for i, e := range evidence {
+		r := &reads[i]
+		r.atNew, r.errNew = os.Lstat(e.Path)
+		r.atOld, r.errOld = os.Lstat(e.Was)
+		if r.errOld == nil {
+			res.Witnesses++
+		}
+	}
+
+	for i, e := range evidence {
 		res.Checked++
+		r := reads[i]
 		recorded := recordedOf(e)
-		atNew, errNew := os.Stat(e.Path)
-		atOld, errOld := os.Stat(e.Was)
-		newGone, oldGone := errNew != nil && notThere(errNew), errOld != nil && notThere(errOld)
+		newGone, oldGone := r.errNew != nil && notThere(r.errNew), r.errOld != nil && notThere(r.errOld)
+		finding := func(now string) rerootFinding { return rerootFinding{Path: e.Path, Recorded: recorded, Now: now} }
 
 		switch {
-		case errOld != nil && !oldGone:
-			res.Copies = append(res.Copies, rerootFinding{Path: e.Path, Recorded: recorded,
-				Now: fmt.Sprintf("unreadable at %s (%v), so whether it is the same file cannot be established", e.Was, errOld)})
-		case newGone && oldGone:
+		case r.errOld != nil && !oldGone:
+			res.Copies = append(res.Copies, finding(fmt.Sprintf("unreadable at %s (%v), so whether it is the same "+
+				"file cannot be established", e.Was, r.errOld)))
+		case newGone && !oldGone:
+			res.LeftBehind = append(res.LeftBehind, finding("not there, and still at "+e.Was))
+		case newGone && e.Retained && !res.identityChecked():
+			// Gone from --to, and --from could not be looked at: the original may be out of
+			// sight rather than gone, and the restore that meets this record after the move
+			// drops it as unrestorable. So it is carried only on an acknowledgement.
+			if !carryMissingRetained {
+				res.MissingRetained = append(res.MissingRetained, finding("not there, and "+e.Was+" could not be checked"))
+				continue
+			}
+			res.CarriedMissingRetained++
 			res.Absent++
 		case newGone:
-			res.LeftBehind = append(res.LeftBehind, rerootFinding{Path: e.Path, Recorded: recorded,
-				Now: "not there, and still at " + e.Was})
-		case errNew != nil:
-			f := rerootFinding{Path: e.Path, Recorded: recorded, Now: fmt.Sprintf("unreadable (%v)", errNew)}
-			if e.Retained {
-				res.RetainedMismatched = append(res.RetainedMismatched, f)
-			} else {
-				res.Replaced = append(res.Replaced, f)
-			}
-		case !oldGone && !os.SameFile(atOld, atNew):
-			res.Copies = append(res.Copies, rerootFinding{Path: e.Path, Recorded: recorded,
-				Now: "a different file from the one still at " + e.Was})
-		case e.Retained && atNew.Size() != e.RetainedBytes:
-			res.RetainedMismatched = append(res.RetainedMismatched, rerootFinding{Path: e.Path, Recorded: recorded,
-				Now: fmt.Sprintf("%d bytes", atNew.Size())})
+			res.Absent++
+		case r.errNew != nil:
+			res.notAsRecorded(e, finding(fmt.Sprintf("unreadable (%v)", r.errNew)))
 		case !oldGone:
-			// One file on two mounts: whatever has happened to it since, this is the tree.
-			res.Matched++
-			res.SameFile++
+			switch {
+			case !os.SameFile(r.atOld, r.atNew):
+				res.Copies = append(res.Copies, finding("a different file from the one still at "+e.Was))
+			case e.Retained && (!r.atNew.Mode().IsRegular() || r.atNew.Size() != e.RetainedBytes):
+				res.RetainedMismatched = append(res.RetainedMismatched, finding(retainedNow(r.atNew)))
+			default:
+				// One entry on two mounts: whatever has happened to the file since, this is the tree.
+				res.Matched++
+				res.SameFile++
+			}
 		case e.Retained:
-			res.Matched++
+			if r.atNew.Mode().IsRegular() && r.atNew.Size() == e.RetainedBytes {
+				res.Matched++
+			} else {
+				res.RetainedMismatched = append(res.RetainedMismatched, finding(retainedNow(r.atNew)))
+			}
 		default:
+			atNew, err := os.Stat(e.Path)
+			if err != nil {
+				res.notAsRecorded(e, finding(fmt.Sprintf("unreadable (%v)", err)))
+				continue
+			}
 			now := probe.AttributesOf(atNew).String()
 			if anyEquals(e.Fingerprints, now) {
 				res.Matched++
 			} else {
-				res.Replaced = append(res.Replaced, rerootFinding{Path: e.Path, Recorded: recorded, Now: now})
+				res.Replaced = append(res.Replaced, finding(now))
 			}
 		}
 	}
 	return res
+}
+
+// notAsRecorded files a file that could not be read as recorded: a retained original refuses,
+// a media file counts as replaced.
+func (r *rerootEvidence) notAsRecorded(e store.RerootEvidence, f rerootFinding) {
+	if e.Retained {
+		r.RetainedMismatched = append(r.RetainedMismatched, f)
+		return
+	}
+	r.Replaced = append(r.Replaced, f)
+}
+
+func retainedNow(fi os.FileInfo) string {
+	if !fi.Mode().IsRegular() {
+		return "not a regular file (" + fi.Mode().Type().String() + ")"
+	}
+	return fmt.Sprintf("%d bytes", fi.Size())
 }
 
 func recordedOf(e store.RerootEvidence) string {
@@ -204,21 +272,43 @@ func (r rerootEvidence) refusal(from, to string, minMatch, minCoverage float64) 
 			"(a match ratio of %.3f, under the --min-match threshold of %g), so %s is not shown to be the same "+
 			"files as %s: an unrelated tree matches almost nothing, and the same tree replaces only a few",
 			r.Matched, r.Matched+len(r.Replaced), to, r.ratio(), minMatch, to, from), "", nil
+	case len(r.MissingRetained) > 0:
+		return fmt.Sprintf("%d retained original(s) the undo window still holds are not under %s (named above), "+
+			"and %s could not be checked, so nothing shows whether each original is gone or only out of sight. "+
+			"Carried to the new path, the next restore of one would find nothing there and drop its record. "+
+			"Make %s visible to this command (bind it read-only into the container) so the old path can be "+
+			"checked, or, if those originals are known to be gone, run again with --carry-missing-retained, which "+
+			"carries their records as recorded for the undo window to drop as missing",
+			len(r.MissingRetained), to, from, from), "retained original missing", r.MissingRetained
 	}
 	return "", "", nil
 }
 
-func printRerootEvidence(w io.Writer, r rerootEvidence, to string, minMatch, minCoverage float64) {
+func printRerootEvidence(w io.Writer, r rerootEvidence, from, to string, minMatch, minCoverage float64) {
 	fmt.Fprintf(w, "evidence: of %d file(s) the ledger recorded, %d are under %s as recorded (%d of them the "+
 		"same file at both paths), %d were replaced since (carried as recorded), %d are at neither path "+
 		"(deleted since; carried as recorded), %d differ from or are only at the old path, and %d retained "+
-		"original(s) are not the recorded size\n",
+		"original(s) are not the recorded size or are missing\n",
 		r.Checked, r.Matched, to, r.SameFile, len(r.Replaced), r.Absent, len(r.Copies)+len(r.LeftBehind),
-		len(r.RetainedMismatched))
+		len(r.RetainedMismatched)+len(r.MissingRetained))
 	fmt.Fprintf(w, "evidence: match ratio %d/%d = %.3f, threshold %g (--min-match); coverage %d/%d = %.3f, "+
 		"threshold %g (--min-coverage)\n", r.Matched, r.Matched+len(r.Replaced), r.ratio(), minMatch,
 		r.Matched, r.Checked, r.coverage(), minCoverage)
 	printFindings(w, "replaced since (carried as recorded)", r.Replaced)
+	switch {
+	case r.identityChecked():
+		fmt.Fprintf(w, "evidence: %s can be seen and holds %d of the recorded files, so each file at both "+
+			"paths was checked to be one file\n", from, r.Witnesses)
+	case r.FromSeen:
+		fmt.Fprintf(w, "evidence: %s holds none of the recorded files (an empty mount point?), so the identity "+
+			"check was not run\n", from)
+	default:
+		fmt.Fprintf(w, "evidence: %s cannot be seen from here, so the identity check was not run\n", from)
+	}
+	if r.CarriedMissingRetained > 0 {
+		fmt.Fprintf(w, "evidence: %d retained original(s) not under %s carried as recorded (--carry-missing-retained); "+
+			"the undo window drops them as missing\n", r.CarriedMissingRetained, to)
+	}
 }
 
 // printFindings prints a bounded sample, each with what was recorded and what is there now.

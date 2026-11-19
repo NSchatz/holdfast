@@ -687,3 +687,24 @@ func TestOpenExclusiveCurrent_RefusesAnOlderSchemaAndChangesNothing(t *testing.T
 	}
 	_ = st.Close()
 }
+
+// TestPlanReroot_ARestoredRetentionIsNoEvidence: a restore renamed the retained file back over
+// its source, so a restored record's retained path is empty by design. It is carried with the
+// rest and offers no evidence; a live record's retained path does.
+func TestPlanReroot_ARestoredRetentionIsNoEvidence(t *testing.T) {
+	s := openTest(t)
+	seedEveryTable(t, s, oldRoot, 1)
+	execSQL(t, s, `UPDATE retained_originals SET restored_at = 300`)
+	plan, err := s.PlanReroot(context.Background(), oldRoot, newRoot)
+	if err != nil {
+		t.Fatalf("PlanReroot: %v", err)
+	}
+	for _, e := range plan.Evidence {
+		if e.Retained {
+			t.Errorf("a restored retention's retained path is offered as evidence: %+v", e)
+		}
+	}
+	if got := countOf(plan, "retained_originals", "retained_path"); got != 1 {
+		t.Errorf("the restored retention's retained_path is not carried: %d value(s), want 1", got)
+	}
+}

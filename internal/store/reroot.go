@@ -591,11 +591,14 @@ func planJobsEvidence(ctx context.Context, q querier, from, to string, evidence 
 }
 
 // planRetainedEvidence records what each retention carried says about its two files: the
-// fingerprint the swap left at swapped_path, and the size of the original its retained
-// link holds.
+// fingerprint the swap left at swapped_path, and - for a retention the undo window still
+// holds - the size of the original its retained link holds. A RESTORED retention's retained
+// file was renamed back over its source by the restore, so its absence is the record's own
+// account of it and says nothing about the tree: it is carried, and is no evidence.
 func planRetainedEvidence(ctx context.Context, q querier, from, to string, evidence map[string]*RerootEvidence) error {
 	rows, err := q.QueryContext(ctx,
-		`SELECT swapped_path, swapped_fingerprint, retained_path, source_bytes FROM retained_originals
+		`SELECT swapped_path, swapped_fingerprint, retained_path, source_bytes, restored_at IS NOT NULL
+		 FROM retained_originals
 		 WHERE `+underClause("swapped_path")+` OR `+underClause("retained_path")+` ORDER BY source_path`,
 		append(underArgs(from), underArgs(from)...)...)
 	if err != nil {
@@ -605,11 +608,15 @@ func planRetainedEvidence(ctx context.Context, q querier, from, to string, evide
 	for rows.Next() {
 		var swapped, fp, retained string
 		var bytes int64
-		if err := rows.Scan(&swapped, &fp, &retained, &bytes); err != nil {
+		var restored bool
+		if err := rows.Scan(&swapped, &fp, &retained, &bytes, &restored); err != nil {
 			return fmt.Errorf("store: reroot: read retained originals: %w", err)
 		}
 		if nv, ok := RerootPath(swapped, from, to); ok {
 			addFingerprint(evidenceAt(evidence, swapped, nv), fp)
+		}
+		if restored {
+			continue
 		}
 		if nv, ok := RerootPath(retained, from, to); ok {
 			e := evidenceAt(evidence, retained, nv)

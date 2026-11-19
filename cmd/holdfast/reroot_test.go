@@ -203,7 +203,9 @@ func TestReroot_DryRunReportsEveryTableAndTheEvidenceAndRewritesNothing(t *testi
 		"in all                      5 row(s)",
 		"of 4 file(s) the ledger recorded, 3 are under " + f.newRoot + " as recorded (0 of them the same file at " +
 			"both paths), 0 were replaced since (carried as recorded), 1 are at neither path (deleted since; carried " +
-			"as recorded), 0 differ from or are only at the old path, and 0 retained original(s) are not the recorded size",
+			"as recorded), 0 differ from or are only at the old path, and 0 retained original(s) are not the recorded " +
+			"size or are missing",
+		"evidence: " + f.oldRoot + " cannot be seen from here, so the identity check was not run",
 		"match ratio 3/3 = 1.000, threshold 0.95 (--min-match); coverage 3/4 = 0.750, threshold 0.5 (--min-coverage)",
 		"--apply",
 	} {
@@ -321,7 +323,7 @@ func TestReroot_Refusals(t *testing.T) {
 				t.Fatal(err)
 			}
 			return []string{"--config", f.cfgPath, "--from", f.oldRoot, "--to", f.newRoot, "--apply"}
-		}, 1, []string{"none of the 4 file(s) the ledger recorded under", "(0 found replaced, 4 gone)", "nothing shows"}},
+		}, 1, []string{"none of the 4 file(s) the ledger recorded under", "(0 found replaced, 3 gone)", "nothing shows"}},
 		{"too few of the files under --to are the ones recorded", func(t *testing.T, f *rerootFixture) []string {
 			ep := filepath.Join(f.newRoot, "tv", "Show", "ep.mkv")
 			if err := os.WriteFile(ep, []byte("a different file at the same name"), 0o644); err != nil {
@@ -927,5 +929,190 @@ func TestReroot_PlaybackEvidenceFollowsTheRenamedRoot(t *testing.T) {
 	if added, superseded, err := st.RecordSwaps(ctx, 200); err != nil || added != 0 || superseded != 0 {
 		t.Errorf("the next poll's RecordSwaps added %d and superseded %d (%v); want the carried swap found as it is",
 			added, superseded, err)
+	}
+}
+
+func (f *rerootFixture) retainedAtNew() string {
+	return filepath.Join(f.newRoot, "movies", ".holdfast-undo", "film.25-1.__undo__.mkv.holdfast-undo")
+}
+
+// linkOldMount puts the old tree back beside the new one as a second name for every entry:
+// the same device and inode at both paths, which is what two mounts of one filesystem show
+// and what a test can make without mounting.
+func linkOldMount(t *testing.T, f *rerootFixture) {
+	t.Helper()
+	err := filepath.WalkDir(f.newRoot, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(f.newRoot, p)
+		if d.IsDir() {
+			return os.MkdirAll(filepath.Join(f.oldRoot, rel), 0o755)
+		}
+		return os.Link(p, filepath.Join(f.oldRoot, rel))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestReroot_ARetainedOriginalMissingUnderTo: a retention the undo window still holds whose
+// retained original is not under --to is carried silently only where --from was checked and
+// it is gone there too. Where --from cannot be checked (the container run mounts only the
+// new root, or the old mount point is left empty) the original may be out of sight rather
+// than gone, and the restore after the move would drop its record: so the reroot refuses,
+// naming the record and --carry-missing-retained, the acknowledgement that carries it.
+func TestReroot_ARetainedOriginalMissingUnderTo(t *testing.T) {
+	t.Run("refused by default with --from unseen", func(t *testing.T) {
+		f := newRerootFixture(t)
+		if err := os.Remove(f.retainedAtNew()); err != nil {
+			t.Fatal(err)
+		}
+		before := ledgerDump(t, f.db)
+		code, out, errOut := f.reroot(t, "--apply")
+		for _, want := range []string{
+			"retained original missing: " + f.retainedAtNew() + " - the ledger recorded a retained original of 25 bytes, " +
+				"and it is not there, and " + filepath.Join(f.oldRoot, "movies", ".holdfast-undo", "film.25-1.__undo__.mkv.holdfast-undo") +
+				" could not be checked",
+			"1 retained original(s) the undo window still holds are not under " + f.newRoot,
+			"--carry-missing-retained",
+		} {
+			if !strings.Contains(errOut, want) {
+				t.Errorf("the refusal does not say %q:\n%s", want, errOut)
+			}
+		}
+		if code != 1 || !strings.Contains(out, f.oldRoot+" cannot be seen from here, so the identity check was not run") {
+			t.Errorf("exited %d, want 1 with the report saying the identity check did not run:\n%s", code, out)
+		}
+		if after := ledgerDump(t, f.db); !reflect.DeepEqual(before, after) {
+			t.Error("a refused reroot changed the ledger")
+		}
+	})
+
+	t.Run("refused with --from an empty mount point", func(t *testing.T) {
+		f := newRerootFixture(t)
+		if err := os.Remove(f.retainedAtNew()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(f.oldRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		code, out, errOut := f.reroot(t, "--apply")
+		if code != 1 || !strings.Contains(errOut, "--carry-missing-retained") ||
+			!strings.Contains(out, f.oldRoot+" holds none of the recorded files (an empty mount point?), so the identity check was not run") {
+			t.Errorf("an empty old mount point exited %d, want the refusal and the report that it proves nothing:\n%s%s", code, out, errOut)
+		}
+	})
+
+	t.Run("carried with --carry-missing-retained", func(t *testing.T) {
+		f := newRerootFixture(t)
+		if err := os.Remove(f.retainedAtNew()); err != nil {
+			t.Fatal(err)
+		}
+		code, out, errOut := f.reroot(t, "--carry-missing-retained", "--apply")
+		if code != 0 {
+			t.Fatalf("exited %d: %s", code, errOut)
+		}
+		if !strings.Contains(out, "1 retained original(s) not under "+f.newRoot+" carried as recorded (--carry-missing-retained)") {
+			t.Errorf("the report does not say the missing retained original was carried:\n%s", out)
+		}
+		st, err := store.OpenReadOnly(f.db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = st.Close() }()
+		film := filepath.Join(f.newRoot, "movies", "film.mkv")
+		if r, ok, err := st.GetRetained(context.Background(), film); err != nil || !ok || r.RetainedPath != f.retainedAtNew() {
+			t.Errorf("the retention was not carried as recorded: %+v %v %v", r, ok, err)
+		}
+	})
+
+	t.Run("a restored retention never counts", func(t *testing.T) {
+		f := newRerootFixture(t)
+		seedLedger(t, f.state, func(st *store.SQLite) {
+			if err := st.MarkRestored(context.Background(), filepath.Join(f.oldRoot, "movies", "film.mkv"), 300); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if err := os.Remove(f.retainedAtNew()); err != nil {
+			t.Fatal(err)
+		}
+		if code, _, errOut := f.reroot(t, "--apply"); code != 0 {
+			t.Errorf("a restored retention's absent retained file refused the reroot (exit %d): %s", code, errOut)
+		}
+	})
+
+	t.Run("--from checked and gone there too", func(t *testing.T) {
+		f := newRerootFixture(t)
+		linkOldMount(t, f)
+		for _, p := range []string{f.retainedAtNew(), filepath.Join(f.oldRoot, "movies", ".holdfast-undo", "film.25-1.__undo__.mkv.holdfast-undo")} {
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+		}
+		code, out, errOut := f.reroot(t, "--apply")
+		if code != 0 {
+			t.Fatalf("a retained original gone from both paths, with --from checked, refused (exit %d): %s", code, errOut)
+		}
+		if !strings.Contains(out, f.oldRoot+" can be seen and holds 2 of the recorded files") {
+			t.Errorf("the report does not say the identity check ran:\n%s", out)
+		}
+	})
+}
+
+// TestReroot_ATreeOfLinksIntoFromIsACopy: a --to tree of symbolic links into a still-present
+// --from resolves to the same files, and a Stat that followed the links would call each one
+// the same file at both paths. The entries are compared instead, and a link is not the file
+// it points at.
+func TestReroot_ATreeOfLinksIntoFromIsACopy(t *testing.T) {
+	f := newRerootFixture(t)
+	moveBack(t, f)
+	err := filepath.WalkDir(f.oldRoot, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(f.oldRoot, p)
+		if d.IsDir() {
+			return os.MkdirAll(filepath.Join(f.newRoot, rel), 0o755)
+		}
+		return os.Symlink(p, filepath.Join(f.newRoot, rel))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := ledgerDump(t, f.db)
+	code, _, errOut := f.reroot(t, "--apply")
+	if code != 1 || !strings.Contains(errOut, "3 recorded file(s) are a different file at each path") {
+		t.Errorf("a tree of links into --from exited %d, want 1 refusing it as a copy:\n%s", code, errOut)
+	}
+	if after := ledgerDump(t, f.db); !reflect.DeepEqual(before, after) {
+		t.Error("a refused reroot changed the ledger")
+	}
+}
+
+// TestReroot_PreviewAnApplyOnACopyOfTheLedger is the preview route the dry run's refusal of an
+// older ledger names: --apply against a copy of the state directory, chosen with
+// HOLDFAST_STATE_DIR, rewrites the copy and leaves the ledger itself exactly as it was.
+func TestReroot_PreviewAnApplyOnACopyOfTheLedger(t *testing.T) {
+	f := newRerootFixture(t)
+	scratch := t.TempDir()
+	body, err := os.ReadFile(f.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scratch, "jobs.db"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := ledgerDump(t, f.db)
+
+	t.Setenv("HOLDFAST_STATE_DIR", scratch)
+	if code, _, errOut := f.reroot(t, "--apply"); code != 0 {
+		t.Fatalf("--apply against the copy exited %d: %s", code, errOut)
+	}
+	if left := ledgerNames(t, filepath.Join(scratch, "jobs.db"), f.oldRoot); len(left) != 0 {
+		t.Errorf("the copy still names %s: %v", f.oldRoot, left)
+	}
+	if after := ledgerDump(t, f.db); !reflect.DeepEqual(before, after) {
+		t.Error("an --apply against a copy changed the ledger itself")
 	}
 }

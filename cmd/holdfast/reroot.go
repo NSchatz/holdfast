@@ -48,6 +48,8 @@ Flags:
                recorded file (default 0.95; above 0 and at most 1)
   --min-coverage  the share of ALL the recorded files, deleted ones included, that must be
                under --to as recorded (default 0.5; above 0 and at most 1)
+  --carry-missing-retained  carry, as recorded, the retained originals that are not under
+               --to when --from cannot be checked (the undo window then drops them as missing)
 
 It is for a library that MOVED: the same filesystem mounted at a new path, with
 library_roots edited to match. Every path the ledger records at or under --from (job rows,
@@ -66,14 +68,20 @@ device and inode) at --to: two different files is a copy, not a move, and a file
 --from is a partial copy or the wrong --to; either refuses. Of the rest, at least one, at
 least --min-match of those found under --to and at least --min-coverage of all of them
 must be under --to as recorded (the same size:mtime, or for a retained original the same
-size), and every retained original found there must be the recorded size. A file replaced
+size), and every retained original found there must be the recorded size. A retained
+original the undo window still holds that is not under --to refuses unless --from was
+checked and it is gone there too, or --carry-missing-retained acknowledges it. A file replaced
 since (an *arr upgrade under the same name) and one deleted since are carried as recorded:
 a row is keyed by its path AND its fingerprint, so the next scan answers a replaced file
 as the new file it is.
 
+Run it with holdfast stopped and before a build that scans the new root starts, and where
+the old tree still exists, let it see that tree (bind it read-only into the container).
+
 With --apply it first migrates a ledger an earlier build wrote, like every command that
 writes the ledger, and the log records each step. A dry run changes nothing, the schema
-included: it refuses a ledger an earlier build wrote rather than upgrade it.
+included: it refuses a ledger an earlier build wrote rather than upgrade it. To preview
+one, run --apply against a copy: HOLDFAST_STATE_DIR=<a copy of the state directory>.
 `
 
 // rerootComponent names the emitter on every log record this command writes.
@@ -88,6 +96,9 @@ type rerootRequest struct {
 	Apply       bool
 	MinMatch    float64
 	MinCoverage float64
+	// CarryMissingRetained acknowledges live retained originals absent under --to while
+	// --from cannot be checked: their records are carried as recorded.
+	CarryMissingRetained bool
 }
 
 func cmdReroot(args []string, stdout, stderr io.Writer) int {
@@ -98,6 +109,7 @@ func cmdReroot(args []string, stdout, stderr io.Writer) int {
 	apply := fs.Bool("apply", false, "rewrite the ledger; without it nothing is rewritten")
 	minMatch := fs.Float64("min-match", rerootMinMatch, "the share of the recorded files found under --to that must match")
 	minCoverage := fs.Float64("min-coverage", rerootMinCoverage, "the share of all the recorded files that must be under --to as recorded")
+	carryMissing := fs.Bool("carry-missing-retained", false, "carry retained originals absent under --to, with --from unseen, as recorded")
 
 	cfg, code := loadConfig(fs, args, stderr)
 	if cfg == nil {
@@ -120,7 +132,7 @@ func cmdReroot(args []string, stdout, stderr io.Writer) int {
 	}
 	log := logging.To(stderr, cfg.LogLevel)
 	return runReroot(context.Background(), log, cfg, rerootRequest{From: *from, To: *to, Apply: *apply,
-		MinMatch: *minMatch, MinCoverage: *minCoverage}, stdout, stderr)
+		MinMatch: *minMatch, MinCoverage: *minCoverage, CarryMissingRetained: *carryMissing}, stdout, stderr)
 }
 
 // checkShares refuses a threshold that is not a share. NaN fails both comparisons, so it is
@@ -173,9 +185,11 @@ func runReroot(ctx context.Context, log *slog.Logger, cfg *config.Config, req re
 		reportMigrationRefusal(log, err)
 		if errors.Is(err, store.ErrSchemaBehind) {
 			return refuse("schema-behind", "%v. A dry run changes nothing, so it does not upgrade the ledger: that "+
-				"would stamp a version the holdfast which wrote it then refuses to open. With --apply the reroot "+
-				"migrates it first, as restore and requeue do, and then refuses or rewrites exactly as this "+
-				"report would have said; after that only this build or a later one opens the ledger", err)
+				"would stamp a version the holdfast which wrote it then refuses to open. To preview, copy jobs.db "+
+				"(and any jobs.db-wal beside it) into a scratch directory with holdfast stopped and run "+
+				"HOLDFAST_STATE_DIR=<that directory> holdfast reroot ... --apply: it migrates and rewrites only the "+
+				"copy. With --apply here the reroot migrates this ledger first, as restore and requeue do, and then "+
+				"refuses or rewrites; after that only this build or a later one opens it", err)
 		}
 		if errors.Is(err, store.ErrLedgerInUse) {
 			return refuse("ledger-in-use", "the ledger at %s is open in another process - a running `holdfast serve` "+
@@ -212,8 +226,8 @@ func runReroot(ctx context.Context, log *slog.Logger, cfg *config.Config, req re
 			"this command takes", n, from, to)
 	}
 
-	ev := checkRerootEvidence(plan.Evidence)
-	printRerootEvidence(stdout, ev, to, req.MinMatch, req.MinCoverage)
+	ev := checkRerootEvidence(plan.Evidence, from, req.CarryMissingRetained)
+	printRerootEvidence(stdout, ev, from, to, req.MinMatch, req.MinCoverage)
 	if why, label, findings := ev.refusal(from, to, req.MinMatch, req.MinCoverage); why != "" {
 		printFindings(stderr, label, findings)
 		return refuse("evidence", "%s", why)
@@ -314,6 +328,8 @@ func logReroot(log *slog.Logger, p store.RerootPlan, ev rerootEvidence, req rero
 		"rows", p.Rows(), "evidence_checked", ev.Checked, "evidence_matched", ev.Matched,
 		"evidence_same_file", ev.SameFile, "evidence_replaced", len(ev.Replaced), "evidence_absent", ev.Absent,
 		"evidence_retained_mismatched", len(ev.RetainedMismatched),
+		"evidence_identity_checked", ev.identityChecked(), "evidence_from_witnesses", ev.Witnesses,
+		"evidence_retained_carried_missing", ev.CarriedMissingRetained,
 		"match_ratio", ev.ratio(), "min_match", req.MinMatch,
 		"coverage", ev.coverage(), "min_coverage", req.MinCoverage)
 }

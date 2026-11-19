@@ -37,8 +37,16 @@ change nothing a scan does, and are left where they are.
 5. **Start holdfast again.** The next scan finds the rows under the new root, and `validate` no
    longer reports them.
 
-Do it **before** the first scan under the new root. A scan of the new root records rows at the new
-paths, and a reroot refuses to carry an old row onto a key a new row already holds (below).
+**Run it before a holdfast that scans the new root first starts.** The first scan of the new root
+records a row for every file there, under the file's own fingerprint, and a reroot refuses to carry an
+old row onto a key a new row already holds (below): every file unchanged since the move would collide.
+That includes the first start of an upgraded build, so stop the daemon, upgrade, edit
+`library_roots`, reroot, and only then start it.
+
+**If the old tree still exists, let the reroot see it.** Where the old path is still mounted - an old
+mount point left in place beside the new one - the reroot proves the move file by file: one file at
+both paths is one entry, the same device and inode. It can only do that where it can read the old
+path, so in a container bind the old tree **read-only** for the run as well as the new one.
 
 With the example compose file, `--from` and `--to` are the paths **holdfast sees**, inside the
 container. If only the host side of a bind mount moved and the container path stayed the same, no row
@@ -46,10 +54,32 @@ names the host path and there is nothing to carry.
 
 ```bash
 docker compose stop holdfast
-docker compose run --rm holdfast reroot --config /config/config.yaml --from /media/old --to /media/new
-docker compose run --rm holdfast reroot --config /config/config.yaml --from /media/old --to /media/new --apply
+docker compose run --rm -v /srv/media-old:/media/old:ro holdfast \
+  reroot --config /config/config.yaml --from /media/old --to /media/new
+docker compose run --rm -v /srv/media-old:/media/old:ro holdfast \
+  reroot --config /config/config.yaml --from /media/old --to /media/new --apply
 docker compose start holdfast
 ```
+
+(`/srv/media-old` is the old tree on the host; leave the `-v` out where it no longer exists.)
+
+### Previewing over a ledger an earlier build wrote
+
+A dry run changes nothing, the schema version included, so over a ledger an earlier build wrote it
+refuses rather than upgrade it: upgrading stamps a version that build's daemon then refuses to open.
+To see what the reroot would do anyway, run it with `--apply` against a **copy** of the ledger. With
+holdfast stopped, copy `jobs.db` (and a `jobs.db-wal` beside it, if there is one) into a scratch
+directory and point the reroot at that directory:
+
+```bash
+mkdir /tmp/reroot-preview
+cp <state_dir>/jobs.db* /tmp/reroot-preview/
+HOLDFAST_STATE_DIR=/tmp/reroot-preview holdfast reroot --config config.yaml \
+  --from /media/old --to /media/new --apply
+```
+
+It migrates and rewrites only the copy, and reads the library exactly as the real run will. Delete
+the copy afterwards.
 
 ## What it rewrites
 
@@ -84,9 +114,11 @@ old tree still in place, matches every size and mtime it holds - so every record
 **both** paths, the old and the new:
 
 - **at both paths**: a host can have the old root still mounted, as a second mount of the same
-  filesystem. Then each file is ONE file with two names, the same device and inode at both paths, and
+  filesystem. Then each file is ONE entry with two names, the same device and inode at both paths, and
   that is the strongest evidence there is: it counts as matched, whatever has happened to the file
-  since. Two different files is a **copy**, and refuses.
+  since. Two different entries is a **copy**, and refuses. The entries are compared without following
+  a symbolic link, so a `--to` tree of links into a still-present `--from` is a copy too: a link is not
+  the file it points at.
 - **only at the old path**: a partial copy, or the wrong `--to`. It refuses, for an ordinary row and a
   retained original alike: carrying the row would point it at nothing while the file it describes is
   still where it was, and a retained original's record carried to an empty path is the next restore's
@@ -118,9 +150,21 @@ row is history and holds nothing: the next scan claims the file at that path as 
 exactly as it would have without the move. Neither collides with anything.
 
 **Retained originals are strict.** A retained original found under `--to` that is not the size of the
-original its retention recorded refuses the reroot, whatever the shares: `holdfast restore` renames
-that file over a library file, so a retention is carried only where its file is the one recorded or is
-gone from both paths.
+original its retention recorded (or is not a regular file) refuses the reroot, whatever the shares:
+`holdfast restore` renames that file over a library file.
+
+**A retained original missing under `--to` needs the old path, or an acknowledgement.** For a retention
+the undo window still holds, absence under `--to` is a finding only where the reroot could look at
+`--from` - it is a directory this process sees and holds recorded files, so an old mount point left
+empty does not count - and found the file gone there too. Otherwise the original may be out of sight
+rather than gone (the documented container run mounts only the new root), and carrying the record
+would hand the next `holdfast restore` a path with nothing at it, which drops the record and orphans
+the original. So the reroot refuses, naming each such record, unless the old tree is made visible to
+it (above) or `--carry-missing-retained` acknowledges that those originals are gone: their records are
+then carried as recorded, and the undo window drops them as missing, as it does any retention whose
+file is gone. A **restored** retention never counts: its retained file was renamed back over the source
+by the restore, so its absence is the record's own account of it. The report says whether the
+identity check ran, and why not when it did not.
 
 The report prints the counts, both shares beside their thresholds, and a bounded sample of the
 replaced files (`replaced since (carried as recorded)`), each with what was recorded and what is there
@@ -146,10 +190,12 @@ Every refusal exits non-zero, names its reason, and rewrites nothing.
 - **The evidence fails**, as above: a recorded file is a different file at each path or is only at
   the old one, a retained original is not the recorded size, no recorded file matched, or the coverage
   or the match ratio is under its threshold.
+- **A retained original the undo window holds is missing under `--to`** and `--from` could not be
+  checked, without `--carry-missing-retained` (above).
 - **A dry run meets a ledger an earlier build wrote.** A dry run changes nothing, the schema included:
-  upgrading the ledger stamps a version the holdfast that wrote it then refuses to open. With `--apply`
-  the reroot migrates it first, as `restore` and `requeue` do, and then refuses or rewrites exactly as a
-  dry run would have said.
+  upgrading the ledger stamps a version the holdfast that wrote it then refuses to open. Preview it on a
+  copy instead (above). With `--apply` the reroot migrates it first, as `restore` and `requeue` do, and
+  then refuses or rewrites.
 
 With `--apply`, like every command that writes the ledger, a reroot first migrates a ledger an
 earlier build wrote, and the log records each step.
@@ -159,7 +205,8 @@ earlier build wrote, and the log records each step.
 One structured record per table (`component=ledger.reroot`, `table`, `rows`, and each path column's
 count under `columns`), and one for the whole (`rows`, the evidence counts `evidence_checked`,
 `evidence_matched`, `evidence_same_file`, `evidence_replaced`, `evidence_absent` and
-`evidence_retained_mismatched`, `match_ratio` beside `min_match`, and `coverage` beside
+`evidence_retained_mismatched`, `evidence_identity_checked`, `evidence_from_witnesses` and
+`evidence_retained_carried_missing`, `match_ratio` beside `min_match`, and `coverage` beside
 `min_coverage`), with `applied=true` for a rewrite and `applied=false` for a dry run. A refusal is one
 `warn` record carrying its `reason` token: `threshold`, `paths`, `to-not-a-root`, `from-is-a-root`, `no-ledger`, `schema-behind`, `ledger-in-use`, `ledger-unopenable`,
 `plan-failed`, `nothing-recorded`, `collision`, `evidence` or `apply-failed`.
