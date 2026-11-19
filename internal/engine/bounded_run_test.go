@@ -13,7 +13,6 @@ import (
 	"context"
 	"encoding/json"
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -410,19 +409,13 @@ func TestBoundedRun_EveryWriterOfATerminalRowIsCounted(t *testing.T) {
 	}
 
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	if err != nil {
-		t.Fatalf("parse the engine package: %v", err)
-	}
-	pkg, ok := pkgs["engine"]
+	files, ok := parseNonTestFiles(t, fset, ".", 0)["engine"]
 	if !ok {
 		t.Fatal("no package engine here; this check cannot read the writers")
 	}
 
 	found := map[string]bool{}
-	for _, f := range pkg.Files {
+	for _, f := range files {
 		for _, d := range f.Decls {
 			fd, ok := d.(*ast.FuncDecl)
 			if !ok || !writesATerminalRow(fd) {
