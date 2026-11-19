@@ -67,3 +67,8 @@ updates:
     groups:
       web-ui:
         patterns: ["*"]
+    # @types/node follows the Node the UI is built on (web/.node-version and the Dockerfile's
+    # ui stage), whose major moves by hand: a types major ahead of the runtime is not offered.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
