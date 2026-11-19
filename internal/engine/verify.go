@@ -536,8 +536,8 @@ func (e *Engine) lengthParity(ctx context.Context, in, out string) (store.Failur
 // timingParity is gate 3's timestamp half on its own: out's video is presented at in's times
 // (timing.Check). A mismatch is DETERMINISTIC: the same source, configuration and ffmpeg build
 // time the same frames the same way. A listing that is ffprobe's own answer but cannot be
-// compared - only some packets timed, no time base - is deterministic for the same reason, and
-// refused: an unknown timing is not a matching one. Only a listing ffprobe never produced (it
+// compared - no video stream, no time base, an output whose packets are not all timed - is
+// deterministic for the same reason, and refused: an unknown timing is not a matching one. Only a listing ffprobe never produced (it
 // could not run, was killed, or failed) is TRANSIENT, since that is a condition of the run.
 //
 // It is not part of lengthParity, which the stray-temp sweep also asks: the sweep's question is
