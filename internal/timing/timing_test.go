@@ -36,6 +36,8 @@ func TestCheck_Passes(t *testing.T) {
 		{"a base whose tick is not one unit", listing(1001, 24000, 0, 1, 2, 3), listing(1001, 48000, 0, 2, 4, 6)},
 		{"an AVI read by its decode timestamps", probe.Timestamps{TimeBaseNum: 1, TimeBaseDen: 24, Packets: 3,
 			Ticks: []int64{0, 1, 2}, FromDTS: true}, ms(0, 42, 83)},
+		{"into an AVI read by its decode timestamps", ms(0, 42, 83), probe.Timestamps{TimeBaseNum: 1, TimeBaseDen: 24,
+			Packets: 3, Ticks: []int64{5, 6, 7}, FromDTS: true}},
 		{"an untimed elementary stream: only the count and the output's own instants",
 			probe.Timestamps{TimeBaseNum: 1, TimeBaseDen: 1200000, Packets: 3, Untimed: true}, ms(0, 100, 200)},
 		{"a long film in nanoseconds against milliseconds", listing(1, 1000000000, 0, 10800000000000, 10800041708333),
@@ -88,7 +90,7 @@ func TestCheck_Refuses(t *testing.T) {
 			listing(1, 1000000000, 0, 10800000000000), listing(1, 1000000000, 0, 10800000000002),
 			[]string{"frame 1 is presented at 10800.000000s", "(1/1000000000)"}},
 		{"an untimed output", ms(0, 42), probe.Timestamps{TimeBaseNum: 1, TimeBaseDen: 1000, Packets: 2, Untimed: true},
-			[]string{"timing parity could not be established: the output's video carries 0 timestamps for 2 packets"}},
+			[]string{"timing parity could not be established: not every packet of the output's video carries a timestamp"}},
 		{"an untimed source still holds the output's instants", probe.Timestamps{TimeBaseNum: 1, TimeBaseDen: 1, Packets: 3,
 			Untimed: true}, ms(0, 100, 100), []string{"1 of the output's 3 video frames are presented at the same instant"}},
 		{"an output listing short of its packets", ms(0, 42),
@@ -106,6 +108,70 @@ func TestCheck_Refuses(t *testing.T) {
 				if !strings.Contains(err.Error(), w) {
 					t.Errorf("the refusal %q does not say %q", err, w)
 				}
+			}
+		})
+	}
+}
+
+// dtsListing is a source timed by its decode timestamps alone, in ticks of 1/600 s (AVI's).
+func dtsListing(ticks ...int64) probe.Timestamps {
+	ts := listing(1, 600, ticks...)
+	ts.FromDTS = true
+	return ts
+}
+
+// growing is n decode timestamps whose gaps grow by one tick each (1, 2, 3, ...), so that no
+// two shifts of it line up: only the shift it was built with matches.
+func growing(n int) []int64 {
+	out := make([]int64, n)
+	for k := 1; k < n; k++ {
+		out[k] = out[k-1] + int64(k)
+	}
+	return out
+}
+
+// shown is what a decoder holding d frames back shows a decode-timed source at: the decode
+// timestamps from packet d on, then one extrapolated instant for each of the last d frames.
+func shown(dts []int64, d int) []int64 {
+	out := append([]int64(nil), dts[d:]...)
+	for k := 1; k <= d; k++ {
+		out = append(out, dts[len(dts)-1]+int64(1000*k))
+	}
+	return out
+}
+
+// TestCheck_ADecodeTimedSourceIsShownAtItsReorderingDelay: a source timed by decode
+// timestamps alone (AVI, ASF) is shown d frames on, d being the decoder's reordering delay,
+// which the listing does not carry; an output shown at any delay up to MaxReorder passes, and
+// one at no delay up to it does not.
+func TestCheck_ADecodeTimedSourceIsShownAtItsReorderingDelay(t *testing.T) {
+	// 24 fps, then 60, then 30, in AVI's 1/600 s slots.
+	vfrSlots := []int64{0, 25, 50, 75, 100, 110, 120, 130, 140, 160, 180, 200}
+	for _, tc := range []struct {
+		name     string
+		src, out probe.Timestamps
+		pass     bool
+	}{
+		{"an H.264 AVI with two B-frames, shown two frames on", dtsListing(vfrSlots...),
+			listing(1, 600, shown(vfrSlots, 2)...), true},
+		{"shown at no delay", dtsListing(vfrSlots...), listing(1, 600, vfrSlots...), true},
+		{"shown at the most a decoder holds back", dtsListing(growing(40)...), listing(1, 600, shown(growing(40), 16)...), true},
+		{"shown one frame further on than any decoder holds back", dtsListing(growing(40)...),
+			listing(1, 600, shown(growing(40), 17)...), false},
+		{"a short file shown at a delay that leaves out more frames than it compares", dtsListing(growing(5)...),
+			listing(1, 600, shown(growing(5), 3)...), false},
+		{"a short file shown at a delay that compares as many frames as it leaves out", dtsListing(growing(5)...),
+			listing(1, 600, shown(growing(5), 2)...), true},
+		{"a source timed by presentation timestamps is held to no delay", listing(1, 600, vfrSlots...),
+			listing(1, 600, shown(vfrSlots, 2)...), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := Check(tc.src, tc.out)
+			if tc.pass && err != nil {
+				t.Errorf("Check refused an output shown as the decoder shows the source: %v", err)
+			}
+			if !tc.pass && (err == nil || !strings.Contains(err.Error(), "the encode moved the source's frame timing")) {
+				t.Errorf("Check = %v, want the output refused as moved", err)
 			}
 		})
 	}

@@ -136,23 +136,26 @@ https://github.com/FFmpeg/FFmpeg/tree/5d4d3bdc61 , read 2026-11-18). A constant-
 sit on that grid and come back at their own times. A variable-rate source's do not: measured with
 the pinned `N-125875-g5d4d3bdc61` on a source of 6 s at 24 fps, 1 s at 60 and 1 s at 30, which every
 demuxer guesses at 24 fps, the encode presented frames up to 17 ms off their times and stacked 42
-of its 234 frames on another's timestamp in Matroska and FLV, and 29 in MP4, MOV and MPEG-TS -
-libx265, libx264 and libsvtav1 alike, since the rounding happens before the encoder. Every gate
-then in place passed such an output: its duration and packet count are the source's, it decodes,
-and the perceptual gate compares frame by frame. With the source's base every frame lands on its
-own tick in all five containers, and an MP4 source written into Matroska on the nearest
-millisecond.
+of its 234 frames on another's timestamp in Matroska, FLV and WebM, and 29 in MP4, MOV and
+MPEG-TS - libx265, libx264 and libsvtav1 alike, since the rounding happens before the encoder.
+Every gate then in place passed such an output: its duration and packet count are the source's, it
+decodes, and the perceptual gate compares frame by frame. (An AVI, which stores no timestamp but
+each frame's slot, came out retimed onto 24 fps and 1.75 s longer, which the duration check did
+catch.) With the source's base every frame lands on its own tick in each of them, and within one
+tick of the coarser base written from one container into another
+(`internal/engine/timing_test.go`).
 
 The `:v` scope keeps an audio encoder on its default of one over the sample rate. fftools reads
 the option only for a stream it encodes (`fftools/ffmpeg_mux_init.c:1250-1345`, inside
 `if (ost->enc)`), so a copied stream and a remux are untouched. `demux` is the decoder's own base,
 so it holds under a deinterlace (yadif and bwdif halve the filter's time base and double its
 timestamps, which divide back exactly: `ff_yadif_config_output_common`,
-`libavfilter/yadif_common.c:214-223`, which `vf_bwdif.c` shares), a crop, a scale, `setparams`, a
-hardware upload, and the converted Dolby Vision profile 7 stream, whose raw input is timed at its
-declared rate on the raw demuxer's 1/1200000 base (`libavformat/rawdec.c:89`). Each was measured
-with the pinned build, and the Dolby Vision, deinterlace, crop and scale suites pass the timing
-check unchanged.
+`libavfilter/yadif_common.c:214-223`, which `vf_bwdif.c` shares), a crop, a scale, `setparams`,
+and the converted Dolby Vision profile 7 stream, whose raw input is timed at its declared rate on
+the raw demuxer's 1/1200000 base (`libavformat/rawdec.c:89`): each was measured with the pinned
+build, and the Dolby Vision, deinterlace, crop and scale suites pass the timing check unchanged.
+A hardware encoder's command line carries the same two options (the golden argv holds it); no
+device is reachable here to measure one, and the timing check measures whatever it wrote.
 
 The timing-parity check holds the result ([swap](swap.md#timing-parity)): an encode that moved a
 frame or stacked two on one instant is refused, whatever its command line said.

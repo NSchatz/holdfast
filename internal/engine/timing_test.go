@@ -22,39 +22,68 @@ import (
 	"github.com/NSchatz/holdfast/internal/timing"
 )
 
-// timingContainers are the containers the whole-pass timing cases run in: Matroska and MP4,
-// the two a library holds most. Each is the muxer ffmpeg picks for the extension, and the
-// output is written in the source's own container (container_ext: source) unless a case says
-// otherwise. MPEG-TS is not among them because no pass encodes one today: the video-stream
-// probe (probe.VideoStreams) cannot read the program listing ffprobe adds for a transport
-// stream, so its guard skips the file and the encoder refuses it before a command line exists.
-// The timestamp reader's handling of that listing is held in internal/probe.
-var timingContainers = []string{"mkv", "mp4"}
+// timingCase is one whole pass of the timing cases: a source in container from, written into
+// container to (container_ext: source where they are the same), by the encoder named, from the
+// source codec given (the fixture's H.264 where nil).
+type timingCase struct {
+	from, to, encoder string
+	codec             []string
+}
+
+// timingCases are the containers holdfast writes, each with a source it encodes: Matroska, MP4,
+// MOV and FLV written back into themselves, WebM (VP9 into AV1, the codecs it carries), MP4
+// into Matroska, and MPEG-TS and M2TS written from Matroska. A transport stream is only ever an
+// output here because no pass encodes one as a source today: the video-stream probe
+// (probe.VideoStreams) cannot read the program listing ffprobe adds for a transport stream, so
+// its guard skips the file and the encoder refuses it before a command line exists. AVI and
+// ASF, which store no presentation timestamp, have their own case below.
+var timingCases = []timingCase{
+	{"mkv", "mkv", "cpu", nil}, {"mp4", "mp4", "cpu", nil}, {"mov", "mov", "cpu", nil}, {"flv", "flv", "cpu", nil},
+	{"webm", "webm", "svtav1", []string{"-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-b:v", "2M"}},
+	{"mp4", "mkv", "cpu", nil}, {"mkv", "ts", "cpu", nil}, {"mkv", "m2ts", "cpu", nil},
+}
+
+// configure is the case's configuration change: its encoder, its container and its source's
+// extension among the scanned ones.
+func (tc timingCase) configure(c *config.Config) {
+	c.Encoder, c.ContainerExt = tc.encoder, "source"
+	if tc.to != tc.from {
+		c.ContainerExt = tc.to
+	}
+	c.VideoExts = []string{tc.from}
+}
+
+func (tc timingCase) String() string { return tc.from + "-to-" + tc.to + "-" + tc.encoder }
 
 // mkVFR writes the variable-frame-rate source every timing case starts from: H.264 at 6 s of
 // 24 fps, then 1 s of 60 fps and 1 s of 30 fps, 234 frames, in the container path's extension
 // names. The long 24 fps lead is what makes the demuxer of every container in
-// timingContainers guess the stream at 24 fps, the rate the encoder's time base defaulted to
+// timingCases guess the stream at 24 fps, the rate the encoder's time base defaulted to
 // before -enc_time_base: on that grid the 60 and 30 fps frames cannot all be placed, and some
 // collide.
-func mkVFR(t *testing.T, ffmpeg, path string) {
+//
+// codec replaces the H.264 encode where a case needs another source codec.
+func mkVFR(t *testing.T, ffmpeg, path string, codec ...string) {
 	t.Helper()
-	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+	if len(codec) == 0 {
+		codec = []string{"-c:v", "libx264", "-preset", "ultrafast", "-b:v", "8M", "-pix_fmt", "yuv420p"}
+	}
+	args := []string{"-hide_banner", "-loglevel", "error", "-y",
 		"-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24:duration=6",
 		"-f", "lavfi", "-i", "testsrc2=size=320x240:rate=60:duration=1",
 		"-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=1",
-		"-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]", "-map", "[v]",
-		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", "8M", "-pix_fmt", "yuv420p",
-		"-fps_mode", "passthrough", "--", path)
+		"-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]", "-map", "[v]"}
+	args = append(append(args, codec...), "-fps_mode", "passthrough", "--", path)
+	ff(t, ffmpeg, args...)
 }
 
 // vfrFixture writes the source into a fresh root and checks it is the fixture the cases need:
 // guessed at 24 fps, and presented at three rates, so its timestamps do not sit on that grid.
-func vfrFixture(t *testing.T, ffmpeg, ffprobe, ext string) (root, src string, times probe.Timestamps) {
+func vfrFixture(t *testing.T, ffmpeg, ffprobe, ext string, codec ...string) (root, src string, times probe.Timestamps) {
 	t.Helper()
 	root = t.TempDir()
 	src = filepath.Join(root, "movie."+ext)
-	mkVFR(t, ffmpeg, src)
+	mkVFR(t, ffmpeg, src, codec...)
 	if rate := rFrameRate(t, ffprobe, src); rate != "24/1" {
 		t.Fatalf("fixture drifted: the %s source's guessed rate is %q, want 24/1 - the cases below would not "+
 			"exercise the grid an encode rounded onto", ext, rate)
@@ -130,33 +159,28 @@ func timingRun(t *testing.T, ffmpeg, ffprobe, root string, enc Encoder, mutate f
 }
 
 // TestTiming_AVariableRateSourceKeepsItsTimesThroughTheEncode runs holdfast's own encoder over
-// the variable-frame-rate source in each container: the job is done, and the replacement
-// presents every frame at the source's time with no two frames at one instant. Written in the
-// source's own container it is the same ticks in the same time base, exactly; written into
-// Matroska from MP4 (container_ext: mkv) each time is rounded once from MP4's microseconds
-// into Matroska's milliseconds, which the gate's one-tick tolerance takes. Before
+// the variable-frame-rate source in each container it writes: the job is done, and the
+// replacement presents every frame at the source's time with no two frames at one instant.
+// Written in the source's own container it is the same ticks in the same time base, exactly;
+// written into another (container_ext) each time is rescaled once into the output's base, which
+// the gate's one-tick tolerance takes. Before
 // -enc_time_base:v demux the encoder rounded every frame onto the 24 fps grid the demuxer
 // guessed, and 29 to 42 of the 234 frames came out sharing a timestamp; with the timing gate
 // in place that encode is refused, so this case reds on it either way.
 func TestTiming_AVariableRateSourceKeepsItsTimesThroughTheEncode(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
-	cases := []struct{ from, to string }{{"mkv", "mkv"}, {"mp4", "mp4"}, {"mp4", "mkv"}}
-	for _, tc := range cases {
-		t.Run(tc.from+"-to-"+tc.to, func(t *testing.T) {
-			root, _, want := vfrFixture(t, ffmpeg, ffprobe, tc.from)
-			ext := "source"
-			if tc.to != tc.from {
-				ext = tc.to
-			}
-			st, _ := timingRun(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) { c.ContainerExt = ext })
+	for _, tc := range timingCases {
+		t.Run(tc.String(), func(t *testing.T) {
+			root, _, want := vfrFixture(t, ffmpeg, ffprobe, tc.from, tc.codec...)
+			st, _ := timingRun(t, ffmpeg, ffprobe, root, nil, tc.configure)
 
 			row := onlyRow(t, st)
 			if row.Status != store.Done {
 				t.Fatalf("row %s %q, want done", row.Status, row.Outcome.Reason)
 			}
 			out := filepath.Join(root, "movie."+tc.to)
-			if codecOf(t, ffprobe, out) != "hevc" {
-				t.Fatal("the source was not replaced")
+			if want := map[string]string{"cpu": "hevc", "svtav1": "av1"}[tc.encoder]; codecOf(t, ffprobe, out) != want {
+				t.Fatalf("the source was not replaced by %s", want)
 			}
 			got := timesOf(t, ffprobe, out)
 			if err := timing.Check(want, got); err != nil {
@@ -206,16 +230,15 @@ func withoutEncTimeBase(t *testing.T, real string) (wrapper, log string) {
 // it, deterministically, under the length gate's token, with the source byte-identical.
 func TestTiming_TheGateRefusesAnEncodeThatCollapsedTheTimestamps(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
-	for _, ext := range timingContainers {
-		t.Run(ext, func(t *testing.T) {
-			root, src, _ := vfrFixture(t, ffmpeg, ffprobe, ext)
+	for _, tc := range timingCases {
+		t.Run(tc.String(), func(t *testing.T) {
+			root, src, _ := vfrFixture(t, ffmpeg, ffprobe, tc.from, tc.codec...)
 			before := md5f(t, src)
 			old, removed := withoutEncTimeBase(t, ffmpeg)
 			prober := probe.New(old, ffprobe)
 			cfg := baseCfg(root)
-			cfg.ContainerExt = "source"
-			st, events := timingRun(t, ffmpeg, ffprobe, root, FFmpegEncoder{FFmpeg: old, Cfg: cfg, Probe: prober},
-				func(c *config.Config) { c.ContainerExt = "source" })
+			tc.configure(&cfg)
+			st, events := timingRun(t, ffmpeg, ffprobe, root, FFmpegEncoder{FFmpeg: old, Cfg: cfg, Probe: prober}, tc.configure)
 
 			if b, err := os.ReadFile(removed); err != nil || strings.Count(string(b), "removed") != 1 {
 				t.Fatalf("the encode's command line did not carry -enc_time_base:v once (%q, %v) - this case "+
@@ -227,7 +250,7 @@ func TestTiming_TheGateRefusesAnEncodeThatCollapsedTheTimestamps(t *testing.T) {
 			if n := nTemp(t, root); n != 0 {
 				t.Errorf("%d temp file(s) left behind", n)
 			}
-			row := rowForFile(t, st, "movie."+ext)
+			row := onlyRow(t, st)
 			if row.Status != store.Failed {
 				t.Fatalf("row %s %q, want failed at the timing gate", row.Status, row.Outcome.Reason)
 			}
@@ -246,6 +269,104 @@ func TestTiming_TheGateRefusesAnEncodeThatCollapsedTheTimestamps(t *testing.T) {
 			}
 			if row.Outcome.FailureClass != store.FailureDeterministic {
 				t.Errorf("failure class %q, want %q", row.Outcome.FailureClass, store.FailureDeterministic)
+			}
+		})
+	}
+}
+
+// TestTiming_AContainerThatStoresNoPresentationTimeIsReadByItsDecodeTimes runs the two
+// containers that store no presentation timestamp, AVI (each frame timed by its chunk's slot)
+// and ASF (WMV, by a send time), whose demuxers can report a decode timestamp alone.
+//
+// Read FROM one, in a whole pass: the variable-frame-rate source in AVI with two B-frames, so
+// that no packet carries a presentation timestamp, encoded into Matroska. It is not refused for
+// what it does not carry: it is read by its decode timestamps, which a decoder shows two frames
+// on, and the encode is done; without -enc_time_base:v demux it is refused.
+//
+// Written INTO them, in a whole pass (container_ext: avi, wmv): the source in Matroska, encoded
+// by libsvtav1, done, and refused by the length gate without the argument.
+//
+// Written into them by libx264, whose output there carries no presentation timestamp at all:
+// driven through the encoder and the gate directly, because a pass does not hand libx264 a
+// source in a codec it would not re-encode, and every codec ffmpeg can write variable-rate that
+// libx264 would re-encode leaves its field order unknown, which the field-order guard skips. The
+// gate reads the output by its decode timestamps: the encode passes, and without the argument -
+// which retimes the AVI onto 24 fps and moves the WMV's frames by up to 17 ms - it is refused.
+func TestTiming_AContainerThatStoresNoPresentationTimeIsReadByItsDecodeTimes(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	avi := []string{"-c:v", "libx264", "-preset", "ultrafast", "-bf", "2", "-b:v", "8M", "-pix_fmt", "yuv420p"}
+	for _, tc := range []struct {
+		name, from, to, encoder string
+		codec                   []string
+	}{
+		{"from avi", "avi", "mkv", "cpu", avi},
+		{"into avi", "mkv", "avi", "svtav1", nil},
+		{"into wmv", "mkv", "wmv", "svtav1", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, before := range []bool{false, true} {
+				root, _, want := vfrFixture(t, ffmpeg, ffprobe, tc.from, tc.codec...)
+				if tc.from == "avi" && !want.FromDTS {
+					t.Fatalf("fixture drifted: the AVI source carries presentation timestamps (%+v)", want)
+				}
+				bin := ffmpeg
+				if before {
+					bin, _ = withoutEncTimeBase(t, ffmpeg)
+				}
+				mutate := func(c *config.Config) { c.ContainerExt, c.Encoder = tc.to, tc.encoder }
+				cfg := baseCfg(root)
+				mutate(&cfg)
+				st, events := timingRun(t, ffmpeg, ffprobe, root, FFmpegEncoder{FFmpeg: bin, Cfg: cfg, Probe: probe.New(bin, ffprobe)}, mutate)
+				row := onlyRow(t, st)
+				if before {
+					// Retimed onto 24 fps, the AVI also comes out longer than the source, which the
+					// duration half of the same gate sees first.
+					refused := false
+					for _, ev := range events {
+						refused = refused || (ev.Status == store.Failed && ev.Gate == GateLength)
+					}
+					if row.Status != store.Failed || !refused || !strings.Contains(row.Outcome.Reason, "parity failed") {
+						t.Fatalf("the encode without -enc_time_base: row %s %q, want refused by the length gate",
+							row.Status, row.Outcome.Reason)
+					}
+					continue
+				}
+				if row.Status != store.Done {
+					t.Fatalf("row %s %q, want done", row.Status, row.Outcome.Reason)
+				}
+				if err := timing.Check(want, timesOf(t, ffprobe, filepath.Join(root, "movie."+tc.to))); err != nil {
+					t.Fatalf("the replacement's timing is not the source's: %v", err)
+				}
+			}
+		})
+	}
+	for _, to := range []string{"avi", "wmv"} {
+		t.Run("libx264 into "+to, func(t *testing.T) {
+			hevc := []string{"-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error", "-b:v", "4M",
+				"-pix_fmt", "yuv420p"}
+			root, src, _ := vfrFixture(t, ffmpeg, ffprobe, "mkv", hevc...)
+			cfg := baseCfg(root)
+			cfg.Encoder = "x264"
+			prober := probe.New(ffmpeg, ffprobe)
+			eng := New(cfg, prober, nil, newTestStore(t, root), discardLogger())
+			ctx := context.Background()
+			old, _ := withoutEncTimeBase(t, ffmpeg)
+			for _, bin := range []string{ffmpeg, old} {
+				out := filepath.Join(t.TempDir(), "movie."+to)
+				if err := (FFmpegEncoder{FFmpeg: bin, Cfg: cfg, Probe: probe.New(bin, ffprobe)}).Encode(ctx, src, out, nil); err != nil {
+					t.Fatalf("encode: %v", err)
+				}
+				if got := timesOf(t, ffprobe, out); !got.FromDTS {
+					t.Fatalf("fixture drifted: libx264 into %s carries presentation timestamps (%+v)", to, got)
+				}
+				class, err := eng.timingParity(ctx, src, out)
+				if bin == ffmpeg && err != nil {
+					t.Fatalf("the gate refused holdfast's own encode (%s): %v", class, err)
+				}
+				if bin == old && (err == nil || class != store.FailureDeterministic ||
+					!strings.Contains(err.Error(), "the encode moved the source's frame timing")) {
+					t.Fatalf("the encode without -enc_time_base: %q %v, want refused as moved", class, err)
+				}
 			}
 		})
 	}

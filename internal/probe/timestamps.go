@@ -23,15 +23,17 @@ type Timestamps struct {
 	// Ticks holds each packet's presentation timestamp, in the order the packets are stored:
 	// Packets of them, or none where the stream is Untimed.
 	Ticks []int64
-	// FromDTS is true where no packet of the stream carries a presentation timestamp at all and
-	// Ticks are its decode timestamps instead. That is how an AVI is stored: one frame per
-	// chunk, timed by its position, and the demuxer reports that time as the dts alone. In
-	// such a container the decode timestamps are the slots the frames are presented in, so the
-	// set of them is the set of presentation times.
+	// FromDTS is true where not every packet carries a presentation timestamp but every packet
+	// carries a decode timestamp, and Ticks are the decode timestamps. That is how AVI and ASF
+	// (WMV) are stored: AVI times each frame by the slot its chunk sits in, ASF by a send time,
+	// and the demuxer reports either as the dts alone, and an MPEG-4 Part 2 stream with B-frames
+	// leaves its B-frames without one. A decoder shows such a stream at its decode timestamps
+	// moved along by its reordering delay, which the gate allows for (timing.Check).
 	FromDTS bool
-	// Untimed is true where no packet carries a timestamp of either kind: a raw elementary
-	// stream (`.h264`, `.hevc`), which stores frames and no times, and which ffmpeg times at
-	// the one rate it guesses when it reads it. Ticks is empty.
+	// Untimed is true where some packet carries a timestamp of neither kind: a raw elementary
+	// stream (`.h264`, `.hevc`), which stores frames and no times and which ffmpeg times at the
+	// one rate it guesses when it reads it, or a stream timed only in part. Ticks is empty: when
+	// such a stream's frames are shown cannot be read from its packets.
 	Untimed bool
 }
 
@@ -47,8 +49,10 @@ var ErrTimestampsUnanswered = errors.New("ffprobe did not answer")
 // packets are never buffered as text.
 //
 // It refuses rather than guesses: a listing with no packet, no time base, a line this reader
-// does not know, or packets of which only some carry a presentation timestamp is an error,
-// never a partial answer.
+// does not know or a timestamp that is not a number is an error, never a partial answer. A
+// stream that does not time every packet is not an error: it is read by what it does time
+// (FromDTS), or reported as not readable in time (Untimed), and the gate decides what that
+// means for a source and for an output.
 func (p *Prober) VideoTimestamps(ctx context.Context, f string) (Timestamps, error) {
 	cmd := exec.CommandContext(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
 		"-show_entries", "packet=pts,dts:stream=time_base", "-of", "compact=p=1:nk=0", "--", f)
@@ -128,16 +132,10 @@ func parseTimestamps(r io.Reader) (Timestamps, error) {
 		return Timestamps{}, fmt.Errorf("the video stream carries no packets")
 	case withPTS == all:
 		ts.Ticks = pts
-	case withPTS > 0:
-		return Timestamps{}, fmt.Errorf("%d of the video stream's %d packets carry no presentation timestamp",
-			all-withPTS, all)
 	case len(dts) == all:
 		ts.Ticks, ts.FromDTS = dts, true
-	case len(dts) == 0:
-		ts.Untimed = true
 	default:
-		return Timestamps{}, fmt.Errorf("%d of the video stream's %d packets carry neither a presentation "+
-			"nor a decode timestamp", all-len(dts), all)
+		ts.Untimed = true
 	}
 	ts.Packets = all
 	return ts, nil

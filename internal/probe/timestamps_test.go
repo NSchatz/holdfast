@@ -27,6 +27,13 @@ func TestParseTimestamps(t *testing.T) {
 			Timestamps{TimeBaseNum: 1, TimeBaseDen: 600, Packets: 2, Ticks: []int64{0, 25}, FromDTS: true}},
 		{"no packet timed at all: an elementary stream", "packet|pts=N/A|dts=N/A\npacket|pts=N/A|dts=N/A\nstream|time_base=1/1200000\n",
 			Timestamps{TimeBaseNum: 1, TimeBaseDen: 1200000, Packets: 2, Untimed: true}},
+		{"only some packets timed for presentation, every one for decode: the decode timestamps",
+			"packet|pts=0|dts=-2|\npacket|pts=N/A|dts=-1|\npacket|pts=N/A|dts=0|\nstream|time_base=1/25\n",
+			Timestamps{TimeBaseNum: 1, TimeBaseDen: 25, Packets: 3, Ticks: []int64{-2, -1, 0}, FromDTS: true}},
+		{"a packet timed by neither", "packet|pts=N/A|dts=0\npacket|pts=N/A|dts=N/A\nstream|time_base=1/1000\n",
+			Timestamps{TimeBaseNum: 1, TimeBaseDen: 1000, Packets: 2, Untimed: true}},
+		{"some packets timed for presentation, one for neither", "packet|pts=0|dts=0\npacket|pts=N/A|dts=N/A\nstream|time_base=1/1000\n",
+			Timestamps{TimeBaseNum: 1, TimeBaseDen: 1000, Packets: 2, Untimed: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parseTimestamps(strings.NewReader(tc.in))
@@ -37,10 +44,6 @@ func TestParseTimestamps(t *testing.T) {
 	}
 
 	for _, tc := range []struct{ name, in, want string }{
-		{"only some packets timed for presentation", "packet|pts=0|dts=0\npacket|pts=N/A|dts=1\npacket|pts=N/A|dts=2\nstream|time_base=1/1000\n",
-			"2 of the video stream's 3 packets carry no presentation timestamp"},
-		{"a packet timed by neither", "packet|pts=N/A|dts=0\npacket|pts=N/A|dts=N/A\nstream|time_base=1/1000\n",
-			"1 of the video stream's 2 packets carry neither a presentation nor a decode timestamp"},
 		{"no time base", "packet|pts=0|dts=0\n", "names no video stream time base"},
 		{"no packets", "stream|time_base=1/1000\n", "carries no packets"},
 		{"two streams", "stream|time_base=1/1000\nstream|time_base=1/1000\npacket|pts=0|dts=0\n", "more than one video stream"},

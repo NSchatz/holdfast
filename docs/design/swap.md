@@ -121,8 +121,9 @@ the source's time base into the output's, and the only difference that can leave
 that rescale - at most half a tick of the coarser base at a frame and half again at the first frame
 its position is read from (1 ms in Matroska, 1/90000 s in MPEG-TS). Measured with the pinned build
 on a 24, then 60, then 30 fps source, holdfast's command line lands every frame on the source's
-exact tick in Matroska, MP4, MOV, FLV and MPEG-TS, and on the nearest millisecond from MP4 into
-Matroska. Half a
+exact tick written back into Matroska, MP4, MOV, FLV and WebM, and within the tolerance written
+from one container into another, MPEG-TS, M2TS, AVI and WMV among them; the same command line
+without its encoder time base is refused in every one (`internal/engine/timing_test.go`). Half a
 source frame, the other bound considered, is too loose for the class the check exists for: an
 encoder that rounds a 24 fps stretch onto a 30 fps grid moves frames by up to 16.7 ms, under half a
 24 fps frame (20.8 ms), and no two of them collide. The comparison is exact, in integers, so a
@@ -133,26 +134,45 @@ its timestamps, and the stream's time base, read by demuxing and never by decodi
 file once more end to end, which is why it runs after the gates that cost a header read and before
 the full decode.
 
-How a file is read:
+How a file is read, and what of it is checkable:
 
-- every packet carries a presentation timestamp: those are its times;
-- no packet carries one, but every packet a decode timestamp: an AVI, which stores each frame's slot
-  and nothing else, and whose slots are its presentation times;
-- no packet carries either: a raw elementary stream (`.h264`), which stores frames and no times and
-  which ffmpeg times at one guessed rate as it reads it. It has no time an encode could move, so it
-  is held to the count and to an output that never presents two frames at once;
-- anything else - some packets timed and some not, no time base, a listing that cannot be read - is
-  refused, never read as a match.
+- every packet carries a presentation timestamp: those are its times, compared frame for frame;
+- otherwise every packet carries a decode timestamp: AVI, which times each frame by its chunk's
+  slot, ASF (WMV), which times it by a send time, and an MPEG-4 Part 2 stream whose B-frames
+  carry no presentation timestamp. The decode timestamps are read instead. An output read this
+  way is compared as it stands. A source read this way is shown by a decoder at its decode
+  timestamps moved along by its reordering delay - the frame shown i-th at the decode timestamp
+  of packet i+d, d being how many frames the decoder holds back (measured with the pinned build:
+  an H.264 AVI with two B-frames is shown at dts[i+2], an MPEG-4 Part 2 one at dts[i+1]). The
+  delay is not in a packet listing, so each d from 0 to 16 (the most H.264 and HEVC reorder) is
+  tried, never one that leaves out more frames than it compares, and the output must match one
+  of them exactly; the last d frames, which a decoder times by extrapolation at the end of the
+  stream, are held to the count and to never sharing an instant;
+- otherwise some packet carries no timestamp of either kind: a raw elementary stream (`.h264`),
+  which stores frames and no times and which ffmpeg times at one guessed rate as it reads it, or
+  a stream timed only in part. A source like that is not refused for what it does not carry: it is
+  held to what is checkable, the count and an output that never presents two frames at once. An
+  output like that is refused: an output whose frames cannot be placed in time cannot be shown to
+  carry the source's;
+- a listing that cannot be read at all - no time base, a line or a value the reader does not know -
+  is refused, never read as a match.
+
+What a packet listing cannot show is which picture is shown at each time: an output carrying the
+source's times in another order of pictures is the perceptual gate's to see, since it compares
+pictures. And where the coarser time base is a whole frame - an AVI at the film's own rate - a
+frame moved by one slot is within the tolerance; a collapse still shows as two frames on one slot.
 
 A mismatch is deterministic: the same source, configuration and ffmpeg build time the same frames
 the same way. A listing ffprobe never produced (it could not run, was killed, or failed) is
 transient. The source is kept either way.
 
-What it refuses that no earlier gate did, and that a faithful encode can also produce: a source whose
-first packets cannot be decoded (a broadcast recording cut between keyframes), whose fields are
-stored as separate packets, or whose decoder drops a damaged frame. Each comes out with fewer frames
-than the source has packets, and is refused by the count with the source kept. That is the
-fail-safe direction, and a refusal names both counts.
+What it refuses that no earlier gate did, and that a faithful encode can also produce, each with
+the source kept and both counts or both times named: a source whose first packets cannot be decoded
+(a broadcast recording cut between keyframes), whose fields are stored as separate packets, or whose
+decoder drops a damaged frame, each of which comes out with fewer frames than the source has
+packets; a variable-frame-rate source with B-frames in AVI written back into AVI, whose frames the
+AVI muxer re-slots at the rate changes; and libsvtav1 written into AVI from an AVI source, whose
+hidden frames shift the output's slots by two. That is the fail-safe direction.
 
 ## Where the encode is written, and why the swap shape never moves
 
