@@ -32,7 +32,8 @@
 # min_bitrate_kbps, min_savings_percent, skip_hardlinked, vmaf_enable, min_vmaf,
 # vmaf_min_pool, vmaf_min_chroma, vmaf_subsample, vmaf_model, audio_languages,
 # subtitle_languages, keep_commentary, remux_only, deinterlace, max_height,
-# downscale_acknowledged, keep_bit_depth, the audio keys below. Anything else inside an entry refuses to start: workers,
+# downscale_acknowledged, keep_bit_depth, playability_cold_starts, playability_segments, the audio
+# keys below. Anything else inside an entry refuses to start: workers,
 # cores_per_worker, x265_cpus, state_dir, server_*, undo_window_hours,
 # history_retention_rows, run_window, max_load and the notification keys describe the
 # PROCESS, not a library, and stay at the top level.
@@ -390,7 +391,9 @@ dry_run: false
 #                         # open-gop=1, explicitly. Applies only where libx265
 #                         # encodes the job; a root no file of which libx265 can
 #                         # encode refuses it at start. A library root may
-#                         # override it. See docs/design/encode-plan.md#gop.
+#                         # override it. Under false the fidelity gate refuses an
+#                         # output carrying a RASL picture or a keyframe that is
+#                         # not an IDR. See docs/design/encode-plan.md#gop.
 # crf: 22               # quality knob (lower = bigger/better): libx265/libsvtav1
 #                         # constant-rate-factor, 0-51. A hardware encoder with no
 #                         # quality.<key> below takes this value unchanged as its
@@ -650,6 +653,21 @@ dry_run: false
 # Final means final UNDER THIS CONFIGURATION, never "this file is hopeless". Change what
 # the verdict depends on - min_savings_percent, the encoder, crf/preset, a VMAF floor - and
 # it is a different question, to be asked again.
+
+# --- Playability gate (on for every encode) ---
+# The output decoded the way a player or a media server starts it, not only linearly from
+# its first frame: its video remuxed once into fragmented MP4 (the shape HLS and DASH stream
+# it in), cut at every keyframe, and fresh decoders handed pieces of it. A decode that fails
+# or prints an error keeps the source. It proves the pinned ffmpeg starts the output cleanly
+# where it was started, not that every client plays it. See docs/design/swap.md#playability.
+#
+# playability_cold_starts: 16  # keyframes spread across the output each decoded from a cold
+#                              # start, 3 s each; up to four times as many keyframes followed
+#                              # by leading pictures (an open GOP's RASL/RADL) are too. 0 = off.
+# playability_segments: true   # cut the output into segments of 6 s or more at its keyframes,
+#                              # as an HLS/DASH segmenter does, and decode each on its own: one
+#                              # more decode of the whole video. false = off.
+# Both may be overridden per library root, and at these defaults move no profile digest.
 
 # --- VMAF perceptual-quality gate (the last no-loss layer) ---
 # After the structural checks pass, VMAF compares the output against the source and

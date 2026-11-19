@@ -370,12 +370,18 @@ const (
 	// two tables could not be read to compare (docs/design/swap.md#chapter-parity).
 	GateChapters = "chapters"
 	// GateFidelity: the output does not carry what its encode plan declares - its bit
-	// depth, chroma subsampling, a colour tag, or an HDR10 static-metadata block the
-	// source carries - or that could not be established.
+	// depth, chroma subsampling, a colour tag, an HDR10 static-metadata block the source
+	// carries, or the closed GOPs x265_open_gop: false asks for - or that could not be
+	// established.
 	GateFidelity = "fidelity"
 	// GateDecode: the decode-integrity healthcheck - the output does not fully decode. On a
 	// job that transforms audio it covers every output audio stream too.
 	GateDecode = "decode"
+	// GatePlayability: the output does not decode the way a player or a media server starts
+	// it - from a cold start at one of its keyframes, or one HLS-style segment on its own - or
+	// it cannot be remuxed into the fragmented MP4 they stream it in, or that could not be
+	// established (docs/design/swap.md#playability).
+	GatePlayability = "playability"
 	// GateAudio: an audio track the job transformed is not what its plan declares - its
 	// codec, channel count, channel layout or sample rate - or decodes to a length too far
 	// from its source track's, or that could not be established (docs/design/audio.md#audio-gates).
@@ -448,6 +454,7 @@ var GateVocabulary = []string{
 	GateHDR10Plus,
 	GateDolbyVisionL5,
 	GateChapters,
+	GatePlayability,
 }
 
 // Engine drives the transcode over a set of library roots.

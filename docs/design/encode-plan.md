@@ -46,14 +46,14 @@ one value it derives, and refuses a plan carrying any other (below).
 
 | Part | What this build declares | Read by |
 |---|---|---|
-| `Video` | the registry encoder and the device it opens (the render node for `vaapi`, none for every other encoder); the decode path (software, `DecodeSoftware`); the pixel format (forced, or derived from the source's); the quality value (`crf`, or `bitrate_kbps`, and the preset); the GOP libx265 is told (`x265_open_gop`, [below](#gop)), and nothing for any other encoder; the codec the output must be in, or a copy of the source's video on a remux-only root | the command line; the codec gate; on a copy, the video-identity check |
+| `Video` | the registry encoder and the device it opens (the render node for `vaapi`, none for every other encoder); the decode path (software, `DecodeSoftware`); the pixel format (forced, or derived from the source's); the quality value (`crf`, or `bitrate_kbps`, and the preset); the GOP libx265 is told (`x265_open_gop`, [below](#gop)), and nothing for any other encoder; the codec the output must be in, or a copy of the source's video on a remux-only root | the command line; the codec gate; the fidelity gate's closed-GOP check, where the GOP is declared closed ([below](#closed-gop)); on a copy, the video-identity check and the skipped playability gate |
 | `Audio`, `Subtitles` | every carried stream is copied (`CopyStreams`) | the command line |
 | `AudioTracks` | what the encode does to each audio track: copied (and why), re-encoded in place, kept beside its added re-encode, a stereo downmix added, the codec, layout, sample rate and bitrate of each, and the first loudness pass's figures where one is normalised ([docs/design/audio.md](audio.md)); the zero plan copies every track | the command line; the stream-parity gate's additions; the audio and loudness gates; the row's `audio_tracks` |
 | `Streams` | the intended stream map: which source streams the output carries (the same value the row's dropped streams are recorded from) | the command line; the stream-parity gate |
 | attached pictures | how the attached pictures the map carries travel: pinned to copy in the map, or copied out of the source and carried as Matroska attachments | the command line |
 | `Picture` | the deinterlace applied, the crop decision (the rectangle kept, or why none was; [docs/design/crop.md](crop.md)), and the `max_height` scale applied to the picture the crop kept | the filter chain; the reference and the scale the perceptual gate builds; the crop gate; the row's provenance |
 | `Metadata` | the colour description (`hdr.Color`): the source's tags and, for HDR10, its mastering display and content light level; whether HDR10+ and a Dolby Vision RPU are carried, declared only from the job's dynamic-HDR pre-pass and only for libx265 ([docs/design/dynamic-hdr.md](dynamic-hdr.md#dynamic-hdr)), with the VBV ceiling, the metadata file and, for a converted profile 7 source, the raw stream and its rate; and the fidelity declaration (`hdr.Fidelity`, [below](#fidelity)): the bit depth and chroma subsampling of the pixel format, the colour tags, and the HDR10 static-metadata blocks the source carries | the command line (`-color_*`, the libx265 parameters, `-dolbyvision 1` and a converted stream's input); the output fidelity gate; the dynamic-HDR gates |
-| `Profile`, `Settings` | the effective library profile, whose floors the size and perceptual gates apply, and the job's effective encode settings with the encode profile that supplied them | the size and perceptual gates (`Profile`); `Settings` is the record the plan's quality value (`Video.Quality`) was taken from, and nothing reads it after the derivation |
+| `Profile`, `Settings` | the effective library profile, whose floors the size and perceptual gates apply and whose playability keys the playability gate runs under, and the job's effective encode settings with the encode profile that supplied them | the size, playability and perceptual gates (`Profile`); `Settings` is the record the plan's quality value (`Video.Quality`) was taken from, and nothing reads it after the derivation |
 | container | the muxer the output is written in, named from the working file's name | the command line |
 | `Source`, `Output` | the file the encode reads and the working file it writes: the two paths the plan was derived for | the command line (`-i` and the output); every gate, for the files it measures |
 
@@ -195,6 +195,39 @@ GOPs. A real libx265 encode under each value proves what reaches the bitstream: 
 pictures at the keyframe interval unset or under `true`, and an IDR with none under `false`
 (`TestX265OpenGOP_ReachesTheBitstream`).
 
+<a id="closed-gop"></a>
+
+**A plan that declares closed GOPs holds its output to them: no RASL picture, and every keyframe
+the container flags an IDR or BLA picture.** Under `x265_open_gop: false` the output fidelity gate
+([below](#fidelity)) also reads the output's GOP structure, as the field `closed-gop`. The command
+line saying `open-gop=0` is a declaration, and the fidelity gate's rule is that it measures the
+file and does not trust the command line: an encoder that ignored the parameter, or a later change
+that dropped it, would write open GOPs on every job while every row recorded closed ones, and the
+outputs would pass every other gate.
+
+How it is read. The output's video is copied out (never decoded) into an Annex B byte stream by
+ffmpeg's `hevc_mp4toannexb`, and the NAL unit type of each picture's first slice in the base layer
+is read off it in Go (`playability.Checker.ReadGOP`), in decode order. The pictures are matched one
+to one with the output's packet listing, the same listing the playability gate's cold starts read
+([docs/design/swap.md](swap.md#playability)), so the keyframe flag of each packet meets the type of
+its picture. The output is refused where any picture is RASL (`RASL_N`, `RASL_R`), or where a
+keyframe is anything but `IDR_W_RADL`, `IDR_N_LP` or a BLA picture: a CRA is the open-GOP keyframe,
+and a trailing picture is no keyframe at all. RADL pictures decode from their IDR and are allowed.
+The mismatch names how many keyframes are not IDR or BLA pictures and the first one's time and
+type, and how many RASL pictures there are and the first one's time. A GOP structure that cannot be
+read off the file (a stream whose pictures do not match its packets one to one) is a mismatch,
+never a pass; a read that could not be run at all is the gate's one transient refusal.
+
+It costs one copy of the output's video, a read of the whole file, paid only by a job whose plan
+declares closed GOPs; the packet listing is shared with the playability gate. A plan that declares
+open GOPs or says nothing is not checked: libx265's open GOP is a legitimate stream, and holding it
+to closed GOPs would refuse every encode of a root that never asked for them. The fixture is an
+output coded with open GOPs under a plan declaring closed ones, refused naming `closed-gop`, while
+the same output passes under an unset or `true` plan and holdfast's own closed-GOP encode passes
+(`TestClosedGOP_AnOpenGOPOutputUnderAClosedPlanIsRefused`,
+`TestClosedGOP_TheSameOutputUnderAnOpenOrUnsetPlanPasses`,
+`TestClosedGOP_HoldfastsOwnClosedEncodePasses`).
+
 ## The output bit depth
 
 <a id="bit-depth"></a>
@@ -255,7 +288,8 @@ both).
 
 **An output replaces its source only when it carries what its plan declares: the bit depth and
 chroma subsampling of the pixel format it was encoded to, every colour tag the plan writes,
-and every HDR10 static-metadata block the source carries, with the same values.** The
+and every HDR10 static-metadata block the source carries, with the same values** - and, where the
+plan declares closed GOPs, closed GOPs ([above](#closed-gop)). The
 declaration is part of the plan (`MetadataPlan.Fidelity`, derived once by `hdr.FidelityOf`
 from the plan's pixel format, its colour description and the source's side data), and the gate
 (`Engine.outputFidelity`, gate 5b of `verifyAgainst`, `GateFidelity`) holds the output to it

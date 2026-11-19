@@ -15,6 +15,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/hdr"
+	"github.com/NSchatz/holdfast/internal/playability"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/timing"
@@ -141,6 +142,11 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 	in, tmp := job.Source, job.Output
 	prof, plan := job.Profile, job.Streams
 
+	// The output's packet listing, read at most once, by the first of the two checks below
+	// that needs it (the closed-GOP check inside the fidelity gate, and the playability gate's
+	// cold starts) and only where one of them runs.
+	listing := e.outputListing(tmp)
+
 	// THE SEAMS, announced before any gate runs: this is the plan the checks below read, and
 	// the intended stream map inside it. The encode announced the ones its command line was
 	// built from at its own seams, so a reader holding both can ask whether they were ONE
@@ -229,12 +235,18 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 	// stripped of its mastering-display block can score like a faithful one and pass every
 	// other gate. It runs here, before the full decode, because it costs one probe.
 	//
+	// Where the plan declares closed GOPs (x265_open_gop: false) the gate also holds the
+	// output to them: no RASL picture, and every keyframe the container flags an IDR or BLA
+	// picture (docs/design/encode-plan.md#closed-gop). That costs a read of the whole output,
+	// paid only by a job that asked for closed GOPs.
+	//
 	// A REMUX is not held to it: it re-encodes nothing, and the bit-identity check below
 	// holds its video to something strictly stronger. DETERMINISTIC: the same source,
-	// configuration and ffmpeg build produce the same output, and it loses the same field.
+	// configuration and ffmpeg build produce the same output, and it loses the same field;
+	// TRANSIENT only where the closed-GOP read could not be run at all.
 	if !job.Video.Copy {
-		if err := e.outputFidelity(ctx, job); err != nil {
-			return none, GateFidelity, store.FailureDeterministic, err
+		if class, err := e.outputFidelity(ctx, job, listing); err != nil {
+			return none, GateFidelity, class, err
 		}
 	}
 
@@ -303,6 +315,23 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 	if job.Picture.Crop.Applied() {
 		if gate, class, err := e.cropGate(ctx, job); err != nil {
 			return none, gate, class, err
+		}
+	}
+
+	// 6d. THE PLAYABILITY GATE, on every encode: the output decoded the way a player or a
+	// media server starts it, rather than linearly from its first frame as the decode-integrity
+	// check above decodes it - from a cold start at a sample of its keyframes (and at the
+	// keyframes followed by leading pictures), and cut into HLS-style segments each decoded on
+	// its own (docs/design/swap.md#playability). An open-GOP output whose cold start fails
+	// passes every gate above. After them, because it is a decode of the whole output again.
+	// DETERMINISTIC where a decode ran and failed; TRANSIENT where a check could not be run.
+	//
+	// A REMUX is not held to it: its video is the source's own, bit for bit (the identity
+	// check below), so it starts exactly as the source does, and refusing it would keep a
+	// source with the same property.
+	if !job.Video.Copy {
+		if class, err := e.playabilityGate(ctx, job, listing); err != nil {
+			return none, GatePlayability, class, err
 		}
 	}
 
@@ -440,11 +469,23 @@ func (e *FidelityError) Error() string {
 		strings.Join(parts, "; ") + "). The source is kept"
 }
 
+// FieldClosedGOP is the fidelity field a plan declaring closed GOPs adds: the output's GOP
+// structure (docs/design/encode-plan.md#closed-gop).
+const FieldClosedGOP hdr.Field = "closed-gop"
+
+// closedGOPWant is what FieldClosedGOP holds an output to, as a mismatch names it.
+const closedGOPWant = "closed GOPs (x265_open_gop: false): every keyframe an IDR or BLA picture and no RASL picture"
+
 // outputFidelity holds the output to the plan's fidelity declaration. It reads the output in
 // two probes (probe.OutputFacts): its stream-level pixel format, colour tags and side data,
 // and its first decoded frame's colour tags and side data - the side data in the same flat
-// form, and in the same frame-then-stream order, the guards read a source's in.
-func (e *Engine) outputFidelity(ctx context.Context, job *EncodePlan) error {
+// form, and in the same frame-then-stream order, the guards read a source's in. Where the plan
+// declares closed GOPs it reads the output's GOP structure too (closedGOP).
+//
+// Every mismatch is DETERMINISTIC, a GOP structure that could not be read off the file
+// included; the one TRANSIENT refusal is a GOP read that could not be run at all, and only
+// where no other field was found lost.
+func (e *Engine) outputFidelity(ctx context.Context, job *EncodePlan, listing func(context.Context) (*playability.Stream, error)) (store.FailureClass, error) {
 	out := e.Probe.OutputFacts(ctx, job.Output)
 	obs := hdr.Observed{
 		PixFmt:   out.PixFmt,
@@ -452,10 +493,84 @@ func (e *Engine) outputFidelity(ctx context.Context, job *EncodePlan) error {
 		Frame:    hdr.Tags(out.Frame),
 		SideData: out.SideData,
 	}
-	if m := job.Metadata.Fidelity.Check(obs); len(m) > 0 {
-		return &FidelityError{Mismatches: m}
+	m := job.Metadata.Fidelity.Check(obs)
+	if job.Video.GOP.Set && !job.Video.GOP.Open {
+		found, err := e.closedGOP(ctx, job.Output, listing)
+		switch {
+		case err != nil && !playability.IsFailure(err) && len(m) == 0:
+			return store.FailureTransient, fmt.Errorf("output fidelity: the closed GOPs the plan declares could not "+
+				"be checked: %w. The source is kept", err)
+		case err != nil && !playability.IsFailure(err):
+			// A field already found lost is a deterministic verdict whatever the GOP read could
+			// not establish, and the refusal reports it.
+		case err != nil:
+			m = append(m, hdr.Mismatch{Field: FieldClosedGOP, Want: closedGOPWant, Got: "a GOP structure that could not be read (" + err.Error() + ")"})
+		case found != "":
+			m = append(m, hdr.Mismatch{Field: FieldClosedGOP, Want: closedGOPWant, Got: found})
+		}
 	}
-	return nil
+	if len(m) > 0 {
+		return store.FailureDeterministic, &FidelityError{Mismatches: m}
+	}
+	return "", nil
+}
+
+// playabilityChecker runs the playability checks with the binaries the prober runs.
+func (e *Engine) playabilityChecker() playability.Checker {
+	return playability.Checker{FFmpeg: e.Probe.FFmpeg, FFprobe: e.Probe.FFprobe}
+}
+
+// outputListing returns a reader of file's packet listing that lists it the first time it is
+// asked and hands back that one answer after, so the two checks that read it pay for one.
+func (e *Engine) outputListing(file string) func(context.Context) (*playability.Stream, error) {
+	var listed *playability.Stream
+	var err error
+	return func(ctx context.Context) (*playability.Stream, error) {
+		if listed == nil && err == nil {
+			listed, err = e.playabilityChecker().ReadStream(ctx, file)
+		}
+		return listed, err
+	}
+}
+
+// closedGOP reads file's HEVC GOP structure and holds it to a closed one: "" where it is
+// closed, what it found otherwise (playability.ClosedGOP).
+func (e *Engine) closedGOP(ctx context.Context, file string, listing func(context.Context) (*playability.Stream, error)) (string, error) {
+	s, err := listing(ctx)
+	if err != nil {
+		return "", err
+	}
+	types, err := e.playabilityChecker().ReadGOP(ctx, file)
+	if err != nil {
+		return "", err
+	}
+	return playability.ClosedGOP(s, types), nil
+}
+
+// playabilityGate is gate 6d on its own: the output decoded from cold starts at its keyframes
+// and segment by segment (playability.Checker.Check), under the root's playability keys. A
+// decode that ran and failed is DETERMINISTIC - the same output fails the same way - and a
+// check that could not be run is TRANSIENT.
+func (e *Engine) playabilityGate(ctx context.Context, job *EncodePlan, listing func(context.Context) (*playability.Stream, error)) (store.FailureClass, error) {
+	o := playability.Options{ColdStarts: job.Profile.PlayabilityColdStartCount(), Segments: job.Profile.PlayabilitySegmentsOn()}
+	if o.ColdStarts <= 0 && !o.Segments {
+		return "", nil
+	}
+	var s *playability.Stream
+	var err error
+	if o.ColdStarts > 0 {
+		s, err = listing(ctx)
+	}
+	if err == nil {
+		err = e.playabilityChecker().Check(ctx, job.Output, s, o)
+	}
+	switch {
+	case err == nil:
+		return "", nil
+	case playability.IsFailure(err):
+		return store.FailureDeterministic, fmt.Errorf("%w. The source is kept", err)
+	}
+	return store.FailureTransient, fmt.Errorf("%w. The source is kept", err)
 }
 
 // videoIdentity establishes that every video stream the output carries is IDENTICAL to

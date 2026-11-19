@@ -154,6 +154,21 @@ func TestVideoTimestamps_ReadsWhatFFmpegWrote(t *testing.T) {
 	if _, err := New(ffmpeg, filepath.Join(dir, "no-such-ffprobe")).VideoTimestamps(ctx, vfr); !errors.Is(err, ErrTimestampsUnanswered) {
 		t.Errorf("an ffprobe that could not be started: %v, want unanswered", err)
 	}
+	// A cover picture stored as the first video stream is never the stream timed.
+	cover, covered := filepath.Join(dir, "cover.png"), filepath.Join(dir, "covered.mp4")
+	for _, args := range [][]string{
+		{"-f", "lavfi", "-i", "testsrc2=size=64x48:rate=1", "-frames:v", "1", "--", cover},
+		{"-i", cover, "-f", "lavfi", "-i", "testsrc2=duration=1:size=64x48:rate=5", "-map", "0", "-map", "1",
+			"-c:v:0", "png", "-disposition:v:0", "attached_pic", "-c:v:1", "libx264", "-preset", "ultrafast", "--", covered},
+	} {
+		if out, err := exec.Command(ffmpeg, append([]string{"-hide_banner", "-loglevel", "error", "-y"}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("make fixture: %v\n%s", err, out)
+		}
+	}
+	if got, err := p.VideoTimestamps(ctx, covered); err != nil || got.Packets != 5 {
+		t.Errorf("a file whose first video stream is a cover picture = %+v, %v; want its 5-frame moving picture", got, err)
+	}
+
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
 	if _, err := p.VideoTimestamps(cancelled, vfr); !errors.Is(err, ErrTimestampsUnanswered) {

@@ -11,9 +11,11 @@ import (
 	"strings"
 )
 
-// Timestamps is the presentation timing of a file's first video stream (`v:0`, the stream
-// every other probe and gate reads): one timestamp per packet, in file order, in ticks of the
-// stream's own time base. It is read by demuxing alone, never by decoding.
+// Timestamps is the presentation timing of a file's first moving-picture video stream (`V:0`:
+// the first video stream that is not an attached picture, the one the playability gate lists
+// too, so a cover picture stored first is never the stream timed): one timestamp per packet, in
+// file order, in ticks of the stream's own time base. It is read by demuxing alone, never by
+// decoding.
 type Timestamps struct {
 	// TimeBaseNum and TimeBaseDen are the stream's time base: one tick is
 	// TimeBaseNum/TimeBaseDen seconds. Both are positive.
@@ -43,10 +45,10 @@ type Timestamps struct {
 // VideoTimestamps returns is ffprobe's own answer about the file, read and found unusable.
 var ErrTimestampsUnanswered = errors.New("ffprobe did not answer")
 
-// VideoTimestamps lists every packet of f's first video stream with its presentation and
-// decode timestamps, and the stream's time base, in ONE ffprobe that demuxes the file and
-// decodes nothing. The listing is read as it streams, so a film's hundreds of thousands of
-// packets are never buffered as text.
+// VideoTimestamps lists every packet of f's first moving-picture video stream with its
+// presentation and decode timestamps, and the stream's time base, in ONE ffprobe that demuxes
+// the file and decodes nothing. The listing is read as it streams, so a film's hundreds of
+// thousands of packets are never buffered as text.
 //
 // It refuses rather than guesses: a listing with no packet, no time base, a line this reader
 // does not know or a timestamp that is not a number is an error, never a partial answer. A
@@ -54,7 +56,7 @@ var ErrTimestampsUnanswered = errors.New("ffprobe did not answer")
 // (FromDTS), or reported as not readable in time (Untimed), and the gate decides what that
 // means for a source and for an output.
 func (p *Prober) VideoTimestamps(ctx context.Context, f string) (Timestamps, error) {
-	cmd := exec.CommandContext(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
+	cmd := exec.CommandContext(ctx, p.FFprobe, "-v", "error", "-select_streams", "V:0",
 		"-show_entries", "packet=pts,dts:stream=time_base", "-of", "compact=p=1:nk=0", "--", f)
 	out, err := cmd.StdoutPipe()
 	if err != nil {

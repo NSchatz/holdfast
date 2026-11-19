@@ -45,7 +45,10 @@ and fixes the trust gaps:
   duration/packet parity, **timestamp parity** (the video presented at the source's times, frame for frame -
   [docs/design/swap.md](docs/design/swap.md#timing-parity)), strictly smaller, per-type stream-count parity, **output fidelity** (the bit
   depth, chroma, colour tags and HDR10 metadata the job's plan declares -
-  [docs/design/encode-plan.md](docs/design/encode-plan.md#fidelity)), full decode-integrity, and a
+  [docs/design/encode-plan.md](docs/design/encode-plan.md#fidelity)), full decode-integrity,
+  **playability** (decoded from a cold start at a sample of its keyframes and as HLS-style segments,
+  each on its own, the way players and media servers start it -
+  [docs/design/swap.md](docs/design/swap.md#playability)), and a
   **VMAF** perceptual-quality check - its **average** (`min_vmaf`, default `95`), its **worst frame**
   (`vmaf_min_pool`, default `60`) *and* its **colour** (`vmaf_min_chroma`, default `30`, which the
   luma-only VMAF model cannot see at all). The comparison is made in one pixel format holdfast **names and records**, not one
@@ -402,7 +405,9 @@ own list, and the output replaces its source only when it carries what the plan 
 is passed and libx265 keeps its own default, open GOPs, so an existing configuration's command line
 and profile digest do not move. For a library a media server streams, `x265_open_gop: false` is
 recommended: every keyframe is then an IDR a player, a seek or an HLS/DASH segmenter can start
-decoding at without dropping pictures ([docs/design/encode-plan.md](docs/design/encode-plan.md#gop)).
+decoding at without dropping pictures ([docs/design/encode-plan.md](docs/design/encode-plan.md#gop)),
+and the fidelity gate holds each output to it: no RASL picture, every keyframe an IDR
+([closed GOPs](docs/design/encode-plan.md#closed-gop)).
 
 Hardware encoders are opt-in, and none runs on a guess. `nvenc`, `qsv`, `vaapi` and `amf` write
 HEVC, and each has an H.264 and an AV1 sibling (`h264_nvenc`, `av1_qsv` and the rest -

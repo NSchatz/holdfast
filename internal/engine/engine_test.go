@@ -1766,8 +1766,9 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 
 // ---- S0030: live progress, and what it must not cost -------------------------
 
-// The per-job subprocess budget for one done job with the VMAF gate off: 17 ffprobe
-// invocations and 2 ffmpeg invocations (the encode and the decode-integrity check).
+// The per-job subprocess budget for one done job with the VMAF gate off: 18 ffprobe
+// invocations and 5 ffmpeg invocations (the encode, the decode-integrity check, and the
+// playability gate's remux and its two decoders).
 //
 // The ffprobe side is the source snapshot, the source's stream-shape probe that the
 // multi-video-stream guard reads, the source's full stream list that the intended stream
@@ -1801,11 +1802,21 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 // re-measured in the commit that moved it: one probe of each file's chapter table, start
 // time and duration, paid only by a job that encoded.
 //
-// It went UP from 15 for the timing half of the length gate (docs/design/swap.md#timing-parity),
-// re-measured in the commit that moved it: one packet listing of each file's video timestamps,
-// which demuxes the file and decodes nothing, paid only by a job that encoded. It is one per
-// file, not more: the listing carries the packet count, the timestamps and the time base
-// together.
+// Both went UP for the playability gate (docs/design/swap.md#playability), re-measured in the
+// commit that moved them: ffprobe 15 -> 16 for the output's packet listing, and ffmpeg 2 -> 5
+// for the remux of the output into fragmented MP4 and two decoders fed from it, this fixture's
+// one cold start and its one segment. The decoders scale with the output, not the fixture: a
+// real output pays up to 16 + 64 cold-start decoders (playability_cold_starts and the
+// keyframes followed by leading pictures) and one decoder per segment of at least 6 s, all
+// fed by the one remux. A plan declaring closed GOPs pays one ffmpeg more, the copy its GOP
+// structure is read off; this fixture's root does not declare them.
+//
+// It went UP from 16 for the timing half of the length gate (docs/design/swap.md#timing-parity),
+// re-measured in the commit that moved it: ffprobe 16 -> 18, one packet listing of each file's
+// video timestamps, which demuxes the file and decodes nothing, paid only by a job that
+// encoded. It is one per file, not more: the listing carries the packet count, the timestamps
+// and the time base together. It is not the playability gate's listing of the output, which
+// reads keyframe flags and no decode timestamps, and is not read for the source.
 //
 // These constants are NOT the evidence for AC12 and must not be read as it — they are a
 // long-run ceiling, so that a per-PR "no worse than last time" cannot ratchet the cost up
@@ -1814,8 +1825,8 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 // fails if these numbers ever stop matching what it measures, so they cannot decay into
 // folklore.
 const (
-	probeBudgetFFprobe = 17
-	probeBudgetFFmpeg  = 2
+	probeBudgetFFprobe = 18
+	probeBudgetFFmpeg  = 5
 )
 
 // countingWrapper writes a shell wrapper for a real binary that appends one line per
