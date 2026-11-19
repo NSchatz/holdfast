@@ -169,8 +169,44 @@ func (p *Prober) scalarFields(ctx context.Context, f string) (map[string]string,
 // read by the `h264` demuxer and decoded by the `h264` decoder), and such a line is not
 // attributed to the demuxer. An unestablished answer here sends the file on to the encode and
 // the full gate, which is where it went before this signal existed.
+//
+// A line on benignDemuxerLines is set aside as though it had not been logged: it is neither
+// the First nor in the Count, so a demuxer that logged only such lines reports no damage. Any
+// other line from the demuxer is damage, alone or alongside one of them.
 func (vp *VideoProps) ContainerDamage() (ContainerDiagnostic, bool) {
 	return vp.demuxErr, vp.demuxErr.Count > 0
+}
+
+// benignDemuxerLines is the CLOSED list of demuxer lines that are not damage: messages a
+// demuxer logs at error level about a file whose every stream it demuxes whole. An entry is
+// matched on the demuxer that logged it AND its whole message, never a part of either, so it
+// cannot swallow another diagnostic that shares its words or another demuxer's line. Each
+// entry carries its argument; a line joins only with one, and a line nobody has argued for is
+// damage.
+//
+// Passing this guard decides nothing about the swap: a file it lets through still faces every
+// gate after the encode (the full decode, the intended-stream check, chapter parity, VMAF).
+// The argument and the proof: docs/design/source-damage.md#benign-demuxer-lines.
+var benignDemuxerLines = []struct{ demuxer, message string }{
+	// The movie's track reference (`tref` `chap`) names a QuickTime chapter track the file
+	// does not carry, as a remux that dropped the chapter track and kept the reference leaves
+	// it. The mov demuxer logs this, reads no chapters from the missing track and carries on:
+	// every stream demuxes and decodes cleanly, a strict full decode (`-xerror -err_detect
+	// +explode`) included. Nothing the encode reads is missing, and the chapter table ffmpeg
+	// does read (none, or the file's Nero `chpl` chapters) is the one the encode copies and
+	// the chapter-parity gate holds the output to.
+	{demuxer: "mov,mp4,m4a,3gp,3g2,mj2", message: "Referenced QT chapter track not found"},
+}
+
+// benignDemuxerLine reports whether msg, logged by the context named name, is on
+// benignDemuxerLines.
+func benignDemuxerLine(name, msg string) bool {
+	for _, b := range benignDemuxerLines {
+		if name == b.demuxer && msg == b.message {
+			return true
+		}
+	}
+	return false
 }
 
 // decoderNamedAsDemuxer maps a video codec to the name its ffmpeg decoder logs under, for
@@ -216,14 +252,14 @@ func (d *diagnostics) keep(b []byte) {
 	}
 }
 
-// flush records the line being read, if there is one.
+// flush records the line being read, if there is one and it is not a benign demuxer line.
 func (d *diagnostics) flush() {
 	if len(d.partial) == 0 {
 		return
 	}
 	name, msg, ok := logContext(string(d.partial))
 	d.partial = d.partial[:0]
-	if !ok {
+	if !ok || benignDemuxerLine(name, msg) {
 		return
 	}
 	if d.count == nil {

@@ -138,7 +138,10 @@ const (
 	// SkipSourceDamaged is the CONTAINER-DAMAGE guard: the probe every file already pays for
 	// ran to completion and reported a video codec, and while it read the file the DEMUXER
 	// logged an error - the container itself is damaged (a zeroed or overwritten stretch of a
-	// Matroska file reads as `0x00 at pos ... invalid as first byte of an EBML number`).
+	// Matroska file reads as `0x00 at pos ... invalid as first byte of an EBML number`). A line on
+	// the probe's closed benign list is not damage on its own (an MP4's chapter reference to a
+	// track it does not carry): that file is encoded and faces every gate like any other
+	// (docs/design/source-damage.md).
 	//
 	// It is a SKIP and not a failure because nothing was attempted: a failure would count
 	// toward max_failures and read as this tool's fault, where the file is what is wrong. It
