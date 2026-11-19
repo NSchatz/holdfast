@@ -57,7 +57,7 @@ ARG GO_IMAGE=golang:1.26.11-trixie@sha256:cff05dd6b81c901f2e8249eb6f91c69a60451d
 # exactly this build, so the ffmpeg the fixture safety proof runs against cannot drift
 # away from the ffmpeg the image ships. Do not copy these values anywhere; change them
 # here and everything follows.
-FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS ffmpeg
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS ffmpeg
 # Unpinned apt versions are fine HERE and only here: this stage is a throwaway fetcher
 # that ships nothing into the final image, and the one artifact it does produce is
 # pinned by release tag and verified by SHA-256 below. Pinning these three would just
@@ -122,7 +122,7 @@ RUN set -eu; \
 # executed here. Each binary is proven to be an ELF executable for the TARGET machine
 # (x86-64 or AArch64, read from its own header) on every build, and is also run and made
 # to print its version whenever the build and target architectures agree.
-FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS dynhdr
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS dynhdr
 # The same throwaway-fetcher reasoning as the ffmpeg stage: nothing from this stage but
 # the two verified binaries reaches the image.
 # hadolint ignore=DL3008
@@ -217,7 +217,7 @@ RUN set -eu; \
 # (scripts.d/50-onevpl.sh), and Debian builds libmfx-gen1.2 for amd64 only, so there is
 # nothing on arm64 these libraries could serve. Read 2026-09-29 at
 # https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-07-31-14-10/scripts.d
-FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS hwruntime
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS hwruntime
 # The same throwaway-fetcher reasoning as the ffmpeg stage: curl only downloads, and every
 # byte it fetches is checked against a pinned sha256 before it is unpacked.
 # hadolint ignore=DL3008
