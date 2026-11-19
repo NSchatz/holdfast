@@ -626,3 +626,37 @@ func dumpLedger(t *testing.T, s *SQLite) map[string][]map[string]any {
 	}
 	return out
 }
+
+// TestOpenExclusiveCurrent_RefusesAnOlderSchemaAndChangesNothing: the dry run's door holds
+// the ledger like OpenExclusive and migrates nothing. A ledger an earlier build wrote is
+// refused with its version left exactly as it was; OpenExclusive migrates the same file.
+func TestOpenExclusiveCurrent_RefusesAnOlderSchemaAndChangesNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	seedTwoTerminalRows(t, path)
+	behind := windBackOneSchemaVersion(t, path)
+
+	if st, err := OpenExclusiveCurrent(path); !errors.Is(err, ErrSchemaBehind) {
+		if st != nil {
+			_ = st.Close()
+		}
+		t.Fatalf("OpenExclusiveCurrent on an older ledger = %v, want ErrSchemaBehind", err)
+	}
+	if got := rawUserVersion(t, path); got != behind {
+		t.Fatalf("the refused open moved the schema version to %d, want it left at %d", got, behind)
+	}
+
+	st, err := OpenExclusive(path)
+	if err != nil {
+		t.Fatalf("OpenExclusive on an older ledger: %v", err)
+	}
+	if len(st.MigrationReport()) != 1 {
+		t.Errorf("OpenExclusive applied %d step(s), want the 1 the ledger was behind", len(st.MigrationReport()))
+	}
+	_ = st.Close()
+
+	st, err = OpenExclusiveCurrent(path)
+	if err != nil {
+		t.Fatalf("OpenExclusiveCurrent on a current ledger: %v", err)
+	}
+	_ = st.Close()
+}

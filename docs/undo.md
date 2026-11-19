@@ -146,7 +146,13 @@ If a record's retained original is no longer on disk - somebody deleted it - it 
 reported as **unrestorable**, the record is dropped, and zero bytes are reported. A
 ledger that promises a restore it cannot perform is worse than one that says nothing.
 
-That holds only where the recorded path lies under a **configured library root**. A record
+That holds only where the file is **not there** - no entry at the recorded path, or a component of
+it that is not a directory. A retained original that could not be read for any other reason (a
+permission, an I/O error, a stale network handle) is no finding about the file: its record is kept,
+the pass logs a `warn` and tries again next time, and `holdfast restore` refuses it, keeping the
+record.
+
+And it holds only where the recorded path lies under a **configured library root**. A record
 whose retained original is missing and lies under **no** configured root is **kept**: the
 commonest way to get one is to mount the same library at a new path and edit
 `library_roots` to match, and nothing on disk is gone. Dropping that record would orphan the
@@ -185,6 +191,8 @@ Every refusal exits non-zero and has changed **nothing** on disk.
 - **Nothing is retained for that path** - never was, or the window closed and the
   retention was released, or it has already been restored.
 - **The retained original is gone.** Reported as unrestorable; the record is dropped.
+- **The retained original could not be read**, for a reason other than its absence. The record is
+  kept: that is no finding about the file.
 - **The retained original is not at its recorded path, and that path lies under no configured
   library root.** The record is **kept**, and the refusal names
   [`holdfast reroot`](reroot.md): if the root moved, a reroot carries the record to the new

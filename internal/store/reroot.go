@@ -51,7 +51,24 @@ var ErrLedgerInUse = errors.New("the ledger is open in another process")
 // through MigrationReport. It never creates a ledger - a command that answered "nothing to
 // rewrite" by writing an empty database into the state directory would be creating the
 // thing it was asked about.
-func OpenExclusive(path string) (*SQLite, error) {
+func OpenExclusive(path string) (*SQLite, error) { return openExclusive(path, true) }
+
+// OpenExclusiveCurrent is OpenExclusive for a caller that must change NOTHING: it holds the
+// ledger the same way, and refuses a ledger whose schema is not this build's, in either
+// direction, rather than migrating it (ErrSchemaBehind for an older one). A dry run is its
+// caller. A migration stamps a version the holdfast that wrote the ledger then refuses to
+// open, so a command that promised to change nothing would have stranded that daemon.
+//
+// It refuses rather than migrating inside a transaction it rolls back because migrate
+// commits each step in a transaction of its own: a rolled-back variant would be a second
+// migration path that only the dry run ever ran.
+func OpenExclusiveCurrent(path string) (*SQLite, error) { return openExclusive(path, false) }
+
+// ErrSchemaBehind is a ledger an earlier build wrote, refused by a door that does not
+// migrate.
+var ErrSchemaBehind = errors.New("the ledger's schema is older than this build's")
+
+func openExclusive(path string, upgrade bool) (*SQLite, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, fmt.Errorf("store: open %q exclusively: %w", path, err)
 	}
@@ -77,6 +94,22 @@ func OpenExclusive(path string) (*SQLite, error) {
 			return nil, fmt.Errorf("%w: %s (%v)", ErrLedgerInUse, path, err)
 		}
 		return nil, fmt.Errorf("store: open %q exclusively: %w", path, err)
+	}
+	if !upgrade {
+		have, err := readSchemaVersion(context.Background(), db)
+		if err == nil {
+			switch want := schemaVersion(); {
+			case have > want:
+				err = errSchemaFromTheFuture(have, want)
+			case have < want:
+				err = fmt.Errorf("%w: it is at schema version %d and this build reads version %d", ErrSchemaBehind, have, want)
+			}
+		}
+		if err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		return &SQLite{db: db}, nil
 	}
 	applied, err := migrate(context.Background(), db)
 	if err != nil {

@@ -36,6 +36,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
@@ -567,6 +568,14 @@ const (
 func (u *UndoWindow) releaseOne(r store.Retained) (int64, releaseKind) {
 	fi, err := os.Stat(r.RetainedPath)
 	if err != nil {
+		// Only an answer that the file is NOT THERE licenses dropping the record. A stat
+		// that failed for any other reason (a permission, an I/O error, a stale handle) is
+		// no finding about the file at all, and the record stays for the next pass.
+		if !notThere(err) {
+			u.Log.Warn("could not read the retained original (will retry next pass)",
+				"path", r.SourcePath, "retained", r.RetainedPath, "err", err)
+			return 0, releasedFailed
+		}
 		if !u.underARoot(r.RetainedPath) {
 			return 0, releasedUnrooted
 		}
@@ -621,7 +630,17 @@ var (
 	// record is KEPT (see ReleaseReport.Unrooted): `holdfast reroot` carries it to the
 	// root's new path, where it can be restored.
 	ErrRetentionUnrooted = errors.New("the retained original lies under no configured library root")
+	// ErrRetentionUnreadable means the retained original could not be read for a reason
+	// other than its absence (a permission, an I/O error, a stale handle). The record is
+	// KEPT: that is no finding about the file.
+	ErrRetentionUnreadable = errors.New("the retained original could not be read")
 )
+
+// notThere reports whether a stat error says the path does not exist: no entry at it, or a
+// component of it that is not a directory. Every other error leaves that open.
+func notThere(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+}
 
 // underARoot reports whether p lies under one of the configured library roots: the test
 // that tells a retained original that is gone from one whose record names a tree this
@@ -656,6 +675,11 @@ func (u *UndoWindow) Restore(ctx context.Context, path string) (RestoreResult, e
 	res.Record = r
 
 	if _, err := os.Stat(r.RetainedPath); err != nil {
+		// A stat that failed for any reason but the file not being there says nothing
+		// about the file, so the record is kept (see releaseOne).
+		if !notThere(err) {
+			return res, fmt.Errorf("%w: %s (%v); the record is kept", ErrRetentionUnreadable, r.RetainedPath, err)
+		}
 		// Under no configured root, the absence is not a finding about the file: the
 		// record is kept and the refusal names the command that carries it.
 		if !u.underARoot(r.RetainedPath) {

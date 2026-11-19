@@ -199,10 +199,10 @@ func TestReroot_DryRunReportsEveryTableAndTheEvidenceAndRewritesNothing(t *testi
 		"health_checks               0 row(s): path 0",
 		"node_leases                 0 row(s): path 0, temp_path 0",
 		"in all                      5 row(s)",
-		"of 4 file(s) the ledger recorded, 3 exist under " + f.newRoot + " and match what it recorded, 0 were " +
-			"replaced since (carried as recorded), 1 no longer exist (carried as recorded), and 0 retained original(s) " +
-			"are not the recorded size",
-		"match ratio 3/3 = 1.000, threshold 0.95 (--min-match)",
+		"of 4 file(s) the ledger recorded, 3 are under " + f.newRoot + " as recorded (0 of them the same file at " +
+			"both paths), 0 were replaced since (carried as recorded), 1 are at neither path (deleted since; carried " +
+			"as recorded), 0 differ from or are only at the old path, and 0 retained original(s) are not the recorded size",
+		"match ratio 3/3 = 1.000, threshold 0.95 (--min-match); coverage 3/4 = 0.750, threshold 0.5 (--min-coverage)",
 		"--apply",
 	} {
 		if !strings.Contains(out, want) {
@@ -300,9 +300,19 @@ func TestReroot_Refusals(t *testing.T) {
 			})
 			return []string{"--config", f.cfgPath, "--from", f.oldRoot, "--to", f.newRoot, "--apply"}
 		}, 1, []string{"collision: jobs " + "@NEW@/movies/film.mkv (fingerprint ", "is already recorded", "Nothing is merged"}},
-		{"no recorded file exists under --to", func(t *testing.T, f *rerootFixture) []string {
-			// The rename never happened: the new root is an empty tree.
+		{"the files are still under --from and not under --to", func(t *testing.T, f *rerootFixture) []string {
+			// The move never happened: the old tree is in place and the new root is empty.
 			if err := os.Rename(f.newRoot, f.oldRoot); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(f.newRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return []string{"--config", f.cfgPath, "--from", f.oldRoot, "--to", f.newRoot, "--apply"}
+		}, 1, []string{"not carried: @NEW@/tv/Show/ep.mkv - the ledger recorded ", "and it is not there, and still at @OLD@/tv/Show/ep.mkv",
+			"@OLD@ is still live and does not agree with @NEW@: 0 recorded file(s) are a different file at each path, and 3 are still under"}},
+		{"no recorded file is anywhere", func(t *testing.T, f *rerootFixture) []string {
+			if err := os.RemoveAll(f.newRoot); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.MkdirAll(f.newRoot, 0o755); err != nil {
@@ -325,7 +335,7 @@ func TestReroot_Refusals(t *testing.T) {
 			}
 			return []string{"--config", f.cfgPath, "--from", f.oldRoot, "--to", f.newRoot, "--min-match", "0.1", "--apply"}
 		}, 1, []string{"retained original not the one recorded: @NEW@/movies/.holdfast-undo/film.25-1.__undo__.mkv.holdfast-undo" +
-			" - the ledger recorded a retained original of 25 bytes, the file there is 5 bytes",
+			" - the ledger recorded a retained original of 25 bytes, and it is 5 bytes",
 			"1 retained original(s) under @NEW@ are not the size of the original their retention recorded"}},
 		{"--min-match of 0", func(t *testing.T, f *rerootFixture) []string {
 			return []string{"--config", f.cfgPath, "--from", f.oldRoot, "--to", f.newRoot, "--min-match", "0"}
@@ -336,6 +346,13 @@ func TestReroot_Refusals(t *testing.T) {
 		{"--min-match NaN", func(t *testing.T, f *rerootFixture) []string {
 			return []string{"--config", f.cfgPath, "--from", f.oldRoot, "--to", f.newRoot, "--min-match", "NaN"}
 		}, 2, []string{"is not a share"}},
+		{"--min-coverage of 0", func(t *testing.T, f *rerootFixture) []string {
+			return []string{"--config", f.cfgPath, "--from", f.oldRoot, "--to", f.newRoot, "--min-coverage", "0"}
+		}, 2, []string{"--min-coverage 0 is not a share"}},
+		{"a dry run over a ledger an earlier build wrote", func(t *testing.T, f *rerootFixture) []string {
+			setUserVersion(t, f.db, userVersion(t, f.db)-1)
+			return []string{"--config", f.cfgPath, "--from", f.oldRoot, "--to", f.newRoot}
+		}, 1, []string{"the ledger's schema is older than this build's", "does not upgrade the ledger", "With --apply"}},
 		{"the rewrite fails part way", func(t *testing.T, f *rerootFixture) []string {
 			conn, err := sql.Open("sqlite", "file:"+f.db)
 			if err != nil {
@@ -414,7 +431,8 @@ func TestReroot_LogsWhatItDidAsRecords(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	req := rerootRequest{From: filepath.Join(f.dir, "elsewhere"), To: f.newRoot, MinMatch: rerootMinMatch}
+	req := rerootRequest{From: filepath.Join(f.dir, "elsewhere"), To: f.newRoot, MinMatch: rerootMinMatch,
+		MinCoverage: rerootMinCoverage}
 	if code := runReroot(context.Background(), log, cfg, req, &bytes.Buffer{}, &bytes.Buffer{}); code != 1 {
 		t.Fatalf("a reroot of nothing exited %d, want 1", code)
 	}
@@ -425,7 +443,8 @@ func TestReroot_LogsWhatItDidAsRecords(t *testing.T) {
 	}
 
 	buf.Reset()
-	req = rerootRequest{From: f.oldRoot, To: f.newRoot, Apply: true, MinMatch: rerootMinMatch}
+	req = rerootRequest{From: f.oldRoot, To: f.newRoot, Apply: true, MinMatch: rerootMinMatch,
+		MinCoverage: rerootMinCoverage}
 	if code := runReroot(context.Background(), log, cfg, req, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("reroot --apply exited %d", code)
 	}
@@ -453,7 +472,8 @@ func TestReroot_LogsWhatItDidAsRecords(t *testing.T) {
 	if whole == nil || whole["rows"] != float64(5) || whole["evidence_matched"] != float64(3) ||
 		whole["evidence_replaced"] != float64(0) || whole["evidence_absent"] != float64(1) ||
 		whole["evidence_retained_mismatched"] != float64(0) || whole["match_ratio"] != float64(1) ||
-		whole["min_match"] != rerootMinMatch || whole["from"] != f.oldRoot || whole["to"] != f.newRoot {
+		whole["min_match"] != rerootMinMatch || whole["coverage"] != 0.75 || whole["min_coverage"] != rerootMinCoverage ||
+		whole["evidence_same_file"] != float64(0) || whole["from"] != f.oldRoot || whole["to"] != f.newRoot {
 		t.Errorf("the summary record does not carry the rows and the evidence: %v", whole)
 	}
 }
@@ -599,9 +619,9 @@ func TestReroot_FilesReplacedSinceTheMoveAreCarriedAsRecorded(t *testing.T) {
 			t.Fatalf("a reroot with 1 of 33 files replaced exited %d: %s", code, errOut)
 		}
 		for _, want := range []string{
-			"32 exist under " + f.newRoot + " and match what it recorded, 1 were replaced since (carried as recorded)",
-			"match ratio 32/33 = 0.970, threshold 0.95 (--min-match)",
-			"replaced since (carried as recorded): " + ep + " - the ledger recorded " + was + ", the file there is " + probe.Fingerprint(ep),
+			"32 are under " + f.newRoot + " as recorded (0 of them the same file at both paths), 1 were replaced since (carried as recorded)",
+			"match ratio 32/33 = 0.970, threshold 0.95 (--min-match); coverage 32/34 = 0.941",
+			"replaced since (carried as recorded): " + ep + " - the ledger recorded " + was + ", and it is " + probe.Fingerprint(ep),
 			"rewrote 35 row(s)",
 		} {
 			if !strings.Contains(out, want) {
@@ -654,4 +674,178 @@ func TestReroot_FilesReplacedSinceTheMoveAreCarriedAsRecorded(t *testing.T) {
 			t.Errorf("the same reroot under --min-match 0.9 exited %d: %s", code, errOut)
 		}
 	})
+}
+
+func userVersion(t *testing.T, db string) int {
+	t.Helper()
+	conn, err := sql.Open("sqlite", "file:"+db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	var v int
+	if err := conn.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+// setUserVersion stamps the ledger as an earlier build's. Only the dry run's refusal reads
+// it here, so the shape behind the number does not matter.
+func setUserVersion(t *testing.T, db string, v int) {
+	t.Helper()
+	conn, err := sql.Open("sqlite", "file:"+db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, v)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// moveBack puts the tree back at the old root, as if the move never happened, and leaves
+// the new root empty.
+func moveBack(t *testing.T, f *rerootFixture) {
+	t.Helper()
+	if err := os.Rename(f.newRoot, f.oldRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(f.newRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// copyRecorded copies one file from the old tree to the same place under the new one, with
+// its modification time, so its size and mtime are exactly what the ledger recorded.
+func copyRecorded(t *testing.T, f *rerootFixture, rel string) {
+	t.Helper()
+	src, dst := filepath.Join(f.oldRoot, rel), filepath.Join(f.newRoot, rel)
+	body, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(dst, fi.ModTime(), fi.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestReroot_ACopyIsNotAMove is the reviewer's case: the old tree left in place and a copy of
+// one recorded file under --to. Presence alone would pass it (1 matched, the rest gone) and
+// carry a retained original's record to a path where nothing is, orphaning the original
+// still under --from. Read at both paths it is a copy - two files, two identities - and the
+// rest are still under --from, so it refuses and changes nothing.
+func TestReroot_ACopyIsNotAMove(t *testing.T) {
+	f := newRerootFixture(t)
+	moveBack(t, f)
+	copyRecorded(t, f, filepath.Join("movies", "film.mkv"))
+	before := ledgerDump(t, f.db)
+
+	code, out, errOut := f.reroot(t, "--apply")
+	if code != 1 {
+		t.Fatalf("a reroot onto a copy exited %d, want 1:\n%s%s", code, out, errOut)
+	}
+	for _, want := range []string{
+		"not carried: " + filepath.Join(f.newRoot, "movies", "film.mkv") + " - the ledger recorded ",
+		"and it is a different file from the one still at " + filepath.Join(f.oldRoot, "movies", "film.mkv"),
+		"not carried: " + filepath.Join(f.newRoot, "movies", ".holdfast-undo", "film.25-1.__undo__.mkv.holdfast-undo"),
+		"1 recorded file(s) are a different file at each path, and 2 are still under " + f.oldRoot + " but not under " + f.newRoot,
+		"This is a copy or a partial one, or the wrong --to, not a move",
+	} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("the refusal does not say %q:\n%s", want, errOut)
+		}
+	}
+	if after := ledgerDump(t, f.db); !reflect.DeepEqual(before, after) {
+		t.Error("a refused reroot changed the ledger")
+	}
+}
+
+// TestReroot_TheOldMountStillInPlace: a host can have the old root still mounted as a second
+// mount of the same filesystem. Every file then has ONE identity at both paths, which is the
+// strongest evidence there is, and the reroot carries the rows. A test cannot mount
+// unprivileged, so the second mount is a hard link of every file: the same device and inode
+// at both paths, which is exactly what two mounts of one filesystem show.
+func TestReroot_TheOldMountStillInPlace(t *testing.T) {
+	f := newRerootFixture(t)
+	err := filepath.WalkDir(f.newRoot, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(f.newRoot, p)
+		old := filepath.Join(f.oldRoot, rel)
+		if d.IsDir() {
+			return os.MkdirAll(old, 0o755)
+		}
+		return os.Link(p, old)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errOut := f.reroot(t, "--apply")
+	if code != 0 {
+		t.Fatalf("a reroot with the old mount still in place exited %d: %s", code, errOut)
+	}
+	if !strings.Contains(out, "3 are under "+f.newRoot+" as recorded (3 of them the same file at both paths)") {
+		t.Errorf("the report does not say the files are the same file at both paths:\n%s", out)
+	}
+	if left := ledgerNames(t, f.db, f.oldRoot); len(left) != 0 {
+		t.Errorf("rows still name %s: %v", f.oldRoot, left)
+	}
+}
+
+// TestReroot_ASparseTreeIsNotTheLibrary: with the old root unmounted, a tree that holds a few
+// recorded files and lacks the rest has a perfect match ratio and is still not shown to be
+// the library that moved. The coverage floor - matched over every recorded file, deleted ones
+// included - refuses it, and --min-coverage sets it.
+func TestReroot_ASparseTreeIsNotTheLibrary(t *testing.T) {
+	f := newRerootFixtureWith(t, 30)
+	for i := 0; i < 25; i++ {
+		if err := os.Remove(filepath.Join(f.newRoot, "movies", fmt.Sprintf("extra-%02d.mkv", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := ledgerDump(t, f.db)
+
+	code, out, errOut := f.reroot(t, "--apply")
+	if code != 1 || !strings.Contains(errOut, "only 8 of the 34 file(s) the ledger recorded under "+f.oldRoot+
+		" are under "+f.newRoot+" as recorded (a coverage of 0.235, under the --min-coverage threshold of 0.5)") {
+		t.Errorf("a sparse tree exited %d, want 1 naming the coverage and the threshold:\n%s%s", code, out, errOut)
+	}
+	if !strings.Contains(out, "match ratio 8/8 = 1.000") {
+		t.Errorf("the case is not about the match ratio, which should be perfect:\n%s", out)
+	}
+	if after := ledgerDump(t, f.db); !reflect.DeepEqual(before, after) {
+		t.Error("a refused reroot changed the ledger")
+	}
+	if code, _, errOut := f.reroot(t, "--min-coverage", "0.2", "--apply"); code != 0 {
+		t.Errorf("the same reroot under --min-coverage 0.2 exited %d: %s", code, errOut)
+	}
+}
+
+// TestReroot_ADryRunNeverUpgradesTheLedger: a dry run over a ledger an earlier build wrote
+// refuses rather than migrate it, so an older daemon can still open its ledger afterwards.
+func TestReroot_ADryRunNeverUpgradesTheLedger(t *testing.T) {
+	f := newRerootFixture(t)
+	behind := userVersion(t, f.db) - 1
+	setUserVersion(t, f.db, behind)
+
+	code, _, errOut := f.reroot(t)
+	if code != 1 || !strings.Contains(errOut, "does not upgrade the ledger") {
+		t.Errorf("a dry run over an older ledger exited %d, want 1 refusing to upgrade it: %s", code, errOut)
+	}
+	if got := userVersion(t, f.db); got != behind {
+		t.Errorf("the dry run moved the ledger's schema version to %d, want it left at %d", got, behind)
+	}
 }

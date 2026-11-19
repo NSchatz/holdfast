@@ -172,3 +172,64 @@ func TestUndo_RestoreRefusesAndKeepsAMissingRetentionUnderNoConfiguredRoot(t *te
 		t.Error("the record of a retained original missing under a configured root was kept")
 	}
 }
+
+// TestUndo_AnUnreadableRetainedOriginalKeepsItsRecord: under a configured root, only an
+// answer that the file is NOT THERE (no entry, or a component that is not a directory)
+// licenses dropping a record. Any other stat failure - here a symbolic link loop and a name
+// past the filesystem's limit, the two a test can produce without privileges, standing in
+// for a permission, an I/O error or a stale handle - is no finding about the file: the
+// release keeps the record and reports no unrestorable original, and a restore refuses
+// keeping it.
+func TestUndo_AnUnreadableRetainedOriginalKeepsItsRecord(t *testing.T) {
+	cases := []struct {
+		name     string
+		retained func(t *testing.T, root string) string
+	}{
+		{"a symbolic link loop", func(t *testing.T, root string) string {
+			area := filepath.Join(root, UndoDirName)
+			if err := os.MkdirAll(area, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			p := filepath.Join(area, "loop.mkv.holdfast-undo")
+			if err := os.Symlink(filepath.Base(p), p); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}},
+		{"a name past the filesystem's limit", func(t *testing.T, root string) string {
+			area := filepath.Join(root, UndoDirName)
+			if err := os.MkdirAll(area, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(area, strings.Repeat("x", 300)+".holdfast-undo")
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newUnrootedFixture(t)
+			src := filepath.Join(f.newRoot, "film.mkv")
+			r := store.Retained{SourcePath: src, SwappedPath: src, RetainedPath: c.retained(t, f.newRoot),
+				SourceBytes: 10, SwappedFingerprint: "4:1700000001",
+				RetainedAt: f.clockNow.Add(-2 * time.Hour).Unix(), ExpiresAt: f.clockNow.Add(-time.Hour).Unix()}
+			if _, err := os.Stat(r.RetainedPath); err == nil || notThere(err) {
+				t.Fatalf("the fixture's retained path must fail to stat for a reason other than absence, got %v", err)
+			}
+			if err := f.st.Retain(context.Background(), r); err != nil {
+				t.Fatal(err)
+			}
+
+			rep := f.u.ReleaseExpired(context.Background())
+			if rep.Unrestorable != 0 || rep.Released != 0 || !f.kept(t, src) {
+				t.Errorf("the release over an unreadable retained original reported %+v and kept the record: %v; "+
+					"want nothing released, nothing unrestorable, the record kept", rep, f.kept(t, src))
+			}
+			_, err := f.u.Restore(context.Background(), src)
+			if !errors.Is(err, ErrRetentionUnreadable) || !strings.Contains(err.Error(), "the record is kept") {
+				t.Errorf("Restore = %v, want ErrRetentionUnreadable saying the record is kept", err)
+			}
+			if !f.kept(t, src) {
+				t.Error("a refused restore dropped the record of an unreadable retained original")
+			}
+		})
+	}
+}

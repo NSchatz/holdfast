@@ -31,7 +31,7 @@ change nothing a scan does, and are left where they are.
    ```
 
    It prints, per ledger table, how many rows and which path columns it would rewrite, and the
-   evidence below.
+   evidence below. It changes nothing, not even the ledger's schema version.
 4. **Apply it**, the same command with `--apply`. The rewrite is one transaction: it all lands, or
    nothing does.
 5. **Start holdfast again.** The next scan finds the rows under the new root, and `validate` no
@@ -75,38 +75,54 @@ cannot be added without being carried.
 
 ## The evidence that it is the same files
 
-A reroot claims the files under `--to` are the files the ledger recorded under `--from`, so it checks
-the files rather than trusting the flags. For every path it would rewrite that the ledger records a
-file for, it reads the file now at the new path. Each one is one of:
+A reroot claims the files under `--to` are the tree `--from` was: a **move** of one filesystem, not a
+copy of it and not another tree laid out alike. So it checks the files rather than trusting the flags.
+Presence alone cannot tell a move from a copy - a copy of a few recorded files under `--to`, with the
+old tree still in place, matches every size and mtime it holds - so every recorded file is read at
+**both** paths, the old and the new:
 
-- **matched**: a media file matching a `size:mtime` fingerprint the ledger records for that path (any
-  of the path's `jobs` rows - a file with a superseded row beside its current one records two - or the
-  swap's record of what it left there), or a retained original the size of the original its retention
-  recorded;
-- **replaced since**: a media file that exists but matches none of them. Files are replaced under the
-  same name all the time (an *arr upgrade of an episode, a film acquired again), so a live library has
-  some between the move and the reroot;
-- **gone**: no file at the new path, deleted since its row was written.
+- **at both paths**: a host can have the old root still mounted, as a second mount of the same
+  filesystem. Then each file is ONE file with two names, the same device and inode at both paths, and
+  that is the strongest evidence there is: it counts as matched, whatever has happened to the file
+  since. Two different files is a **copy**, and refuses.
+- **only at the old path**: a partial copy, or the wrong `--to`. It refuses, for an ordinary row and a
+  retained original alike: carrying the row would point it at nothing while the file it describes is
+  still where it was, and a retained original's record carried to an empty path is the next restore's
+  "unrestorable" under a configured root, which drops the record and orphans the original.
+- **only at the new path** (the old mount is gone): judged by what the ledger recorded. A media file is
+  **matched** when it matches a `size:mtime` fingerprint recorded for that path (any of the path's
+  `jobs` rows - a file with a superseded row beside its current one records two - or the swap's record
+  of what it left there), and otherwise **replaced since**: files are replaced under the same name all
+  the time (an *arr upgrade of an episode, a film acquired again). A retained original is matched when
+  it is the size of the original its retention recorded.
+- **at neither path**: deleted since its row was written.
 
-The question is whether `--to` is the **same filesystem** as `--from`, and the rule is dominance, not
-unanimity: an unrelated tree matches almost nothing, while the same tree has replaced only a few. The
-reroot refuses unless at least one recorded file matched and the **match ratio**, matched over matched
-plus replaced, is at least `--min-match` (default `0.95`; any value above 0 and at most 1). One match is
-enough as a floor because a match is not a coincidence - the same relative path, the same size to the
-byte, the same modification second - and the ratio is what rules out the unrelated tree.
+Then two shares decide, and both must hold beside at least one match:
 
-**Replaced and gone files are carried as recorded**, rewritten to the new path with every other
+- the **match ratio**, matched over matched plus replaced, at least `--min-match` (default `0.95`). An
+  unrelated tree matches almost nothing; the same tree has replaced only a few.
+- the **coverage**, matched over every recorded file checked, deleted ones included, at least
+  `--min-coverage` (default `0.5`). A tree that shares a few files and lacks the rest has a perfect
+  ratio and is still not the library that moved; a library loses files between a row being written
+  and a move, but not most of them.
+
+Each threshold takes any value above 0 and at most 1. One match is enough as the floor under them
+because a match is not a coincidence: the same relative path, the same size to the byte, the same
+modification second.
+
+**Replaced and deleted files are carried as recorded**, rewritten to the new path with every other
 column as it was. A `jobs` row is keyed by its path **and** its fingerprint, so a replaced file's old
 row is history and holds nothing: the next scan claims the file at that path as the new file it is,
 exactly as it would have without the move. Neither collides with anything.
 
-**Retained originals are strict.** A retained original that exists under `--to` but is not the size
-of the original its retention recorded refuses the reroot, whatever the ratio: `holdfast restore`
-renames that file over a library file, so a retention is carried only where its file is the one
-recorded or is gone.
+**Retained originals are strict.** A retained original found under `--to` that is not the size of the
+original its retention recorded refuses the reroot, whatever the shares: `holdfast restore` renames
+that file over a library file, so a retention is carried only where its file is the one recorded or is
+gone from both paths.
 
-The report prints the counts, the match ratio and the threshold, and a bounded sample of the replaced
-files (`replaced since (carried as recorded)`), each with what was recorded and what is there now.
+The report prints the counts, both shares beside their thresholds, and a bounded sample of the
+replaced files (`replaced since (carried as recorded)`), each with what was recorded and what is there
+now. A refusal names a bounded sample of the files it refused on.
 
 ## What it refuses
 
@@ -124,19 +140,25 @@ Every refusal exits non-zero, names its reason, and rewrites nothing.
   a `jobs` row's path and fingerprint, a retention's source path, a withheld path, a health check's
   path in its sweep, a lease's path at its epoch. Each collision is named. **Nothing is merged**: the
   pair are two records of one file, and which stands is not a decision this command takes.
-- **The evidence fails**, as above: no recorded file matched, the match ratio is under
-  `--min-match`, or a retained original is not the recorded size.
+- **The evidence fails**, as above: a recorded file is a different file at each path or is only at
+  the old one, a retained original is not the recorded size, no recorded file matched, or the coverage
+  or the match ratio is under its threshold.
+- **A dry run meets a ledger an earlier build wrote.** A dry run changes nothing, the schema included:
+  upgrading the ledger stamps a version the holdfast that wrote it then refuses to open. With `--apply`
+  the reroot migrates it first, as `restore` and `requeue` do, and then refuses or rewrites exactly as a
+  dry run would have said.
 
-Like every command that writes the ledger, a reroot first migrates a ledger an earlier build wrote,
-and the log records each step.
+With `--apply`, like every command that writes the ledger, a reroot first migrates a ledger an
+earlier build wrote, and the log records each step.
 
 ## What it logs
 
 One structured record per table (`component=ledger.reroot`, `table`, `rows`, and each path column's
 count under `columns`), and one for the whole (`rows`, the evidence counts `evidence_checked`,
-`evidence_matched`, `evidence_replaced`, `evidence_absent` and `evidence_retained_mismatched`, and
-`match_ratio` beside `min_match`), with `applied=true` for a rewrite and `applied=false` for a dry run.
-A refusal is one `warn` record carrying its `reason` token: `min-match`, `paths`, `to-not-a-root`, `from-is-a-root`, `no-ledger`, `ledger-in-use`, `ledger-unopenable`,
+`evidence_matched`, `evidence_same_file`, `evidence_replaced`, `evidence_absent` and
+`evidence_retained_mismatched`, `match_ratio` beside `min_match`, and `coverage` beside
+`min_coverage`), with `applied=true` for a rewrite and `applied=false` for a dry run. A refusal is one
+`warn` record carrying its `reason` token: `threshold`, `paths`, `to-not-a-root`, `from-is-a-root`, `no-ledger`, `schema-behind`, `ledger-in-use`, `ledger-unopenable`,
 `plan-failed`, `nothing-recorded`, `collision`, `evidence` or `apply-failed`.
 
 ## The undo window before a reroot

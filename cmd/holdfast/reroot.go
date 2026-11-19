@@ -6,16 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/logging"
-	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 )
 
@@ -49,6 +46,8 @@ Flags:
   --apply      rewrite the ledger, in one transaction; without it nothing is rewritten
   --min-match  the share of the recorded files found under --to that must still be the
                recorded file (default 0.95; above 0 and at most 1)
+  --min-coverage  the share of ALL the recorded files, deleted ones included, that must be
+               under --to as recorded (default 0.5; above 0 and at most 1)
 
 It is for a library that MOVED: the same filesystem mounted at a new path, with
 library_roots edited to match. Every path the ledger records at or under --from (job rows,
@@ -61,16 +60,20 @@ Stop holdfast first. The ledger must be open nowhere else, and reroot refuses wh
 It refuses, rewriting nothing, when --to is not a configured library root; when --from is
 one, or contains or lies inside one; when nothing is recorded under --from; when a
 rewritten row would take a key a row under --to already holds (each is named, and nothing
-is merged); and when --to is not shown to be the same files. That evidence is the files
-themselves: of the recorded files that exist under --to, at least one, and at least
---min-match of them, must match a size:mtime the ledger recorded for that path, and every
-retained original that exists there must be the size of the original it holds. A file
-replaced since (an *arr upgrade under the same name) and a file deleted since are both
-carried as recorded: a row is keyed by its path AND its fingerprint, so the next scan
-answers a replaced file as the new file it is.
+is merged); and when --to is not shown to be the tree --from was. That evidence is the
+files themselves, read at BOTH paths. A file still at --from must be the same file (one
+device and inode) at --to: two different files is a copy, not a move, and a file only at
+--from is a partial copy or the wrong --to; either refuses. Of the rest, at least one, at
+least --min-match of those found under --to and at least --min-coverage of all of them
+must be under --to as recorded (the same size:mtime, or for a retained original the same
+size), and every retained original found there must be the recorded size. A file replaced
+since (an *arr upgrade under the same name) and one deleted since are carried as recorded:
+a row is keyed by its path AND its fingerprint, so the next scan answers a replaced file
+as the new file it is.
 
-Like every command that writes the ledger, it first migrates a ledger an earlier build
-wrote, and the log records each step.
+With --apply it first migrates a ledger an earlier build wrote, like every command that
+writes the ledger, and the log records each step. A dry run changes nothing, the schema
+included: it refuses a ledger an earlier build wrote rather than upgrade it.
 `
 
 // rerootComponent names the emitter on every log record this command writes.
@@ -80,24 +83,11 @@ const rerootComponent = "ledger.reroot"
 // whole of a library.
 const rerootSample = 10
 
-// rerootMinMatch is --min-match's default: the share of the recorded files found under --to
-// that must still be the recorded file. A live library replaces files under the same name
-// (an episode upgraded in place) between the move and the reroot, so the rule is DOMINANCE
-// rather than unanimity: the question is whether --to is the same filesystem as --from, and
-// an unrelated tree matches almost nothing.
-const rerootMinMatch = 0.95
-
-// rerootMinMatched is the floor under the ratio: at least this many recorded files must
-// match. One is enough, because a match is not a coincidence - the same relative path, the
-// same size to the byte and the same modification second - and the ratio is what rules out
-// the tree that matches almost nothing. A floor any higher would refuse a small library's
-// honest move for want of files rather than for want of evidence.
-const rerootMinMatched = 1
-
 type rerootRequest struct {
-	From, To string
-	Apply    bool
-	MinMatch float64
+	From, To    string
+	Apply       bool
+	MinMatch    float64
+	MinCoverage float64
 }
 
 func cmdReroot(args []string, stdout, stderr io.Writer) int {
@@ -107,6 +97,7 @@ func cmdReroot(args []string, stdout, stderr io.Writer) int {
 	to := fs.String("to", "", "the configured library root the same files are mounted at now")
 	apply := fs.Bool("apply", false, "rewrite the ledger; without it nothing is rewritten")
 	minMatch := fs.Float64("min-match", rerootMinMatch, "the share of the recorded files found under --to that must match")
+	minCoverage := fs.Float64("min-coverage", rerootMinCoverage, "the share of all the recorded files that must be under --to as recorded")
 
 	cfg, code := loadConfig(fs, args, stderr)
 	if cfg == nil {
@@ -122,15 +113,28 @@ func cmdReroot(args []string, stdout, stderr io.Writer) int {
 		fs.Usage()
 		return exitUsage
 	}
-	// The NaN case fails both comparisons, so it is refused here too.
-	if !(*minMatch > 0 && *minMatch <= 1) {
-		fmt.Fprintf(stderr, "holdfast: --min-match %v is not a share: it must be above 0 and at most 1\n\n", *minMatch)
+	if err := checkShares(*minMatch, *minCoverage); err != nil {
+		fmt.Fprintf(stderr, "holdfast: %v\n\n", err)
 		fs.Usage()
 		return exitUsage
 	}
 	log := logging.To(stderr, cfg.LogLevel)
-	return runReroot(context.Background(), log, cfg,
-		rerootRequest{From: *from, To: *to, Apply: *apply, MinMatch: *minMatch}, stdout, stderr)
+	return runReroot(context.Background(), log, cfg, rerootRequest{From: *from, To: *to, Apply: *apply,
+		MinMatch: *minMatch, MinCoverage: *minCoverage}, stdout, stderr)
+}
+
+// checkShares refuses a threshold that is not a share. NaN fails both comparisons, so it is
+// refused too.
+func checkShares(minMatch, minCoverage float64) error {
+	for _, f := range []struct {
+		flag string
+		v    float64
+	}{{"--min-match", minMatch}, {"--min-coverage", minCoverage}} {
+		if !(f.v > 0 && f.v <= 1) {
+			return fmt.Errorf("%s %v is not a share: it must be above 0 and at most 1", f.flag, f.v)
+		}
+	}
+	return nil
 }
 
 // runReroot is the command after its flags: every refusal, the plan, the evidence and the
@@ -145,8 +149,8 @@ func runReroot(ctx context.Context, log *slog.Logger, cfg *config.Config, req re
 		return exitError
 	}
 
-	if !(req.MinMatch > 0 && req.MinMatch <= 1) {
-		return refuse("min-match", "--min-match %v is not a share: it must be above 0 and at most 1", req.MinMatch)
+	if err := checkShares(req.MinMatch, req.MinCoverage); err != nil {
+		return refuse("threshold", "%v", err)
 	}
 	from, to, reason, err := rerootRoots(cfg, req.From, req.To)
 	if err != nil {
@@ -158,9 +162,21 @@ func runReroot(ctx context.Context, log *slog.Logger, cfg *config.Config, req re
 	if _, err := os.Stat(dbPath); err != nil {
 		return refuse("no-ledger", "there is no ledger at %s, so there is nothing to carry", dbPath)
 	}
-	st, err := store.OpenExclusive(dbPath)
+	// A dry run promises to change nothing, and a migration would: it stamps a schema version
+	// the holdfast that wrote the ledger then refuses to open. So only --apply migrates.
+	open := store.OpenExclusive
+	if !req.Apply {
+		open = store.OpenExclusiveCurrent
+	}
+	st, err := open(dbPath)
 	if err != nil {
 		reportMigrationRefusal(log, err)
+		if errors.Is(err, store.ErrSchemaBehind) {
+			return refuse("schema-behind", "%v. A dry run changes nothing, so it does not upgrade the ledger: that "+
+				"would stamp a version the holdfast which wrote it then refuses to open. With --apply the reroot "+
+				"migrates it first, as restore and requeue do, and then refuses or rewrites exactly as this "+
+				"report would have said; after that only this build or a later one opens the ledger", err)
+		}
 		if errors.Is(err, store.ErrLedgerInUse) {
 			return refuse("ledger-in-use", "the ledger at %s is open in another process - a running `holdfast serve` "+
 				"or `holdfast run`, or another holdfast command. A reroot rewrites the paths that process is working "+
@@ -197,14 +213,14 @@ func runReroot(ctx context.Context, log *slog.Logger, cfg *config.Config, req re
 	}
 
 	ev := checkRerootEvidence(plan.Evidence)
-	printRerootEvidence(stdout, ev, to, req.MinMatch)
-	if why := ev.refusal(from, to, req.MinMatch); why != "" {
-		printMismatches(stderr, "retained original not the one recorded", ev.RetainedMismatched)
+	printRerootEvidence(stdout, ev, to, req.MinMatch, req.MinCoverage)
+	if why, label, findings := ev.refusal(from, to, req.MinMatch, req.MinCoverage); why != "" {
+		printFindings(stderr, label, findings)
 		return refuse("evidence", "%s", why)
 	}
 
 	if !req.Apply {
-		logReroot(log, plan, ev, req.MinMatch, false)
+		logReroot(log, plan, ev, req, false)
 		fmt.Fprintln(stdout, "dry run: nothing was rewritten. The same command with --apply rewrites these rows in one transaction.")
 		return exitOK
 	}
@@ -216,7 +232,7 @@ func runReroot(ctx context.Context, log *slog.Logger, cfg *config.Config, req re
 		}
 		return refuse("apply-failed", "the rewrite was rolled back: %v", err)
 	}
-	logReroot(log, done, ev, req.MinMatch, true)
+	logReroot(log, done, ev, req, true)
 	fmt.Fprintf(stdout, "rewrote %d row(s) from %s to %s in one transaction; the next scan finds them under %s.\n",
 		done.Rows(), from, to, to)
 	return exitOK
@@ -261,119 +277,6 @@ func rerootRoots(cfg *config.Config, from, to string) (string, string, string, e
 	return from, to, "", nil
 }
 
-// rerootEvidence is what the files under --to say about the plan's claim that they are the
-// files the ledger recorded under --from.
-//
-// Replaced is the media files that exist but match no fingerprint recorded for their path:
-// files replaced since the row was written. They count against the match ratio and are
-// carried as recorded. RetainedMismatched is the retained originals that exist but are not
-// the size of the original they hold, and ANY one refuses: a restore renames that file over
-// a library file, so a retention is carried only where its file is the recorded one or is
-// gone.
-type rerootEvidence struct {
-	Checked            int
-	Matched            int
-	Absent             int
-	Replaced           []rerootMismatch
-	RetainedMismatched []rerootMismatch
-}
-
-// ratio is the share of the recorded files found under --to that match, and 0 when none
-// was found.
-func (r rerootEvidence) ratio() float64 {
-	found := r.Matched + len(r.Replaced)
-	if found == 0 {
-		return 0
-	}
-	return float64(r.Matched) / float64(found)
-}
-
-type rerootMismatch struct {
-	Path, Recorded, Now string
-}
-
-// checkRerootEvidence stats every rewritten path the ledger records something about. A
-// path that is not there is ABSENT - a file deleted since its row was written is the
-// ordinary state of a ledger. A path that is there MATCHES when it is the file recorded: a
-// media file matching ANY size:mtime the ledger holds for that path (a superseded row
-// beside the current one records two), a retained original the size of the original it
-// holds. A path that cannot be read matches nothing: it cannot vouch for anything.
-//
-// The stat FOLLOWS a symbolic link, as probe.Fingerprint does, and the attributes are read
-// through probe.AttributesOf, the one derivation every recorded fingerprint came from.
-func checkRerootEvidence(evidence []store.RerootEvidence) rerootEvidence {
-	var res rerootEvidence
-	for _, e := range evidence {
-		res.Checked++
-		fi, err := os.Stat(e.Path)
-		switch {
-		case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
-			res.Absent++
-		case err != nil && e.Retained:
-			res.RetainedMismatched = append(res.RetainedMismatched, rerootMismatch{Path: e.Path, Recorded: recordedOf(e),
-				Now: "unreadable (" + err.Error() + ")"})
-		case err != nil:
-			res.Replaced = append(res.Replaced, rerootMismatch{Path: e.Path, Recorded: recordedOf(e),
-				Now: "unreadable (" + err.Error() + ")"})
-		case e.Retained:
-			if fi.Size() == e.RetainedBytes {
-				res.Matched++
-			} else {
-				res.RetainedMismatched = append(res.RetainedMismatched, rerootMismatch{Path: e.Path, Recorded: recordedOf(e),
-					Now: fmt.Sprintf("%d bytes", fi.Size())})
-			}
-		default:
-			now := probe.AttributesOf(fi).String()
-			if anyEquals(e.Fingerprints, now) {
-				res.Matched++
-			} else {
-				res.Replaced = append(res.Replaced, rerootMismatch{Path: e.Path, Recorded: recordedOf(e), Now: now})
-			}
-		}
-	}
-	return res
-}
-
-func recordedOf(e store.RerootEvidence) string {
-	if e.Retained {
-		return fmt.Sprintf("a retained original of %d bytes", e.RetainedBytes)
-	}
-	return strings.Join(e.Fingerprints, " or ")
-}
-
-func anyEquals(list []string, v string) bool {
-	for _, s := range list {
-		if s == v {
-			return true
-		}
-	}
-	return false
-}
-
-// refusal is why the evidence does not carry the plan, "" when it does.
-func (r rerootEvidence) refusal(from, to string, minMatch float64) string {
-	found := r.Matched + len(r.Replaced)
-	switch {
-	case r.Checked == 0:
-		return fmt.Sprintf("the ledger records no file under %s whose size and modification time could be checked "+
-			"under %s, so nothing shows %s holds the same files", from, to, to)
-	case len(r.RetainedMismatched) > 0:
-		return fmt.Sprintf("%d retained original(s) under %s are not the size of the original their retention "+
-			"recorded (named above). A restore renames that file over a library file, so a retention is carried "+
-			"only where its file is the one recorded or is gone", len(r.RetainedMismatched), to)
-	case r.Matched < rerootMinMatched:
-		return fmt.Sprintf("none of the %d file(s) the ledger recorded under %s exists under %s as the file it "+
-			"recorded (%d found replaced, %d gone), so nothing shows %s holds the same files",
-			r.Checked, from, to, len(r.Replaced), r.Absent, to)
-	case r.ratio() < minMatch:
-		return fmt.Sprintf("only %d of the %d recorded file(s) found under %s match what the ledger recorded "+
-			"(a match ratio of %.3f, under the --min-match threshold of %g), so %s is not shown to be the same "+
-			"files as %s: an unrelated tree matches almost nothing, and the same tree replaces only a few",
-			r.Matched, found, to, r.ratio(), minMatch, to, from)
-	}
-	return ""
-}
-
 func printRerootPlan(w io.Writer, p store.RerootPlan, apply bool) {
 	mode := "dry run, nothing is rewritten"
 	if apply {
@@ -390,33 +293,11 @@ func printRerootPlan(w io.Writer, p store.RerootPlan, apply bool) {
 	fmt.Fprintf(w, "  %-20s %8d row(s)\n", "in all", p.Rows())
 }
 
-func printRerootEvidence(w io.Writer, r rerootEvidence, to string, minMatch float64) {
-	fmt.Fprintf(w, "evidence: of %d file(s) the ledger recorded, %d exist under %s and match what it recorded, "+
-		"%d were replaced since (carried as recorded), %d no longer exist (carried as recorded), and %d "+
-		"retained original(s) are not the recorded size\n",
-		r.Checked, r.Matched, to, len(r.Replaced), r.Absent, len(r.RetainedMismatched))
-	fmt.Fprintf(w, "evidence: match ratio %d/%d = %.3f, threshold %g (--min-match)\n",
-		r.Matched, r.Matched+len(r.Replaced), r.ratio(), minMatch)
-	printMismatches(w, "replaced since (carried as recorded)", r.Replaced)
-}
-
-// printMismatches prints a bounded sample of files that are not what the ledger recorded,
-// each with what it recorded and what is there now.
-func printMismatches(w io.Writer, label string, list []rerootMismatch) {
-	for i, m := range list {
-		if i == rerootSample {
-			fmt.Fprintf(w, "  ... and %d more\n", len(list)-rerootSample)
-			break
-		}
-		fmt.Fprintf(w, "%s: %s - the ledger recorded %s, the file there is %s\n", label, m.Path, m.Recorded, m.Now)
-	}
-}
-
 // logReroot writes what the command did as RECORDS: one per table, every column's count an
 // attribute, then one for the whole, so a log pipeline can select on the table, the column
 // or the evidence rather than parse a sentence. A plan that was not applied is recorded too,
 // saying so, at the same level: both are what happened.
-func logReroot(log *slog.Logger, p store.RerootPlan, ev rerootEvidence, minMatch float64, applied bool) {
+func logReroot(log *slog.Logger, p store.RerootPlan, ev rerootEvidence, req rerootRequest, applied bool) {
 	msg := "ledger reroot planned; nothing was rewritten"
 	if applied {
 		msg = "ledger reroot applied"
@@ -431,7 +312,8 @@ func logReroot(log *slog.Logger, p store.RerootPlan, ev rerootEvidence, minMatch
 	}
 	log.Info(msg, "component", rerootComponent, "from", p.From, "to", p.To, "applied", applied,
 		"rows", p.Rows(), "evidence_checked", ev.Checked, "evidence_matched", ev.Matched,
-		"evidence_replaced", len(ev.Replaced), "evidence_absent", ev.Absent,
+		"evidence_same_file", ev.SameFile, "evidence_replaced", len(ev.Replaced), "evidence_absent", ev.Absent,
 		"evidence_retained_mismatched", len(ev.RetainedMismatched),
-		"match_ratio", ev.ratio(), "min_match", minMatch)
+		"match_ratio", ev.ratio(), "min_match", req.MinMatch,
+		"coverage", ev.coverage(), "min_coverage", req.MinCoverage)
 }
