@@ -13,7 +13,7 @@ The ten keys:
 | `server_auth_token` | the bearer token the MUTATING API endpoints require | `rescan`, `scan`, `pause`, `resume` answer 403: remote control is off |
 | `server_read_token` | the bearer token the READ endpoints under `/api` require | those four endpoints are OPEN, which is the shipped default. They carry the full path of every file holdfast has seen, so on a non-loopback bind that is the whole library served without a credential, and `serve` says so at startup. It does not gate the root path or `/metrics` |
 | `notify_url` | a shoutrrr service URL, which carries its credential in its own userinfo, host, path or query | notifications are off |
-| `tautulli_api_key` | the Tautulli API key | the Plex-aware pause is off |
+| `tautulli_api_key` | the Tautulli API key | the Plex-aware pause is off, and playback evidence (`playback_source: tautulli`) refuses to start |
 | `radarr_api_key` | the Radarr API key, sent in the `X-Api-Key` header | Radarr is not asked to rescan after a swap |
 | `sonarr_api_key` | the Sonarr API key, sent in the `X-Api-Key` header | Sonarr is not asked to rescan after a swap |
 | `plex_token` | a Plex **admin** token, sent in the `X-Plex-Token` header | Plex is not asked for a partial scan after a swap, and no file is held for being played |

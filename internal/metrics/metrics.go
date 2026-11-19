@@ -60,6 +60,8 @@ type Metrics struct {
 
 	// queue is the queue-depth collector, held so SetLiveEngine can reach it.
 	queue *queueCollector
+	// playback is playback evidence's collector, held so SetPlayback can reach it.
+	playback *playbackCollector
 }
 
 // SetLiveEngine says whether the process publishing this metric set runs with
@@ -170,6 +172,8 @@ func New(st store.Store, log *slog.Logger) *Metrics {
 	m.reg.MustRegister(m.queue)
 	m.reg.MustRegister(newUndoWindowCollector(st, log))
 	m.reg.MustRegister(newHealthCollector(st, log))
+	m.playback = newPlaybackCollector(log)
+	m.reg.MustRegister(m.playback)
 	m.reg.MustRegister(collectors.NewGoCollector())
 	m.reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return m

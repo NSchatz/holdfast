@@ -987,6 +987,46 @@ else refuses to start, naming the key. Neither is a library root knob or an enco
 neither moves a profile digest. The reasoning, and what each result means, is in
 [docs/design/health-sweep.md](design/health-sweep.md#health-sweep).
 
+## `playback_source`, `playback_poll_minutes` and `playback_played_fraction` - playback evidence
+
+<a id="playback-evidence"></a>
+
+```yaml
+playback_source: tautulli       # unset, the default: no evidence. Needs tautulli_url and tautulli_api_key
+playback_poll_minutes: 15       # minutes between two reads of the history (1-1440; 0 means the default)
+playback_played_fraction: 0.9   # how far a session must get to play a file through (0.5-1; 0 means the default)
+```
+
+Three daemon-wide keys, read by `holdfast serve` only. With `playback_source: tautulli`, the daemon
+reads Tautulli's session history every `playback_poll_minutes`, ties each finished session to the
+swapped file whose bytes it played (mapping Tautulli's paths back through `plex_path_map`), and
+reports a file whose recent sessions stopped at one point well before the end - on two or more
+clients, or with a resume there that got nowhere - as a **suspected stall**: one `warn` record, `GET /api/playback`
+([docs/api-reference.md](api-reference.md#playback)) and the `holdfast_playback_*` metrics, with
+the `holdfast restore` command while the original is still retained. It is **report only**: nothing
+is restored, re-encoded, released or held on the strength of it, and the undo window closes on its
+own schedule whatever the evidence says. A Tautulli that cannot be read fails open: no evidence
+changes, and a file swapped since the last good read stays `unknown`.
+
+`playback_source` accepts `tautulli` only; `plex` is refused with the reason (Plex's own history
+records only completed views, so it cannot see a stall), and `tautulli` without both Tautulli keys
+refuses to start.
+
+Configuring Tautulli has always also turned on the **streaming pause**: no new work starts while
+Tautulli reports a stream. A library whose reclamation should not stop every evening someone
+watches writes `tautulli_pause: false` (the default is `true`, so an existing configuration pauses
+exactly as before): Tautulli is then read for playback evidence and nothing else.
+
+```yaml
+tautulli_url: http://tautulli:8181
+tautulli_api_key: file:/run/secrets/tautulli-api-key
+tautulli_pause: false        # read Tautulli for evidence; do not pause while anything streams
+playback_source: tautulli
+``` The two figures refuse a value outside their range, naming the key. None of the
+three is a library root knob or an encode setting, so none moves a profile digest. The reasoning,
+the verdicts and what is assumed about Tautulli are in
+[docs/design/playback-evidence.md](design/playback-evidence.md#playback-evidence).
+
 ## The media-server keys - Radarr, Sonarr and Plex
 
 <a id="media-clients"></a>
