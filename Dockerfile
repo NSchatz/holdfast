@@ -451,7 +451,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
 # at the dynamic loader the first time the engine execs ffmpeg ("libgcc_s.so.1: cannot
 # open shared object file"). `cc` is `base` + libgcc_s + libstdc++, still no shell, still
 # nonroot. Verified against the registry: base ships libc/libm/libmvec and no libgcc.
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
 
 ARG VERSION=0.0.0-dev
 ARG COMMIT=unknown
