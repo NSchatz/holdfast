@@ -7,11 +7,14 @@ package engine
 // does, so these cases are the only ones that can see it.
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -193,7 +196,7 @@ func TestTiming_AVariableRateSourceKeepsItsTimesThroughTheEncode(t *testing.T) {
 				t.Fatalf("the source was not replaced by %s", want)
 			}
 			got := timesOf(t, ffprobe, out)
-			if err := timing.Check(want, got); err != nil {
+			if err := timing.Check(want, got, nil); err != nil {
 				t.Fatalf("the replacement's timing is not the source's: %v", err)
 			}
 			if tc.to != tc.from {
@@ -344,7 +347,7 @@ func TestTiming_AContainerThatStoresNoPresentationTimeIsReadByItsDecodeTimes(t *
 				if row.Status != store.Done {
 					t.Fatalf("row %s %q, want done", row.Status, row.Outcome.Reason)
 				}
-				if err := timing.Check(want, timesOf(t, ffprobe, filepath.Join(root, "movie."+tc.to))); err != nil {
+				if err := timing.Check(want, timesOf(t, ffprobe, filepath.Join(root, "movie."+tc.to)), nil); err != nil {
 					t.Fatalf("the replacement's timing is not the source's: %v", err)
 				}
 			}
@@ -453,8 +456,8 @@ var leadingSources = []leadingSource{
 // sources that store more packets than a decoder shows when it starts at their first: an MP4
 // edit list's discarded packets, an open GOP's and a CRA's leading pictures, and the packets
 // before a cut stream's first keyframe. Each encode is exactly what a player shows of the
-// source, and the timing gate passes it: the discarded packets are not counted, and the leading
-// ones are left out where that accounts for the difference exactly.
+// source, and the timing gate passes it: the discarded packets are not counted, and the decode
+// of the source's start shows which of its leading packets a decoder drops.
 func TestTiming_ASourceWhoseFirstPacketsADecoderCannotShowIsNotRefused(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 	for _, tc := range leadingSources {
@@ -462,19 +465,182 @@ func TestTiming_ASourceWhoseFirstPacketsADecoderCannotShowIsNotRefused(t *testin
 			root := t.TempDir()
 			src := filepath.Join(root, "movie."+tc.ext)
 			tc.make(t, ffmpeg, t.TempDir(), src)
-			want := timesOf(t, ffprobe, src)
-			if !tc.starts(want) {
-				t.Fatalf("fixture drifted: the source starts where a decoder shows every packet (%d packets)", len(want.Packets))
+			if !tc.starts(timesOf(t, ffprobe, src)) {
+				t.Fatal("fixture drifted: the source starts where a decoder shows every packet")
 			}
-			st, _ := timingRun(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) {
+			kept := keepCopy(t, src)
+			st, eng := timingRunEngine(t, ffmpeg, ffprobe, root, func(c *config.Config) {
 				c.ContainerExt, c.Encoder, c.VideoExts = "source", tc.encoder, []string{tc.ext}
 			})
 			row := onlyRow(t, st)
 			if row.Status != store.Done {
 				t.Fatalf("row %s %q, want done", row.Status, row.Outcome.Reason)
 			}
-			if err := timing.Check(want, timesOf(t, ffprobe, src)); err != nil {
+			if _, err := eng.timingParity(context.Background(), kept, src); err != nil {
 				t.Fatalf("the replacement's timing is not what a player shows of the source: %v", err)
+			}
+		})
+	}
+}
+
+// keepCopy copies a source aside, so the gate can be asked about it after a swap replaced it.
+func keepCopy(t *testing.T, src string) string {
+	t.Helper()
+	b, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := filepath.Join(t.TempDir(), filepath.Base(src))
+	if err := os.WriteFile(kept, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return kept
+}
+
+// timingRunEngine is timingRun with holdfast's own encoder, returning the engine too.
+func timingRunEngine(t *testing.T, ffmpeg, ffprobe, root string, mutate func(*config.Config)) (*testStore, *Engine) {
+	t.Helper()
+	cfg := baseCfg(root)
+	mutate(&cfg)
+	st := newTestStore(t, root)
+	prober := probe.New(ffmpeg, ffprobe)
+	eng := New(cfg, prober, FFmpegEncoder{FFmpeg: ffmpeg, Cfg: cfg, Probe: prober}, st, discardLogger())
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+	return st, eng
+}
+
+// shownLeading is one source whose first packets include leading pictures a decoder SHOWS: a
+// faithful encode carries every one of them, and an output short of them must not pass for one
+// whose leading pictures were dropped.
+type shownLeading struct {
+	name, encoder, codec string
+	codecArgs            []string
+	make                 func(t *testing.T, ffmpeg, dir, path string)
+}
+
+var shownLeadingSources = []shownLeading{
+	{"MPEG-2 starting at a closed GOP's leading B-frames", "cpu", "hevc",
+		[]string{"-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error", "-pix_fmt", "yuv420p10le"},
+		func(t *testing.T, ffmpeg, dir, path string) {
+			t.Helper()
+			// An open-GOP MPEG-2 stream cut at a GOP, its first GOP header then marked closed, so
+			// that a decoder shows the B-frames before its first I-frame instead of dropping them -
+			// a DVD title's first GOP.
+			cut, raw := filepath.Join(dir, "cut.mkv"), filepath.Join(dir, "cut.m2v")
+			cutFrom("4", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=12", "-c:v", "mpeg2video",
+				"-g", "15", "-bf", "2", "-b:v", "8M", "whole.ts")(t, ffmpeg, dir, cut)
+			ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", cut, "-c", "copy", "-f", "mpeg2video", "--", raw)
+			b, err := os.ReadFile(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gop := bytes.Index(b, []byte{0, 0, 1, 0xb8})
+			if gop < 0 {
+				t.Fatal("fixture drifted: the stream carries no GOP header")
+			}
+			b[gop+7] |= 0x40 // closed_gop, the 26th bit after the start code
+			if err := os.WriteFile(raw, b, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-fflags", "+genpts", "-r", "25", "-i", raw,
+				"-c", "copy", "--", path)
+		}},
+	{"HEVC starting at an IDR with RADL pictures", "svtav1", "av1",
+		[]string{"-c:v", "libsvtav1", "-preset", "12", "-crf", "40", "-pix_fmt", "yuv420p10le"},
+		func(t *testing.T, ffmpeg, dir, path string) {
+			t.Helper()
+			// The second segment of a closed-GOP stream with two RADL pictures before each IDR,
+			// split where an HLS segmenter would: it starts at an IDR whose RADL pictures follow it
+			// in decode order and are shown before it, each with its own timestamp.
+			whole := filepath.Join(dir, "whole.mkv")
+			ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+				"testsrc2=size=320x240:rate=24:duration=12", "-c:v", "libx265", "-preset", "fast", "-x265-params",
+				"log-level=error:keyint=48:min-keyint=48:scenecut=0:bframes=3:open-gop=0:radl=2", "-b:v", "4M",
+				"-pix_fmt", "yuv420p", "--", whole)
+			ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", whole, "-map", "0:v", "-c", "copy",
+				"-f", "segment", "-segment_times", "4", filepath.Join(dir, "segment%d.mkv"))
+			// Remuxed onto a timeline starting just after zero, so the RADL pictures before the
+			// IDR keep a timestamp (Matroska reads one before zero back as none; ffmpeg's copy
+			// gives the two of them one timestamp between them, which the source then carries and
+			// a faithful encode reproduces).
+			ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", filepath.Join(dir, "segment1.mkv"),
+				"-c", "copy", "-output_ts_offset", "0.5", "--", path)
+		}},
+}
+
+// TestTiming_LeadingPicturesADecoderShowsAreNotAllowedFor: a source whose first frames are
+// leading pictures a decoder shows - a closed GOP's B-frames, an IDR's RADL pictures - is
+// encoded faithfully with every one of them, and an output missing two frames, at the start or
+// at the end, is refused: the decode of the source's start shows that those pictures are shown,
+// so no frame is allowed for.
+func TestTiming_LeadingPicturesADecoderShowsAreNotAllowedFor(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	for _, tc := range shownLeadingSources {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := filepath.Join(t.TempDir(), "movie.mkv")
+			tc.make(t, ffmpeg, t.TempDir(), fixture)
+			listing := timesOf(t, ffprobe, fixture)
+			if !afterKeyBeforeIt(listing) {
+				t.Fatal("fixture drifted: no packet after the first keyframe is presented before it")
+			}
+			frames := 0
+			for _, k := range listing.Packets {
+				if !k.Discard {
+					frames++
+				}
+			}
+			start, err := probe.New(ffmpeg, ffprobe).VideoStart(context.Background(), fixture, len(listing.Packets))
+			if err != nil || len(start.Frames) != frames {
+				t.Fatalf("fixture drifted: a decoder shows %d of the source's %d packets (%v), want every one",
+					len(start.Frames), frames, err)
+			}
+			mutate := func(c *config.Config) { c.Encoder = tc.encoder }
+			run := func(t *testing.T, damage ...string) (store.Job, string) {
+				t.Helper()
+				root := t.TempDir()
+				src := filepath.Join(root, "movie.mkv")
+				b, err := os.ReadFile(fixture)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(src, b, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				var enc Encoder
+				if damage != nil {
+					enc = EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
+						args := append([]string{"-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in, "-map", "0"},
+							tc.codecArgs...)
+						args = append(append(append(args, timestampArgs...), damage...), "-f", "matroska", "--", out)
+						return exec.CommandContext(ctx, ffmpeg, args...).Run()
+					})
+				}
+				st, _ := timingRun(t, ffmpeg, ffprobe, root, enc, mutate)
+				return onlyRow(t, st), src
+			}
+
+			t.Run("faithful", func(t *testing.T) {
+				row, src := run(t)
+				if row.Status != store.Done || codecOf(t, ffprobe, src) != tc.codec {
+					t.Fatalf("row %s %q, want done", row.Status, row.Outcome.Reason)
+				}
+			})
+			for name, damage := range map[string][]string{
+				"the first two frames missing": {"-vf", "select='gte(n\\,2)'"},
+				"the last two frames missing":  {"-frames:v", strconv.Itoa(frames - 2)},
+			} {
+				t.Run(name, func(t *testing.T) {
+					row, src := run(t, damage...)
+					if row.Status != store.Failed || !strings.Contains(row.Outcome.Reason,
+						fmt.Sprintf("the output's video shows %d frames and the source's %d", frames-2, frames)) {
+						t.Fatalf("row %s %q, want refused for two frames short", row.Status, row.Outcome.Reason)
+					}
+					if md5f(t, src) != md5f(t, fixture) {
+						t.Error("the source changed under a refused encode")
+					}
+				})
 			}
 		})
 	}
@@ -532,7 +698,7 @@ func TestTiming_TheGateHoldsARemux(t *testing.T) {
 	if err := os.Rename(withAudio, src); err != nil {
 		t.Fatal(err)
 	}
-	if err := timing.Check(want, timesOf(t, ffprobe, src)); err != nil {
+	if err := timing.Check(want, timesOf(t, ffprobe, src), nil); err != nil {
 		t.Fatalf("fixture drifted: adding the audio retimed the video: %v", err)
 	}
 	st, _ := timingRun(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) {

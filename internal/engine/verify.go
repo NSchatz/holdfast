@@ -650,11 +650,16 @@ func (e *Engine) lengthParity(ctx context.Context, in, out string) (store.Failur
 }
 
 // timingParity is gate 3's timestamp half on its own: out's video is presented at in's times
-// (timing.Check). A mismatch is DETERMINISTIC: the same source, configuration and ffmpeg build
-// time the same frames the same way. A listing that is ffprobe's own answer but cannot be
-// compared - no video stream, no time base, an output whose packets are not all timed - is
-// deterministic for the same reason, and refused: an unknown timing is not a matching one. Only a listing ffprobe never produced (it
-// could not run, was killed, or failed) is TRANSIENT, since that is a condition of the run.
+// (timing.Check). Where the output shows a different number of frames than the source has
+// packets left to show, the source's first packets are decoded - one more ffprobe, on that path
+// alone - so that only the packets a decoder really drops at its start are allowed for.
+//
+// A mismatch is DETERMINISTIC: the same source, configuration and ffmpeg build time the same
+// frames the same way. A listing that is ffprobe's own answer but cannot be compared - no video
+// stream, no time base, an output whose packets are not all timed - is deterministic for the
+// same reason, and refused: an unknown timing is not a matching one. Only a listing ffprobe
+// never produced (it could not run, was killed, or failed) is TRANSIENT, since that is a
+// condition of the run.
 //
 // It is not part of lengthParity, which the stray-temp sweep also asks: the sweep's question is
 // whether a temp is finished, and a stricter answer there would only license deleting more.
@@ -669,7 +674,17 @@ func (e *Engine) timingParity(ctx context.Context, in, out string) (store.Failur
 		return listingClass(err), fmt.Errorf("timing parity could not be established: the output's video "+
 			"timestamps could not be listed (%v). The source is kept", err)
 	}
-	if err := timing.Check(src, got); err != nil {
+	err = timing.Check(src, got, nil)
+	var need *timing.NeedsStart
+	if errors.As(err, &need) {
+		start, serr := e.Probe.VideoStart(ctx, in, need.Packets)
+		if serr != nil {
+			return listingClass(serr), fmt.Errorf("timing parity could not be established: the source's first "+
+				"%d video packets could not be decoded (%v). The source is kept", need.Packets, serr)
+		}
+		err = timing.Check(src, got, &start)
+	}
+	if err != nil {
 		return store.FailureDeterministic, fmt.Errorf("%w. The source is kept", err)
 	}
 	return "", nil
