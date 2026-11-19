@@ -9,7 +9,7 @@ a source only after the replacement passed every gate. Public repository, AGPL.
   deployment `docker-compose.yml` pinned by digest; `docs/docker.md` is the deployment guide.
 - The CLI (`cmd/holdfast`): `serve`, `run`, `worker`, `analyze [--health]`, `plan`, `validate`,
   `export`, `resolve`, `restore`, `requeue`, `version` (`docs/layout.md`).
-- The HTTP API: job ledger, queue, history, SSE, health sweep, nodes, scans, pause, exclusions
+- The HTTP API: job ledger, queue, history, SSE, health sweep, playback evidence, nodes, scans, pause, exclusions
   (`docs/api-reference.md`); its generated schema at `GET /api/schema`.
 - Prometheus metrics at `/metrics`, and shoutrrr notifications (`internal/metrics`, `internal/notify`).
 - Intake from Sonarr and Radarr webhooks and `POST /api/scan`; post-swap rescans of Radarr,

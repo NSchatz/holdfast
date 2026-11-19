@@ -16,6 +16,7 @@ per-field reference `README.md` points at rather than restates.
 | `GET /api/history?limit=N&status=S&cursor=C` | read | terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, newest first, one capped page at a time, optionally filtered by status, with `history_total` and `next_cursor` - see *`GET /api/history` - filtering and paging* |
 | `GET /api/events` | read | SSE: a fresh snapshot on every state change |
 | `GET /api/health` | read | the library health sweep: its state, the sweep under way and the last one that finished, each with its counts and the files it found corrupt or unreadable - see *`GET /api/health`* below. Report only: no route acts on a finding |
+| `GET /api/playback` | read | playback evidence: whether it is collected, where the poll of Tautulli's history has got to, every current swap counted by verdict, and every **suspected stall** with the sessions it rests on and the `holdfast restore` command while the original is retained - see *`GET /api/playback`* below. Report only: no route restores, re-encodes or releases anything on the strength of it |
 | `GET /api/nodes` | read | the worker nodes this server knows of and the leases it has granted them, newest first, capped, with `leases_total` - see *`GET /api/nodes`* below. A read only: it serves no lease id and acts on no lease. The node token does not open it |
 | `GET /api/schema` | - | a machine-readable document of this surface, GENERATED from the router and the response types this build actually serves. Never gated: it carries endpoint paths, methods, status codes, media types, field names and field types, and no value of any kind - see below |
 | `GET /metrics` | - | Prometheus metrics (when `metrics_enable`, default on). Never gated: it names no file |
@@ -617,6 +618,128 @@ That body is printed by `TestHealthEndpoint_ReportsASweepThroughTheReadAPI`
 (`go test -v -run TestHealthEndpoint_ReportsASweepThroughTheReadAPI ./internal/server/`), which
 runs a real sweep through the pinned ffmpeg and reads this endpoint.
 
+### `GET /api/playback` - playback evidence
+
+<a id="playback"></a>
+
+What playback evidence (`playback_source`, off by default;
+[docs/design/playback-evidence.md](design/playback-evidence.md#playback-evidence)) has learned about
+the files holdfast swapped from the sessions Tautulli recorded on them. It is a read behind
+`server_read_token` like the others, and it is answered whether or not a source is configured.
+Nothing on this surface acts on a finding: the restore command it names is a local command an
+operator runs, and there is no endpoint that restores, re-encodes or releases a file.
+
+| field | meaning |
+|---|---|
+| `enabled`, `source`, `poll_minutes` | whether this daemon polls a source, which (`tautulli`, or `""`), and `playback_poll_minutes` (`0` when off) |
+| `rules` | what the verdicts were derived under: `played_fraction` (`playback_played_fraction`), `end_margin_seconds` (180), `stall_before` (0.85: a stop past it is no part of a stall), `stall_tolerance_seconds` (90, widened by one percent of the file where an offset came from a whole percent), `stall_min_sessions` (2), `retry_window_seconds` (300) and `stall_window_days` (60) |
+| `last_attempt_at` | Unix seconds of the newest poll, `null` before the first |
+| `last_failure` | the class the newest poll failed with - `request-failed`, `error-result`, `unparseable-response` or `ledger-failed` - or `null` when it succeeded |
+| `covered_through` | Unix seconds the newest poll that read the history to its end began, `null` until one has. A file swapped before it has had every session since its swap read |
+| `unresolved_sessions` | how many sessions the newest successful poll read whose item Tautulli resolved to no single file - several versions, an item it no longer knows, or an answer it refused - so they are evidence about nothing; `null` before any poll. Every session of a poll here is what a Tautulli that cannot reach Plex looks like |
+| `counts` | every current swap - the newest swap of each path that is still the file there, whatever its jobs row's status ([swap identity](design/playback-evidence.md#swap-identity)) - by verdict: `swapped` (the total), `suspect_stall`, `played_through`, `unplayed` and `unknown` ([the verdicts](design/playback-evidence.md#verdicts)) |
+| `suspects` | every suspected stall, path order (`[]` when none) |
+
+Each suspect carries `path`, `fingerprint` and `swapped_at` (the swap the evidence is about),
+`verdict`, `sessions` (every session on the file since the swap) and `played_through` (how many of
+them reached the mark), `duration_seconds` (the file's length as Tautulli stated it, `null` when it
+did not), `stall_at_seconds` (the middle session's end), `stall_from_seconds` and
+`stall_to_seconds` (the first and last), `stall_sessions` (how many ended there), `stall_clients`
+(on how many distinct clients) and `stall_retries` (how many played for no more than the retry
+window: resumes that got nowhere) - one of the last two is what made the point a stall rather than
+a choice - `restore` (the command that puts the original back while a live retention of this very
+swap holds it, quoted for a shell, `null` otherwise) and `stalled_sessions`: each session that ended
+there, with `started_at`, `stopped_at` (`null` when Tautulli did not say), `offset_seconds`,
+`offset_from_percent` (the offset was computed from a whole percent rather than read),
+`played_seconds` (`null` when Tautulli did not say), `platform`, `player` and `decision`
+(Tautulli's stream decision).
+
+A sample: a swapped film whose sessions on three clients ended near 34 minutes - the last a resume
+that played for 200 seconds and got nowhere - its original still retained, beside a film one session played
+through and one no session has played (the paths are synthetic):
+
+```json
+{
+  "enabled": true,
+  "source": "tautulli",
+  "poll_minutes": 15,
+  "rules": {
+    "played_fraction": 0.9,
+    "end_margin_seconds": 180,
+    "stall_before": 0.85,
+    "stall_tolerance_seconds": 90,
+    "stall_min_sessions": 2,
+    "retry_window_seconds": 300,
+    "stall_window_days": 60
+  },
+  "last_attempt_at": 1795493994,
+  "last_failure": null,
+  "covered_through": 1795493994,
+  "unresolved_sessions": 0,
+  "counts": {
+    "swapped": 3,
+    "suspect_stall": 1,
+    "played_through": 1,
+    "unplayed": 1,
+    "unknown": 0
+  },
+  "suspects": [
+    {
+      "path": "/media/movies/Film (2001)/Film (2001).mkv",
+      "fingerprint": "3200000000:1790000000",
+      "swapped_at": 1795061994,
+      "verdict": "suspect-stall",
+      "sessions": 3,
+      "played_through": 0,
+      "duration_seconds": 8700,
+      "stall_at_seconds": 2040,
+      "stall_from_seconds": 1999,
+      "stall_to_seconds": 2042,
+      "stall_sessions": 3,
+      "stall_clients": 3,
+      "stall_retries": 1,
+      "restore": "holdfast restore '/media/movies/Film (2001)/Film (2001).mkv'",
+      "stalled_sessions": [
+        {
+          "started_at": 1795321194,
+          "stopped_at": 1795323594,
+          "offset_seconds": 1999,
+          "offset_from_percent": false,
+          "played_seconds": 2400,
+          "platform": "Chrome",
+          "player": "Plex Web",
+          "decision": "copy"
+        },
+        {
+          "started_at": 1795328394,
+          "stopped_at": 1795330994,
+          "offset_seconds": 2040,
+          "offset_from_percent": false,
+          "played_seconds": 2600,
+          "platform": "Firefox",
+          "player": "Plex Web",
+          "decision": "transcode"
+        },
+        {
+          "started_at": 1795407594,
+          "stopped_at": 1795407794,
+          "offset_seconds": 2042,
+          "offset_from_percent": false,
+          "played_seconds": 200,
+          "platform": "macOS",
+          "player": "Plex for Mac",
+          "decision": "direct play"
+        }
+      ]
+    }
+  ]
+}
+```
+
+That body is printed by `TestPlaybackEndpoint_ReportsASuspectedStallThroughTheReadAPI`
+(`go test -v -run TestPlaybackEndpoint_ReportsASuspectedStallThroughTheReadAPI ./internal/server/`),
+which seeds the ledger and reads this endpoint; the times there are relative to when it runs.
+
 ### The decision inputs a row was taken under
 
 Beside the proof, a terminal row records **the configuration values the decision that wrote it actually
@@ -1128,7 +1251,7 @@ response and no `holdfast export` line carries it, and the shapes documented abo
 
 - **Prometheus** (`/metrics`, default on): whether it is reachable is governed by `metrics_enable` and by
   nothing else - `server_read_token` does not gate it, and neither does `server_auth_token`. The exposition
-  carries counters, a byte total, three histograms and five gauges, labelled only by outcome, guard, gate,
+  carries counters, a byte total, three histograms and eight gauges, labelled only by outcome, guard, gate,
   state and health result, so it **names no file**; a scrape credential is also the one thing a Prometheus deployment most
   often cannot supply. That premise is a test, so a later metric that labelled a series by path would fail
   the build. Metrics are read-only instrumentation - best-effort, never affecting file handling.
@@ -1153,6 +1276,10 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   | `holdfast_health_sweep_corrupt_files` | files the newest FINISHED health sweep found corrupt, read at scrape time | the damage the library holds as of that sweep. Absent until a sweep has finished: nobody having looked is not zero. Alert on any rise |
   | `holdfast_health_sweep_unreadable_files` | files the newest finished health sweep could not read at all, read at scrape time | permissions, a non-regular file under a video name, or a file that kept changing. Absent until a sweep has finished |
   | `holdfast_health_sweep_last_completed_timestamp_seconds` | Unix time the newest health sweep finished, read at scrape time | whether the sweep is keeping up. Older than the interval plus a sweep's length means it is not; absent until one has finished |
+  | `holdfast_playback_suspect_files` | swapped files whose playback evidence is a suspected stall - recent sessions ending at one point well before the end, on two or more clients or with a resume that got nowhere - read at scrape time through the reporting door | replacements real viewers cannot get through. Alert on any rise: each is named, with the restore command while its original is retained, on `GET /api/playback` and in a `warn` record. Absent unless `playback_source` is set and until a poll has read the history to its end |
+  | `holdfast_playback_played_through_files` | swapped files a session has played through since the swap and no stall is suspected in, read at scrape time | context for the figure above: how much of what was swapped has been watched to the end. Absent on the same terms |
+  | `holdfast_playback_unresolved_sessions` | sessions the newest successful poll read whose item Tautulli resolved to no single file, read at scrape time | evidence being lost. A few is several versions of one film; all of a poll's sessions, poll after poll, is a Tautulli that cannot reach Plex, and no stall is seen until it can. Absent on the same terms as the two above |
+  | `holdfast_playback_history_read_timestamp_seconds` | Unix time the newest poll that read Tautulli's history to its end began, read at scrape time | whether the evidence is current. Older than a few poll intervals means Tautulli is not answering (`GET /api/playback` says how); absent on the same terms |
 
   The `outcome` label set is `done | skipped | failed | would-transcode | indeterminate |
   applied-despite-error`. **`would-transcode` counts DECISIONS a dry run took, never transcodes that
@@ -1183,6 +1310,11 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   fails omits that one gauge from that one scrape, leaves every other series in place, and still answers the
   scrape `200`. The next scrape reads again, and the daemon logs the degraded read at `warn` rather than
   going quiet about it.
+- **Playback evidence** (`playback_source: tautulli`, off by default): `serve` reads Tautulli's session
+  history and reports a swapped file whose sessions keep ending at one point well before the end as a
+  suspected stall, on `GET /api/playback`, the `holdfast_playback_*` gauges and one `warn` record per file,
+  with `holdfast restore <path>` while the original is still retained. It restores nothing itself and does
+  not move the undo window ([docs/design/playback-evidence.md](design/playback-evidence.md#playback-evidence)).
 - **Notifications** (`notify_url`, [shoutrrr](https://shoutrrr.nickfedor.com/)): one service URL fans out to
   ntfy/Discord/Gotify/… - a message per failed file and a per-scan summary. Sends run off the engine's path,
   and a send failure is logged, never crashing the daemon or altering files. An unconfigured key disables it.
@@ -1190,7 +1322,8 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   URL is a credential, and a failure names the key and its reference rather than any part of the destination.
   See [docs/secrets.md](secrets.md).
 - **Host-fair scheduling**: a daily `run_window` (`HH:MM-HH:MM`), a per-core `max_load` cap, and an optional
-  Tautulli-aware pause (`tautulli_url` plus a `tautulli_api_key` **reference**) that holds off while someone
+  Tautulli-aware pause (`tautulli_url` plus a `tautulli_api_key` **reference**; `tautulli_pause: false` turns it
+  off and keeps Tautulli for playback evidence alone) that holds off while someone
   is streaming.
   Scheduling only ever **delays** new work - it never interrupts an in-flight encode or bypasses a gate, and
   a Tautulli outage **fails open** (never halts transcoding). **Known limitation:** Plex-aware pause needs an
