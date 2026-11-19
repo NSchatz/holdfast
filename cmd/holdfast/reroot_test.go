@@ -32,6 +32,13 @@ type rerootFixture struct {
 // and a withheld path. Nothing here encodes.
 func newRerootFixture(t *testing.T) *rerootFixture {
 	t.Helper()
+	return newRerootFixtureWith(t, 0)
+}
+
+// newRerootFixtureWith is newRerootFixture with extra more skipped files, movies/extra-NN.mkv,
+// so a test can put a match ratio either side of a threshold.
+func newRerootFixtureWith(t *testing.T, extra int) *rerootFixture {
+	t.Helper()
 	dir := t.TempDir()
 	f := &rerootFixture{
 		dir:     dir,
@@ -75,6 +82,12 @@ func newRerootFixture(t *testing.T) *rerootFixture {
 		}
 		if _, err := st.ExcludePath(ctx, filepath.Join(f.oldRoot, "tv", "Show")); err != nil {
 			t.Fatal(err)
+		}
+		for i := 0; i < extra; i++ {
+			p := write(fmt.Sprintf("movies/extra-%02d.mkv", i), fmt.Sprintf("extra film %d", i))
+			if _, err := st.RecordSkip(ctx, p, probe.Fingerprint(p), engine.SkipLowBitrate, root, "", store.SourceFacts{}); err != nil {
+				t.Fatal(err)
+			}
 		}
 	})
 	if err := os.Rename(f.oldRoot, f.newRoot); err != nil {
@@ -186,8 +199,10 @@ func TestReroot_DryRunReportsEveryTableAndTheEvidenceAndRewritesNothing(t *testi
 		"health_checks               0 row(s): path 0",
 		"node_leases                 0 row(s): path 0, temp_path 0",
 		"in all                      5 row(s)",
-		"of 4 file(s) the ledger recorded, 3 exist under " + f.newRoot + " and match what it recorded, 0 do not match, " +
-			"and 1 no longer exist",
+		"of 4 file(s) the ledger recorded, 3 exist under " + f.newRoot + " and match what it recorded, 0 were " +
+			"replaced since (carried as recorded), 1 no longer exist (carried as recorded), and 0 retained original(s) " +
+			"are not the recorded size",
+		"match ratio 3/3 = 1.000, threshold 0.95 (--min-match)",
 		"--apply",
 	} {
 		if !strings.Contains(out, want) {
@@ -294,14 +309,33 @@ func TestReroot_Refusals(t *testing.T) {
 				t.Fatal(err)
 			}
 			return []string{"--config", f.cfgPath, "--from", f.oldRoot, "--to", f.newRoot, "--apply"}
-		}, 1, []string{"none of the 4 file(s) the ledger recorded under", "nothing shows"}},
-		{"a file under --to is not the one recorded", func(t *testing.T, f *rerootFixture) []string {
+		}, 1, []string{"none of the 4 file(s) the ledger recorded under", "(0 found replaced, 4 gone)", "nothing shows"}},
+		{"too few of the files under --to are the ones recorded", func(t *testing.T, f *rerootFixture) []string {
 			ep := filepath.Join(f.newRoot, "tv", "Show", "ep.mkv")
 			if err := os.WriteFile(ep, []byte("a different file at the same name"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			return []string{"--config", f.cfgPath, "--from", f.oldRoot, "--to", f.newRoot, "--apply"}
-		}, 1, []string{"mismatch: @NEW@/tv/Show/ep.mkv - the ledger recorded ", "1 of the 3 file(s)", "is not shown to be the same files"}},
+		}, 1, []string{"only 2 of the 3 recorded file(s) found under @NEW@ match", "a match ratio of 0.667",
+			"under the --min-match threshold of 0.95", "is not shown to be the same files"}},
+		{"a retained original that is not the recorded size, whatever the ratio", func(t *testing.T, f *rerootFixture) []string {
+			retained := filepath.Join(f.newRoot, "movies", ".holdfast-undo", "film.25-1.__undo__.mkv.holdfast-undo")
+			if err := os.WriteFile(retained, []byte("short"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return []string{"--config", f.cfgPath, "--from", f.oldRoot, "--to", f.newRoot, "--min-match", "0.1", "--apply"}
+		}, 1, []string{"retained original not the one recorded: @NEW@/movies/.holdfast-undo/film.25-1.__undo__.mkv.holdfast-undo" +
+			" - the ledger recorded a retained original of 25 bytes, the file there is 5 bytes",
+			"1 retained original(s) under @NEW@ are not the size of the original their retention recorded"}},
+		{"--min-match of 0", func(t *testing.T, f *rerootFixture) []string {
+			return []string{"--config", f.cfgPath, "--from", f.oldRoot, "--to", f.newRoot, "--min-match", "0"}
+		}, 2, []string{"--min-match 0 is not a share"}},
+		{"--min-match above 1", func(t *testing.T, f *rerootFixture) []string {
+			return []string{"--config", f.cfgPath, "--from", f.oldRoot, "--to", f.newRoot, "--min-match", "1.5"}
+		}, 2, []string{"--min-match 1.5 is not a share"}},
+		{"--min-match NaN", func(t *testing.T, f *rerootFixture) []string {
+			return []string{"--config", f.cfgPath, "--from", f.oldRoot, "--to", f.newRoot, "--min-match", "NaN"}
+		}, 2, []string{"is not a share"}},
 		{"the rewrite fails part way", func(t *testing.T, f *rerootFixture) []string {
 			conn, err := sql.Open("sqlite", "file:"+f.db)
 			if err != nil {
@@ -380,7 +414,7 @@ func TestReroot_LogsWhatItDidAsRecords(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	req := rerootRequest{From: filepath.Join(f.dir, "elsewhere"), To: f.newRoot}
+	req := rerootRequest{From: filepath.Join(f.dir, "elsewhere"), To: f.newRoot, MinMatch: rerootMinMatch}
 	if code := runReroot(context.Background(), log, cfg, req, &bytes.Buffer{}, &bytes.Buffer{}); code != 1 {
 		t.Fatalf("a reroot of nothing exited %d, want 1", code)
 	}
@@ -391,7 +425,7 @@ func TestReroot_LogsWhatItDidAsRecords(t *testing.T) {
 	}
 
 	buf.Reset()
-	req = rerootRequest{From: f.oldRoot, To: f.newRoot, Apply: true}
+	req = rerootRequest{From: f.oldRoot, To: f.newRoot, Apply: true, MinMatch: rerootMinMatch}
 	if code := runReroot(context.Background(), log, cfg, req, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("reroot --apply exited %d", code)
 	}
@@ -417,7 +451,9 @@ func TestReroot_LogsWhatItDidAsRecords(t *testing.T) {
 		t.Errorf("%d table record(s), want one for each of the 6 tables holding a path: %v", len(byTable), byTable)
 	}
 	if whole == nil || whole["rows"] != float64(5) || whole["evidence_matched"] != float64(3) ||
-		whole["evidence_absent"] != float64(1) || whole["from"] != f.oldRoot || whole["to"] != f.newRoot {
+		whole["evidence_replaced"] != float64(0) || whole["evidence_absent"] != float64(1) ||
+		whole["evidence_retained_mismatched"] != float64(0) || whole["match_ratio"] != float64(1) ||
+		whole["min_match"] != rerootMinMatch || whole["from"] != f.oldRoot || whole["to"] != f.newRoot {
 		t.Errorf("the summary record does not carry the rows and the evidence: %v", whole)
 	}
 }
@@ -533,4 +569,89 @@ func TestReroot_TheReleaseKeepsTheRecordUntilTheRerootAndThenReachesTheFile(t *t
 	if _, err := os.Stat(retainedNew); !os.IsNotExist(err) {
 		t.Errorf("the release did not remove the retained original at the new path (stat: %v)", err)
 	}
+}
+
+// TestReroot_FilesReplacedSinceTheMoveAreCarriedAsRecorded is the dominance rule, both sides
+// of the default threshold: 33 recorded files exist under the new root. One replaced since
+// (an upgrade under the same name) is a match ratio of 32/33, which carries every row - the
+// replaced file's row AS RECORDED, under its old fingerprint. Two replaced is 31/33, under
+// 0.95, and refuses.
+//
+// The carried row is history and nothing more: a row is keyed by path AND fingerprint, so
+// it collides with nothing, and the next scan claims the replaced file as the new file it is.
+func TestReroot_FilesReplacedSinceTheMoveAreCarriedAsRecorded(t *testing.T) {
+	replace := func(t *testing.T, f *rerootFixture, rel string) (string, string) {
+		t.Helper()
+		p := filepath.Join(f.newRoot, rel)
+		was := probe.Fingerprint(p)
+		if err := os.WriteFile(p, []byte("an upgraded release under the same name"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p, was
+	}
+
+	t.Run("under the threshold the rows are carried", func(t *testing.T) {
+		f := newRerootFixtureWith(t, 30)
+		ep, was := replace(t, f, filepath.Join("tv", "Show", "ep.mkv"))
+
+		code, out, errOut := f.reroot(t, "--apply")
+		if code != 0 {
+			t.Fatalf("a reroot with 1 of 33 files replaced exited %d: %s", code, errOut)
+		}
+		for _, want := range []string{
+			"32 exist under " + f.newRoot + " and match what it recorded, 1 were replaced since (carried as recorded)",
+			"match ratio 32/33 = 0.970, threshold 0.95 (--min-match)",
+			"replaced since (carried as recorded): " + ep + " - the ledger recorded " + was + ", the file there is " + probe.Fingerprint(ep),
+			"rewrote 35 row(s)",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the reroot does not say %q:\n%s", want, out)
+			}
+		}
+		if left := ledgerNames(t, f.db, f.oldRoot); len(left) != 0 {
+			t.Errorf("rows still name %s: %v", f.oldRoot, left)
+		}
+
+		st, err := store.Open(f.db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = st.Close() }()
+		ctx := context.Background()
+		if status, _, ok, err := st.Get(ctx, ep, was); err != nil || !ok || status != store.Failed {
+			t.Errorf("the replaced file's row was not carried as recorded (path %s, fingerprint %s): %v %v %v", ep, was, status, ok, err)
+		}
+		now := probe.Fingerprint(ep)
+		if _, _, ok, err := st.Get(ctx, ep, now); err != nil || ok {
+			t.Fatalf("a row already holds the replaced file's own key: %v %v", ok, err)
+		}
+		if held, err := st.TerminalHolds(ctx, ep, store.DecisionInputs{}); err != nil || anyEquals(held, now) {
+			t.Errorf("the carried row holds the replaced file out of the pipeline: %v %v", held, err)
+		}
+		if ok, err := st.Claim(ctx, ep, now, "w0", 3, store.DecisionInputs{}); err != nil || !ok {
+			t.Errorf("the next scan cannot claim the replaced file as the new file it is: %v %v", ok, err)
+		}
+	})
+
+	t.Run("over the threshold it refuses", func(t *testing.T) {
+		f := newRerootFixtureWith(t, 30)
+		replace(t, f, filepath.Join("tv", "Show", "ep.mkv"))
+		replace(t, f, filepath.Join("movies", "extra-07.mkv"))
+		before := ledgerDump(t, f.db)
+
+		code, out, errOut := f.reroot(t, "--apply")
+		if code != 1 || !strings.Contains(errOut, "a match ratio of 0.939, under the --min-match threshold of 0.95") {
+			t.Errorf("a reroot with 2 of 33 files replaced exited %d, want 1 naming the ratio and the threshold: %s", code, errOut)
+		}
+		if !strings.Contains(out, "match ratio 31/33 = 0.939") {
+			t.Errorf("the report does not state the ratio:\n%s", out)
+		}
+		if after := ledgerDump(t, f.db); !reflect.DeepEqual(before, after) {
+			t.Error("a refused reroot changed the ledger")
+		}
+		// And the threshold is the operator's to set.
+		if code, _, errOut := f.reroot(t, "--min-match", "0.9", "--apply"); code != 0 {
+			t.Errorf("the same reroot under --min-match 0.9 exited %d: %s", code, errOut)
+		}
+	})
 }

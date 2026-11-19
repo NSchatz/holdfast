@@ -9,7 +9,7 @@ Where each part of the repository lives and what it owns.
   window's operator half; LOCAL by design, never an HTTP endpoint, because it overwrites a library file with older
   bytes), `requeue` (offers a file a terminal row already answered back to the pipeline; LOCAL for the same reason
   `restore` is, by ratified operator decision), `reroot` (carries the ledger's rows across a library root
-  rename, after checking the files at the new root are the ones recorded; LOCAL for the same reason),
+  rename, after checking the new root holds the files recorded; LOCAL for the same reason),
   `export`, `validate`, `version`.
 - `internal/engine` - the orchestrator. `ProcessFile` runs the skip guards, the encode, the gates and the swap.
 - `internal/startup` - the whole-run start-or-refuse decision over the storage every path sits on, taken before anything else runs.
