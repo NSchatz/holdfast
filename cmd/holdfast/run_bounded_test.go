@@ -447,18 +447,12 @@ func TestRunHelp_ListsTheBoundsTheExampleAndEveryExitCode(t *testing.T) {
 // other end - one declared set, no code outside it.
 func TestRunExitCodes_TheTableIsTheOnlySourceOfTruth(t *testing.T) {
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	if err != nil {
-		t.Fatalf("parse the command package: %v", err)
-	}
-	pkg, ok := pkgs["main"]
+	files, ok := parseNonTestFiles(t, fset, ".", 0)["main"]
 	if !ok {
 		t.Fatal("no package main here; this check cannot read the run path")
 	}
 	funcs := map[string]*ast.FuncDecl{}
-	for _, f := range pkg.Files {
+	for _, f := range files {
 		for _, d := range f.Decls {
 			if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil {
 				funcs[fd.Name.Name] = fd
@@ -513,11 +507,11 @@ func TestRunExitCodes_TheTableIsTheOnlySourceOfTruth(t *testing.T) {
 	// cannot cover: a code spelled as a named constant and returned by name is no integer
 	// literal, so it would otherwise reach the command with nothing in the table and
 	// nothing in the help.
-	named := exitConstants(pkg.Files)
+	named := exitConstants(files)
 	if !named["exitRefused"] {
 		t.Fatal("no exit* constants were found, so this leg grades nothing")
 	}
-	inTable := identsIn(pkg.Files, "runExitCodes")
+	inTable := identsIn(files, "runExitCodes")
 	if len(inTable) == 0 {
 		t.Fatal("runExitCodes was not found, so this leg grades nothing")
 	}
@@ -530,7 +524,7 @@ func TestRunExitCodes_TheTableIsTheOnlySourceOfTruth(t *testing.T) {
 }
 
 // exitConstants is every constant in the package whose name declares it an exit code.
-func exitConstants(files map[string]*ast.File) map[string]bool {
+func exitConstants(files []*ast.File) map[string]bool {
 	out := map[string]bool{}
 	for _, f := range files {
 		for _, d := range f.Decls {
@@ -557,7 +551,7 @@ func exitConstants(files map[string]*ast.File) map[string]bool {
 // identsIn is every identifier named in the value of the package-level variable v - here
 // the table itself, so what it declares is read from the declaration rather than from a
 // second list a test would have to maintain.
-func identsIn(files map[string]*ast.File, v string) map[string]bool {
+func identsIn(files []*ast.File, v string) map[string]bool {
 	out := map[string]bool{}
 	for _, f := range files {
 		for _, d := range f.Decls {
@@ -958,4 +952,28 @@ func TestRunHelp_SaysABoundedRunRemovesOnlyTempsWhoseOwnerIsProvablyDead(t *test
 	if !strings.Contains(help, "only those whose recorded owner is provably dead") {
 		t.Errorf("the help does not say a bounded run removes only temps whose recorded owner is provably dead:\n%s", out.String())
 	}
+}
+
+// parseNonTestFiles parses every non-test .go file in dir, grouped by package name, as
+// go/parser.ParseDir did (deprecated since Go 1.25). Like ParseDir it ignores build tags,
+// which is what these source-shape checks want: they read every file the package holds.
+func parseNonTestFiles(t *testing.T, fset *token.FileSet, dir string, mode parser.Mode) map[string][]*ast.File {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	out := map[string][]*ast.File{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, mode)
+		if err != nil {
+			t.Fatalf("parse %s: %v", filepath.Join(dir, name), err)
+		}
+		out[f.Name.Name] = append(out[f.Name.Name], f)
+	}
+	return out
 }
