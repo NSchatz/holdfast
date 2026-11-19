@@ -32,6 +32,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/crop"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/encoder"
+	"github.com/NSchatz/holdfast/internal/playability"
 	"github.com/NSchatz/holdfast/internal/schedule"
 	"github.com/NSchatz/holdfast/internal/secret"
 )
@@ -90,6 +91,8 @@ var knownKeys = map[string]bool{
 	x265CPUsKey:      true,
 	x265OpenGOPKey:   true,
 	qualityKey:       true,
+	// The playability gate's two keys (docs/design/swap.md#playability).
+	playabilityColdStartsKey: true, playabilitySegmentsKey: true,
 	// The divisor `workers: auto` sizes the pool by. It describes the PROCESS, so a
 	// library_roots entry naming it is refused as a daemon-level key, exactly as one
 	// naming workers is.
@@ -239,6 +242,11 @@ func defaultLayer() map[string]any {
 		// unset until configured (docs/design/encode-plan.md#gop). It is a knob in profileKnobs,
 		// so it has an entry here, and the entry is the absence of a value.
 		x265OpenGOPKey: nil,
+		// The playability gate runs on every encode, as chapter parity and output fidelity do:
+		// its cold starts at the shipped sample size and its segment check on
+		// (docs/design/swap.md#playability). Both are knobs in profileKnobs, seeded from here.
+		playabilityColdStartsKey: playability.DefaultColdStarts,
+		playabilitySegmentsKey:   true,
 		// The CPUs of quota one worker is sized for under `workers: auto`. It is read only
 		// when workers is auto, so the default moves no configuration that does not ask.
 		coresPerWorkerKey: DefaultCoresPerWorker,
@@ -443,6 +451,14 @@ type Config struct {
 	// libx265 can encode refuses it at start. A library root may override it. See
 	// docs/design/encode-plan.md#gop.
 	X265OpenGOP *bool `yaml:"x265_open_gop"`
+	// PlayabilityColdStarts is how many keyframes spread across an output are each decoded
+	// from a cold start by the playability gate, which also decodes up to four times as many
+	// keyframes followed by leading pictures; 0 turns cold starts off. nil is the default,
+	// playability.DefaultColdStarts. PlayabilitySegments is whether the gate cuts the output
+	// into HLS-style segments and decodes each on its own; nil is the default, true. A library
+	// root may override either. See docs/design/swap.md#playability.
+	PlayabilityColdStarts *int  `yaml:"playability_cold_starts"`
+	PlayabilitySegments   *bool `yaml:"playability_segments"`
 	// CRF is the software encoders' quality knob (lower = bigger/better): libx265's
 	// and libsvtav1's constant rate factor, 0-51. Each hardware encoder's quality is
 	// set on its own scale by Quality below, and a hardware encoder with no entry there
@@ -1209,6 +1225,9 @@ func (c *Config) TopLevelProfile() Profile {
 		Crop:              c.Crop,
 		DolbyVisionP7:     c.DolbyVisionP7,
 		X265OpenGOP:       c.X265OpenGOP,
+
+		PlayabilityColdStarts: c.PlayabilityColdStarts,
+		PlayabilitySegments:   c.PlayabilitySegments,
 	}
 }
 
@@ -1436,6 +1455,21 @@ func Load(path string) (*Config, error) {
 		if raw := carriedValue(x265OpenGOPKey, k, kf, ke); raw != nil {
 			if err := checkX265OpenGOPValue("the top level of "+path+" (or "+envPrefix+
 				strings.ToUpper(x265OpenGOPKey)+")", raw); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// The playability keys are a boolean and a whole number, checked against the value the
+	// file or the environment CARRIED for preserve_mtime's reason. A key written with no value
+	// is the absent key, the default.
+	for _, key := range []string{playabilityColdStartsKey, playabilitySegmentsKey} {
+		if !explicitTop[key] {
+			continue
+		}
+		if raw := carriedValue(key, k, kf, ke); raw != nil {
+			if err := checkPlayabilityValue("the top level of "+path+" (or "+envPrefix+strings.ToUpper(key)+")",
+				key, raw); err != nil {
 				return nil, err
 			}
 		}

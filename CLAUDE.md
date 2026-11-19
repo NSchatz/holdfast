@@ -6,7 +6,8 @@ It re-encodes bloated video smaller and never destroys a source until a replacem
 ## Dangers and never-do rules
 
 - **Never mutate a source until a replacement passed every gate** (codec, duration and packet
-  parity, strictly smaller, per-type stream counts, fidelity, full decode, VMAF). The swap is an
+  parity, strictly smaller, per-type stream counts, chapters, fidelity, full decode, playability,
+  VMAF). The swap is an
   atomic same-filesystem `rename()` from the source's own directory; do not weaken it.
 - Fail safe: ambiguous, malformed or unsupported input SKIPS with a logged reason or returns a
   typed error. Never a confident wrong result, never a silent loss.
@@ -41,10 +42,11 @@ session, never as an issue. Write "the owner" in this public repository, never a
 ## Siblings
 
 - Before writing new code, search shopkit's index:
-  `git -C /workspace/shopkit show origin/main:docs/INDEX.md | grep -i <word>`; reuse or extend
+  `git -C <a clone of shopkit> show origin/main:docs/INDEX.md | grep -i <word>`; reuse or extend
   shopkit instead of writing it again.
 - Work a sibling repo must do goes to that repo as an exact spec; read its card first:
-  `git -C /workspace/<repo> show origin/main:CARD.md`.
+  `git -C <a clone of <repo>> show origin/main:CARD.md`. Where sibling clones live, and how a spec
+  reaches another repo's session, depend on the development setup, which is not decided yet.
 
 ## Details
 

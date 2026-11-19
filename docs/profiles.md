@@ -383,6 +383,43 @@ written value changes the command line and the digest. It is a library root knob
 default; an encode profile does not carry it. The reasoning is in
 [docs/design/encode-plan.md](design/encode-plan.md#gop).
 
+Under `false` the output fidelity gate also holds each libx265 output to closed GOPs: an output
+carrying a RASL picture, or a keyframe that is not an IDR or BLA picture, is refused naming
+`closed-gop`, and the source is kept ([closed GOPs](design/encode-plan.md#closed-gop)).
+
+## `playability_cold_starts` and `playability_segments` - the playability gate
+
+<a id="playability"></a>
+
+```yaml
+playability_cold_starts: 16   # the default: 16 keyframes spread across each output decoded from a cold start
+# playability_cold_starts: 0  # no cold start
+playability_segments: true    # the default: each output cut into segments of 6 s or more, each decoded on its own
+# playability_segments: false # no segment check
+```
+
+Every encode passes the playability gate before it replaces its source: the output decoded the
+way a player or a media server starts it, rather than linearly from its first frame. Its video is
+remuxed once into fragmented MP4, cut at every keyframe, and fresh decoders are handed pieces of
+it: a cold start at each of `playability_cold_starts` keyframes spread across the output (and at up
+to four times as many of the keyframes followed by leading pictures, the ones an open-GOP stream
+starts differently), three seconds each; and, under `playability_segments`, every segment of six
+seconds or more on its own, as an HLS or DASH segmenter cuts it. Any decode that fails or prints an
+error keeps the source. A remux is not held to it.
+
+It is on with no key set, as chapter parity and output fidelity are, and at its defaults it moves
+no profile digest. A larger sample checks more keyframes for a few more short decodes each; `0`
+and `false` turn either half off, and with both off the gate does nothing. It costs a read of the
+output for the packet listing, one remux, one more decode of the whole video (the segments), and
+the cold starts' short decodes. Both are library root knobs with a top-level default
+(`HOLDFAST_PLAYABILITY_COLD_STARTS`, `HOLDFAST_PLAYABILITY_SEGMENTS`); an encode profile and a
+rule do not carry them. `playability_cold_starts` is a whole number, 0 or more, and
+`playability_segments` true or false; anything else refuses to start, naming the key.
+
+The gate proves that the pinned ffmpeg starts the output cleanly where it was started, not that
+every client plays it: what it does and does not see is in
+[docs/design/swap.md](design/swap.md#playability).
+
 ## `exclude_paths` and `include_paths` - which paths this tool may touch
 
 <a id="path-filters"></a>

@@ -770,9 +770,19 @@ func renderArgv(calls [][]string) string {
 // carries ahead of the output path, and the working file's name and the container the encode
 // names since S0177. decodeCheck and the two stream hashes are the gate's own invocations;
 // the first entry of each sequence is the encode.
+//
+// The playability gate's invocations follow the decode check on every re-encode (a remux is
+// not held to the gate): the remux of the output into fragmented MP4, and the decoders fed
+// from it - for this source's one keyframe, its segment's and its cold start's.
 var (
 	ac10DecodeCheck = []string{"-hide_banner", "-nostdin", "-v", "error", "-xerror", "-err_detect", "+explode",
 		"-i", "<ROOT>/movie.__transcoding__.mkv.holdfast-part", "-map", "0:v", "-f", "null", "-"}
+
+	ac10Remux = []string{"-hide_banner", "-nostdin", "-v", "error", "-i", "file:<ROOT>/movie.__transcoding__.mkv.holdfast-part",
+		"-map", "0:V:0", "-c", "copy", "-copyinkf", "-f", "mp4", "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "pipe:1"}
+	ac10Decoder = []string{"-hide_banner", "-nostdin", "-v", "error", "-xerror", "-err_detect", "+explode",
+		"-f", "mp4", "-i", "pipe:0", "-map", "0:v:0", "-vf", "setpts=N", "-c:v", "wrapped_avframe",
+		"-enc_time_base:v", "demux", "-stats_enc_pre", "pipe:1", "-stats_enc_pre_fmt", "{n}", "-f", "null", "-"}
 
 	ac10ReEncode = [][]string{
 		{"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", "<ROOT>/movie.mkv",
@@ -783,7 +793,7 @@ var (
 			"-max_muxing_queue_size", "128", "-muxing_queue_data_threshold", "52428800",
 			"-thread_queue_size", "8",
 			"--", "<ROOT>/movie.__transcoding__.mkv.holdfast-part"},
-		ac10DecodeCheck,
+		ac10DecodeCheck, ac10Remux, ac10Decoder, ac10Decoder,
 	}
 
 	ac10RemuxOnly = [][]string{
@@ -810,6 +820,6 @@ var (
 			"-max_muxing_queue_size", "128", "-muxing_queue_data_threshold", "52428800",
 			"-thread_queue_size", "8",
 			"--", "<ROOT>/movie.__transcoding__.mkv.holdfast-part"},
-		ac10DecodeCheck,
+		ac10DecodeCheck, ac10Remux, ac10Decoder, ac10Decoder,
 	}
 )
