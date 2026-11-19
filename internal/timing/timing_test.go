@@ -93,7 +93,8 @@ func TestCheck_Passes(t *testing.T) {
 		{"a base whose tick is not one unit", listing(1001, 24000, 0, 1, 2, 3), listing(1001, 48000, 0, 2, 4, 6), nil},
 		{"an AVI read by its decode timestamps", dtsListing(1, 24, 0, 1, 2), ms(0, 42, 83), nil},
 		{"into an AVI read by its decode timestamps", ms(0, 42, 83), dtsListing(1, 24, 5, 6, 7), nil},
-		{"an untimed elementary stream: only the count and the output's own instants", untimed(3), ms(0, 100, 200), nil},
+		{"an untimed elementary stream, its start decoded: only the count and the output's own instants", untimed(3),
+			ms(0, 100, 200), decoded(3, na, na, na)},
 		{"packets flagged to discard are not shown: an MP4 cut between keyframes",
 			packets(at(-84, "key", "discard"), at(-42, "discard"), at(0), at(42), at(83)), ms(0, 42, 83), nil},
 		{"a stream cut between keyframes, its start decoded: the packets before the keyframe show nothing",
@@ -107,8 +108,6 @@ func TestCheck_Passes(t *testing.T) {
 		{"leading pictures timed before zero, which Matroska reads back with none, dropped by the decoder",
 			packets(at(0, "key"), at(0, "na"), at(0, "na"), at(125), at(42), at(83)), ms(0, 42, 83, 125),
 			decoded(6, 0, 42, 83, 125)},
-		{"leading pictures timed before zero that the decoder shows (an IDR's RADL pictures): the timed rest is placed",
-			packets(at(0, "key"), at(0, "na"), at(0, "na"), at(125), at(42), at(83)), ms(-83, -42, 0, 42, 83, 125), nil},
 		{"a stream timed by decode timestamps alone, cut between keyframes, its start decoded",
 			probe.Timestamps{TimeBaseNum: 1, TimeBaseDen: 24, Packets: []probe.Packet{{HasDTS: true},
 				{DTS: 1, HasDTS: true, Key: true}, {DTS: 2, HasDTS: true}, {DTS: 3, HasDTS: true}}}, ms(0, 42, 83),
@@ -152,8 +151,9 @@ func TestCheck_Refuses(t *testing.T) {
 		{"a closed GOP's leading pictures shown, the last two frames missing", closedGOP,
 			ms(40, 80, 120, 160), decoded(6, 40, 80, 120, 160, 200, 240),
 			[]string{"shows 4 frames and the source's 6"}},
-		{"an IDR's RADL pictures shown, the first two missing", radl, ms(0, 42, 83, 125),
-			decoded(6, na, na, 0, 42, 83, 125), []string{"shows 4 frames and the source's 6"}},
+		{"an IDR's RADL pictures timed before zero and shown: where they are shown cannot be read", radl,
+			ms(-83, -42, 0, 42, 83, 125), decoded(6, na, na, 0, 42, 83, 125),
+			[]string{"2 of the 6 frames a decoder shows of the source carry no timestamp"}},
 		{"a frame dropped mid-film: the start explains nothing", ms(0, 42, 83, 125), ms(0, 42, 125),
 			decoded(4, 0, 42, 83, 125), []string{"shows 3 frames and the source's 4"}},
 		{"neither shows a frame", packets(at(0, "key", "discard")), packets(at(0, "key", "discard")), nil,
@@ -187,13 +187,30 @@ func TestCheck_Refuses(t *testing.T) {
 			[]string{"timing parity could not be established: not every frame of the output's video carries a timestamp"}},
 		{"an output timed in part", ms(0, 42), packets(at(0, "key"), at(0, "na")), nil,
 			[]string{"not every frame of the output's video carries a timestamp"}},
-		{"an untimed source still holds the output's instants", untimed(3), ms(0, 100, 100), nil,
+		{"an untimed source still holds the output's instants", untimed(3), ms(0, 100, 100), decoded(3, na, na, na),
 			[]string{"1 of the output's 3 video frames are presented at the same instant as the frame before them " +
 				"where 0 of the source's are"}},
-		{"a source with one untimed frame still has its timed ones placed", radl, ms(-42, 0, 42, 90, 125, 167), nil,
-			[]string{"the encode moved the source's frame timing"}},
-		{"a timed source frame no output frame is left for", packets(at(0, "key"), at(0, "na"), at(42), at(83)),
-			ms(0, 42, 50, 60), nil, []string{"the encode moved the source's frame timing"}},
+		{"an open GOP's untimed leading pictures, dropped, and two frames padded at the end", radl,
+			ms(0, 42, 83, 125, 167, 208), decoded(6, 0, 42, 83, 125),
+			[]string{"shows 6 frames and the source's 4 (its first 6 packets decoded show 4)"}},
+		{"a frame with no timestamp past the decoded start", packets(at(0, "key"), at(42), at(0, "na"), at(83)),
+			ms(0, 42, 63, 83), decoded(2, 0, 42), []string{"1 of the 4 frames a decoder shows of the source carry no timestamp"}},
+		{"a decode-timed source cut between keyframes, its start decoded, one frame moved mid-film",
+			probe.Timestamps{TimeBaseNum: 1, TimeBaseDen: 25, Packets: append([]probe.Packet{{DTS: 0, HasDTS: true}},
+				dtsListing(1, 25, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10).Packets...)}, ms(0, 40, 80, 120, 170, 200, 240, 280, 320, 360),
+			decoded(11, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10), []string{"frame 4 is presented at 0.170000s", "moved"}},
+		{"a decode-timed source cut between keyframes, a frame dropped mid-film and one padded at the end",
+			probe.Timestamps{TimeBaseNum: 1, TimeBaseDen: 25, Packets: append([]probe.Packet{{DTS: 0, HasDTS: true}},
+				dtsListing(1, 25, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10).Packets...)}, ms(0, 40, 80, 120, 200, 240, 280, 320, 360, 400),
+			decoded(11, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10), []string{"frame 4 is presented at 0.200000s", "moved"}},
+		{"a decode-timed source whose decoder drops more than the packets before its keyframe",
+			probe.Timestamps{TimeBaseNum: 1, TimeBaseDen: 25, Packets: append([]probe.Packet{{DTS: 0, HasDTS: true}},
+				dtsListing(1, 25, 1, 2, 3, 4).Packets...)}, ms(0, 40, 80), decoded(5, 2, 3, 4),
+			[]string{"a decoder drops 2 of the source's first 5 video packets where 1 come before its first keyframe"}},
+		{"an AVI at one frame per tick written back into AVI, a frame dropped and one padded",
+			dtsListing(1, 25, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9), dtsListing(1, 25, 0, 1, 2, 3, 4, 6, 7, 8, 9, 10), nil,
+			[]string{"frame 5 is presented at 0.240000s from its first frame and the source's at 0.200000s",
+				"further apart than the same tick"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := Check(tc.src, tc.out, tc.start)
@@ -306,31 +323,17 @@ func TestCheck_ADecodeTimedSourceIsShownAtItsReorderingDelay(t *testing.T) {
 	}
 }
 
-// TestCheck_TheFirstTimedFrameIsAnchoredAfterAtMostTwiceMaxReorderUntimedOnes: a source whose
-// first frames carry no time (shown, and timed by the decoder) is placed from its first timed
-// frame, which the output may show after up to 2*MaxReorder frames of those; past that the
-// source is not placed and the output is refused.
-func TestCheck_TheFirstTimedFrameIsAnchoredAfterAtMostTwiceMaxReorderUntimedOnes(t *testing.T) {
-	for _, tc := range []struct {
-		untimed int
-		pass    bool
-	}{{2 * MaxReorder, true}, {2*MaxReorder + 1, false}, {9, true}} {
-		t.Run(fmt.Sprint(tc.untimed), func(t *testing.T) {
-			src := []probe.Packet{at(0, "key")}
-			var out []int64
-			for i := tc.untimed; i > 0; i-- {
-				src = append(src, at(0, "na"))
-				out = append(out, int64(-11*i))
-			}
-			for _, ts := range []int64{42, 83, 125} {
-				src = append(src, at(ts))
-			}
-			out = append(out, 0, 42, 83, 125)
-			err := Check(packets(src...), ms(out...), nil)
-			if tc.pass != (err == nil) {
-				t.Errorf("Check = %v, want pass %v", err, tc.pass)
-			}
-		})
+// TestCheck_AnUntimedShownPacketAsksForTheStart: a packet a decoder may show with no timestamp
+// of either kind is never counted as a frame on the packets' word alone - a decoder may drop it
+// (an open GOP's leading picture) - so the start is asked for even where the counts agree.
+func TestCheck_AnUntimedShownPacketAsksForTheStart(t *testing.T) {
+	var need *NeedsStart
+	err := Check(packets(at(0, "key"), at(0, "na"), at(0, "na"), at(125), at(42), at(83)), ms(0, 42, 83, 125, 167, 208), nil)
+	if !errors.As(err, &need) || need.Packets != 6 {
+		t.Errorf("Check = %v, want the start asked for", err)
+	}
+	if err := Check(untimed(3), ms(0, 42, 83), nil); !errors.As(err, &need) {
+		t.Errorf("Check of an untimed source = %v, want the start asked for", err)
 	}
 }
 
@@ -347,6 +350,33 @@ func TestCheck_TheLastFramesOfADecodeTimedSourceKeepItsRecentCadence(t *testing.
 	out[len(out)-1]++
 	if err := Check(dtsListing(1, 600, slots...), listing(1, 600, out...), nil); err == nil {
 		t.Error("Check passed a last frame two ticks past the source's longest recent interval")
+	}
+}
+
+// TestCheck_ADecodeTimedSourcesTolerance: a source timed by decode timestamps stores exact slots,
+// so only the output's rounding is allowed for - one tick of the output's base - and none where
+// that tick is as long as the source's shortest frame.
+func TestCheck_ADecodeTimedSourcesTolerance(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		src, out probe.Timestamps
+		pass     bool
+	}{
+		{"an AVI at one frame per tick written back into AVI, the same slots", dtsListing(1, 25, 0, 1, 2, 3, 4),
+			dtsListing(1, 25, 3, 4, 5, 6, 7), true},
+		{"an AVI at one frame per tick into Matroska", dtsListing(1, 25, 0, 1, 2, 3, 4), ms(0, 40, 80, 120, 160), true},
+		{"into Matroska, each frame rounded to the millisecond", dtsListing(1, 600, 0, 25, 25, 50),
+			ms(0, 42, 42, 83), true},
+		{"a source whose shortest frame is one tick of the output's base: the same tick", dtsListing(1, 1000, 0, 1, 41),
+			dtsListing(1, 1000, 0, 2, 41), false},
+		{"a source whose frames are longer than the output's tick: one tick", dtsListing(1, 1000, 0, 40, 81),
+			dtsListing(1, 1000, 0, 41, 81), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := Check(tc.src, tc.out, nil); tc.pass != (err == nil) {
+				t.Errorf("Check = %v, want pass %v", err, tc.pass)
+			}
+		})
 	}
 }
 

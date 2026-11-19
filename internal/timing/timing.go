@@ -19,10 +19,11 @@ import (
 )
 
 // NeedsStart is what Check returns, instead of a verdict, where the output shows a different
-// number of frames than the source has packets left to show: a decoder starting at the source's
-// first packet may not show all of them (a stream cut between keyframes, an open GOP's or a CRA's
-// leading pictures), and only a decode of that start says how many it does. The caller decodes
-// the source's first Packets packets (probe.Prober.VideoStart) and asks again.
+// number of frames than the source has packets left to show, or where a packet the source shows
+// carries no timestamp: a decoder starting at the source's first packet may not show all of them
+// (a stream cut between keyframes, an open GOP's or a CRA's leading pictures), and only a decode
+// of that start says how many it does, and when. The caller decodes the source's first Packets
+// packets (probe.Prober.VideoStart) and asks again.
 type NeedsStart struct {
 	Packets int
 }
@@ -44,16 +45,21 @@ func (n *NeedsStart) Error() string {
 //     order is, within the tolerance below. Each file's times are read as positions from its
 //     own first presented frame, because an encode may move the whole timeline (ffmpeg
 //     rebases a copy to start at 0, and a muxer may delay it), and a constant move changes
-//     nothing a viewer sees. A source frame with no time of its own (a leading picture
-//     Matroska reads back with none) is not placed; every timed one is.
+//     nothing a viewer sees.
 //
-// # The tolerance: one tick of the coarser time base
+// # The tolerance: one tick
 //
 // An encode that carries timestamps through moves none of them: it rescales each from the
 // source's time base into the output's, and the only difference that can leave is the
-// rounding of that rescale - at most half a tick of the coarser base at a frame, and half
-// again at the first frame its position is read from, so one tick in all (1 ms in
-// Matroska, 1/90000 s in MPEG-TS). Anything beyond that is a time the encode changed.
+// rounding of that rescale - at most half a tick at a frame, and half again at the first frame
+// its position is read from, so one tick in all (1 ms in Matroska, 1/90000 s in MPEG-TS). For
+// a source timed by presentation timestamps it is a tick of the coarser of the two bases, which
+// also takes the rounding a source's own muxer made of a rate the encode reads exactly (a
+// converted Dolby Vision stream). A source timed by decode timestamps alone stores each frame's
+// exact slot, so the only rounding is the output's: one tick of the output's base, and none at
+// all where that tick is as long as the source's shortest frame (an AVI at 1/25 written back
+// into AVI), since a rounding that long would be a whole frame. Anything beyond that is a time
+// the encode changed.
 //
 // A tolerance of half a source frame would be too loose for the class this gate exists for.
 // An encoder that rounds a 24 fps stretch onto a 30 fps grid moves frames by up to 16.7 ms,
@@ -65,11 +71,14 @@ func Check(src, out probe.Timestamps, start *probe.Start) error {
 		return fmt.Errorf("timing parity could not be established: not every frame of the output's video " +
 			"carries a timestamp, so when its frames are shown cannot be read")
 	}
-	s := sourceTimes(src, start)
+	s, err := sourceTimes(src, start)
+	if err != nil {
+		return err
+	}
+	if s.needsStart || (start == nil && s.n != len(o)) {
+		return &NeedsStart{Packets: window(src)}
+	}
 	if s.n != len(o) {
-		if start == nil {
-			return &NeedsStart{Packets: window(src)}
-		}
 		return fmt.Errorf("timing parity failed: the output's video shows %d frames and the source's %d (its "+
 			"first %d packets decoded show %d) - an encode makes one frame of each frame the source shows",
 			len(o), s.n, start.Packets, len(start.Frames))
@@ -80,7 +89,7 @@ func Check(src, out probe.Timestamps, start *probe.Start) error {
 
 	// A source can carry frames on one instant itself; an output that reproduces them has
 	// damaged nothing, and one that adds any has collapsed the timing.
-	srcRepeats, _ := repeats(s.known)
+	srcRepeats, _ := repeats(s.ticks)
 	if n, first := repeats(o); n > srcRepeats {
 		return fmt.Errorf("timing parity failed: %d of the output's %d video frames are presented at the same "+
 			"instant as the frame before them where %d of the source's are (the first at %s from its first "+
@@ -91,60 +100,103 @@ func Check(src, out probe.Timestamps, start *probe.Start) error {
 	// at one guessed rate as it reads it - offers none to hold the output's frames to. What is
 	// checkable is checked, the count and an output that never shows two frames at once, and it
 	// is not refused for what it does not carry.
-	if len(s.known) == 0 {
+	if s.ticks == nil {
 		return nil
 	}
-	m := newMatcher(src, out)
+	m := newMatcher(src, out, s)
 	if s.fromDTS {
-		return m.shifted(o, s.known, src, out)
+		return m.shifted(o, s.ticks, src, out)
 	}
-	return m.subset(o, s.known, s.n-len(s.known), src, out)
+	if at, moved := mismatch(m, o, s.ticks); moved {
+		return moveError(o, s.ticks, at, src, out, m)
+	}
+	return nil
 }
 
-// times are the frames a decoder shows of the source, in time: how many, and the times of those
-// that carry one, sorted.
+// times are the frames a decoder shows of the source, in time: how many, and their times,
+// sorted, or no times at all where none of them carries one.
 type times struct {
 	n     int
-	known []int64
-	// fromDTS: every shown packet carries a decode timestamp and not every one a presentation
-	// timestamp (AVI and ASF, which store none, and an MPEG-4 Part 2 stream whose B-frames carry
-	// none), and known are the decode timestamps.
+	ticks []int64
+	// fromDTS: the source is timed by decode timestamps alone - every shown packet carries one,
+	// and not every one a presentation timestamp (AVI and ASF, which store none, and an MPEG-4
+	// Part 2 stream whose B-frames carry none).
 	fromDTS bool
+	// needsStart: some shown packet carries no timestamp, so only a decode can say which of them
+	// a decoder shows and when.
+	needsStart bool
 }
 
-// sourceTimes reads the frames a decoder shows of src. Without start they are its packets but
-// those flagged to discard, each timed by its presentation timestamp, or every one by its decode
-// timestamp where they all carry one and not all a presentation timestamp. With start they are
-// the frames the decode of its first packets showed, timed as the decoder timed them, then the
-// rest of its packets, timed by their presentation timestamps.
-func sourceTimes(src probe.Timestamps, start *probe.Start) times {
+// sourceTimes reads the frames a decoder shows of src.
+//
+// Without start they are its packets but those flagged to discard, each timed by its
+// presentation timestamp, or every one by its decode timestamp where they all carry one and not
+// all a presentation timestamp; where some carry neither, the start has to be decoded.
+//
+// With start, a source timed by decode timestamps is its packets from its first keyframe on: the
+// decode must show that a decoder drops exactly the packets before that keyframe, and the rest
+// keep their decode timestamps (and the reordering delay they are shown at). Any other source is
+// the frames the decode showed, timed as the decoder timed them, then the rest of its packets,
+// timed by their presentation timestamps; a frame among them with no time is refused, since where
+// it is shown cannot be read and ffmpeg itself gives it another frame's instant, unless no frame
+// carries a time at all.
+func sourceTimes(src probe.Timestamps, start *probe.Start) (times, error) {
+	all := shown(src.Packets)
+	allPTS := !slices.ContainsFunc(all, func(k probe.Packet) bool { return !k.HasPTS })
+	allDTS := !slices.ContainsFunc(all, func(k probe.Packet) bool { return !k.HasDTS })
 	var t times
-	add := func(ts int64, ok bool) {
-		t.n++
-		if ok {
-			t.known = append(t.known, ts)
+	switch {
+	case !allPTS && allDTS:
+		t.fromDTS = true
+		p := all
+		if start != nil {
+			cut := min(start.Packets, len(src.Packets))
+			dropped := len(shown(src.Packets[:cut])) - len(start.Frames)
+			key := max(slices.IndexFunc(p, func(k probe.Packet) bool { return k.Key }), 0)
+			if dropped != key {
+				return times{}, fmt.Errorf("timing parity could not be established: a decoder drops %d of the "+
+					"source's first %d video packets where %d come before its first keyframe, so which frames it "+
+					"shows cannot be read from its decode timestamps", dropped, cut, key)
+			}
+			p = p[key:]
 		}
-	}
-	rest := src.Packets
-	if start != nil {
+		for _, k := range p {
+			t.ticks = append(t.ticks, k.DTS)
+		}
+	case start == nil:
+		if !allPTS {
+			return times{needsStart: true}, nil
+		}
+		for _, k := range all {
+			t.ticks = append(t.ticks, k.PTS)
+		}
+	default:
+		untimed := 0
 		for _, f := range start.Frames {
-			add(f.TS, f.HasTS)
+			if f.HasTS {
+				t.ticks = append(t.ticks, f.TS)
+			} else {
+				untimed++
+			}
 		}
-		rest = rest[min(start.Packets, len(rest)):]
-	}
-	p := shown(rest)
-	allPTS := !slices.ContainsFunc(p, func(k probe.Packet) bool { return !k.HasPTS })
-	allDTS := !slices.ContainsFunc(p, func(k probe.Packet) bool { return !k.HasDTS })
-	t.fromDTS = start == nil && !allPTS && allDTS
-	for _, k := range p {
-		if t.fromDTS {
-			add(k.DTS, true)
-		} else {
-			add(k.PTS, k.HasPTS)
+		for _, k := range shown(src.Packets[min(start.Packets, len(src.Packets)):]) {
+			if k.HasPTS {
+				t.ticks = append(t.ticks, k.PTS)
+			} else {
+				untimed++
+			}
 		}
+		t.n = len(t.ticks) + untimed
+		if untimed > 0 && len(t.ticks) > 0 {
+			return times{}, fmt.Errorf("timing parity could not be established: %d of the %d frames a decoder "+
+				"shows of the source carry no timestamp, so where they are shown cannot be read", untimed, t.n)
+		}
+		slices.Sort(t.ticks)
+		return t, nil
 	}
-	slices.Sort(t.known)
-	return t
+	t.n = len(t.ticks)
+	slices.Sort(t.ticks)
+	return t, nil
 }
 
 // outputTimes are the output's shown frames' times, sorted - presentation timestamps, or decode
@@ -200,25 +252,46 @@ const MaxReorder = 16
 
 // matcher compares positions in two time bases exactly. With the source's base sn/sd and the
 // output's on/od, a span do of output ticks and ds of source ticks differ by
-// (do*on*sd - ds*sn*od) / (od*sd) seconds, and one tick of the coarser base is
-// max(on*sd, sn*od) / (od*sd): so the two are within the tolerance exactly when
-// |do*on*sd - ds*sn*od| <= max(on*sd, sn*od). The products overflow 64 bits on a long film in a
-// fine time base, so they are taken in big integers, reused across frames.
+// (do*on*sd - ds*sn*od) / (od*sd) seconds, and one tick of the output's base is on*sd / (od*sd),
+// one of the source's sn*od / (od*sd): so the two spans are within the tolerance exactly when
+// |do*on*sd - ds*sn*od| <= bound, the tolerance in those units. The products overflow 64 bits on
+// a long film in a fine time base, so they are taken in big integers, reused across frames.
 type matcher struct {
 	outScale, srcScale, bound *big.Int
 	a, b, diff                big.Int
 }
 
-func newMatcher(src, out probe.Timestamps) *matcher {
+// newMatcher sets the tolerance Check documents: a tick of the coarser base for a source timed
+// by presentation timestamps; for one timed by decode timestamps, a tick of the output's base, or
+// nothing where that tick is at least the source's shortest frame.
+func newMatcher(src, out probe.Timestamps, s times) *matcher {
 	m := &matcher{
 		outScale: new(big.Int).Mul(big.NewInt(out.TimeBaseNum), big.NewInt(src.TimeBaseDen)),
 		srcScale: new(big.Int).Mul(big.NewInt(src.TimeBaseNum), big.NewInt(out.TimeBaseDen)),
 	}
 	m.bound = m.outScale
-	if m.srcScale.Cmp(m.outScale) > 0 {
+	switch {
+	case !s.fromDTS && m.srcScale.Cmp(m.outScale) > 0:
 		m.bound = m.srcScale
+	case s.fromDTS:
+		if shortest, ok := shortestInterval(s.ticks); ok &&
+			m.outScale.Cmp(new(big.Int).Mul(big.NewInt(shortest), m.srcScale)) >= 0 {
+			m.bound = new(big.Int)
+		}
 	}
 	return m
+}
+
+// shortestInterval is the shortest positive interval between consecutive sorted ticks, and
+// whether there is one.
+func shortestInterval(sorted []int64) (int64, bool) {
+	shortest, ok := int64(0), false
+	for i := 1; i < len(sorted); i++ {
+		if d := sorted[i] - sorted[i-1]; d > 0 && (!ok || d < shortest) {
+			shortest, ok = d, true
+		}
+	}
+	return shortest, ok
 }
 
 // cmp is -1 where the output span do is shorter than the source span ds by more than the
@@ -234,48 +307,6 @@ func (m *matcher) cmp(do, ds int64) int {
 		return -1
 	}
 	return 1
-}
-
-// subset holds the output to the source's timed frames: u source frames carry no time, so each
-// timed one must be presented where the output shows a frame, every timed one in order, with u
-// output frames left over for the untimed. The first timed source frame is shown after at most u
-// untimed ones, so it is anchored on each of the output's first u+1 frames in turn (at most
-// 2*MaxReorder+1 of them); with u = 0 this is the output and the source frame for frame.
-func (m *matcher) subset(o, k []int64, u int, src, out probe.Timestamps) error {
-	at, from := 0, 0
-	for j := 0; j <= min(u, 2*MaxReorder); j++ {
-		p, i, ok := m.match(o, k, j, u)
-		if ok {
-			return nil
-		}
-		if j == 0 {
-			at, from = p, i
-		}
-	}
-	return fmt.Errorf("timing parity failed: the output's video frame %d is presented at %s from its "+
-		"first frame and the source's at %s - further apart than one tick of the coarser time base (%s) - "+
-		"the encode moved the source's frame timing", at, seconds(o[at]-o[0], out), seconds(k[from]-k[0], src),
-		coarser(src, out))
-}
-
-// match places the timed source frames k on the output o with the first of them on output frame
-// j: each later one on the next output frame within the tolerance of its position, skipping
-// output frames presented before it - frames of untimed source frames - at most u in all. It
-// reports the output frame and the source frame where that fails. The output has u frames more
-// than k has times, so the frame the i-th time is held to, at most u+i on, always exists.
-func (m *matcher) match(o, k []int64, j, u int) (at, from int, ok bool) {
-	p, skipped := j, j
-	for i, t := range k {
-		for skipped < u && m.cmp(o[p]-o[j], t-k[0]) < 0 {
-			p++
-			skipped++
-		}
-		if m.cmp(o[p]-o[j], t-k[0]) != 0 {
-			return p, i, false
-		}
-		p++
-	}
-	return 0, 0, true
 }
 
 // shifted holds the output to a source timed by decode timestamps alone. Such a source is shown
@@ -298,14 +329,22 @@ func (m *matcher) shifted(o, s []int64, src, out probe.Timestamps) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("timing parity failed: the output's video frame %d is presented at %s from its "+
-		"first frame and the source's at %s - further apart than one tick of the coarser time base (%s) - "+
-		"the encode moved the source's frame timing", at, seconds(o[at]-o[0], out), seconds(s[at]-s[0], src),
-		coarser(src, out))
+	return moveError(o, s, at, src, out, m)
 }
 
-// mismatch is the first frame of o not within one tick of s's frame at the same place, both read
-// from their own first frame, over the frames s has, and whether there is one.
+// moveError names the output frame at that is not where the source's frame at the same place is.
+func moveError(o, s []int64, at int, src, out probe.Timestamps, m *matcher) error {
+	tolerance := "one tick of the coarser time base (" + coarser(src, out) + ")"
+	if m.bound.Sign() == 0 {
+		tolerance = "the same tick"
+	}
+	return fmt.Errorf("timing parity failed: the output's video frame %d is presented at %s from its "+
+		"first frame and the source's at %s - further apart than %s - the encode moved the source's frame "+
+		"timing", at, seconds(o[at]-o[0], out), seconds(s[at]-s[0], src), tolerance)
+}
+
+// mismatch is the first frame of o not within the tolerance of s's frame at the same place, both
+// read from their own first frame, over the frames s has, and whether there is one.
 func mismatch(m *matcher, o, s []int64) (at int, found bool) {
 	for i := range s {
 		if m.cmp(o[i]-o[0], s[i]-s[0]) != 0 {

@@ -646,6 +646,127 @@ func TestTiming_LeadingPicturesADecoderShowsAreNotAllowedFor(t *testing.T) {
 	}
 }
 
+// TestTiming_ADecodeTimedSourceCutBetweenKeyframesIsHeldFrameForFrame: an AVI cut between
+// keyframes, its 38 leading packets copied - timed by decode timestamps alone, whose first packets
+// a decoder drops. The decode of its start shows that it drops exactly the packets before its
+// first keyframe, and the rest are held frame for frame at their decode timestamps: a faithful
+// encode is done, and one drifting 4 ms a frame past the decoded start, or one with 20 frames
+// dropped mid-film and 20 padded at the end, is refused, the source kept.
+func TestTiming_ADecodeTimedSourceCutBetweenKeyframesIsHeldFrameForFrame(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	dir := t.TempDir()
+	whole, cut, fixture := filepath.Join(dir, "whole.ts"), filepath.Join(dir, "cut.ts"), filepath.Join(dir, "movie.avi")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+		"testsrc2=size=320x240:rate=25:duration=12", "-c:v", "libx264", "-preset", "ultrafast", "-g", "50", "-bf", "2",
+		"-b:v", "8M", "-pix_fmt", "yuv420p", "--", whole)
+	b, err := os.ReadFile(whole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cut, b[len(b)/188/5*188:], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", cut, "-map", "0:v", "-c", "copy", "-copyinkf",
+		"--", fixture)
+	if listing := timesOf(t, ffprobe, fixture); !decodeTimed(listing) || listing.Packets[0].Key {
+		t.Fatalf("fixture drifted: the AVI is not timed by decode timestamps from a cut between keyframes")
+	}
+	for _, tc := range []struct {
+		name string
+		vf   string
+	}{
+		{"faithful", ""},
+		{"drifting 4 ms a frame past the decoded start", "setpts=PTS+max(0\\,N-60)*0.004/TB"},
+		{"20 frames dropped mid-film and 20 padded at the end",
+			"select='not(between(n\\,100\\,119))',tpad=stop=20:stop_mode=clone"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			src := filepath.Join(root, "movie.avi")
+			if err := os.WriteFile(src, mustRead(t, fixture), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var enc Encoder
+			if tc.vf != "" {
+				enc = EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
+					args := []string{"-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in, "-map", "0", "-vf", tc.vf,
+						"-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error", "-pix_fmt", "yuv420p10le"}
+					args = append(append(args, timestampArgs...), "-f", "matroska", "--", out)
+					return exec.CommandContext(ctx, ffmpeg, args...).Run()
+				})
+			}
+			st, _ := timingRun(t, ffmpeg, ffprobe, root, enc, func(c *config.Config) { c.ContainerExt = "mkv" })
+			row := onlyRow(t, st)
+			if tc.vf == "" {
+				if row.Status != store.Done {
+					t.Fatalf("row %s %q, want done", row.Status, row.Outcome.Reason)
+				}
+				return
+			}
+			if row.Status != store.Failed || !strings.Contains(row.Outcome.Reason, "timing parity failed") {
+				t.Fatalf("row %s %q, want refused by the timing gate", row.Status, row.Outcome.Reason)
+			}
+			if md5f(t, src) != md5f(t, fixture) {
+				t.Error("the source changed under a refused encode")
+			}
+		})
+	}
+}
+
+// TestTiming_UntimedPacketsAreCountedByTheDecoder: a source cut with ffmpeg's -ss whose leading
+// pictures Matroska reads back with no timestamp. Packets with no timestamp are never counted as
+// frames on the listing's word: the decode of the start says whether a decoder shows them. An
+// open GOP's are dropped, so an output padded with two frames at its end is refused for the two
+// extra frames; an IDR's RADL pictures are shown, with no time to place them by, so an output
+// missing them and padded at its end is refused for carrying shown frames no timestamp places.
+func TestTiming_UntimedPacketsAreCountedByTheDecoder(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	for _, tc := range []struct {
+		name, encoder, want string
+		codec               []string
+		make                func(t *testing.T, ffmpeg, dir, path string)
+		damage              string
+	}{
+		{"an open GOP's leading pictures, dropped, and two frames padded at the end", "cpu",
+			"the output's video shows 242 frames and the source's 240",
+			[]string{"-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error", "-pix_fmt", "yuv420p10le"},
+			leadingSources[1].make, "tpad=stop=2:stop_mode=clone"},
+		{"an IDR's RADL pictures, shown, missing and two frames padded at the end", "svtav1",
+			"of the 242 frames a decoder shows of the source carry no timestamp",
+			[]string{"-c:v", "libsvtav1", "-preset", "12", "-crf", "40", "-pix_fmt", "yuv420p10le"},
+			cutFrom("4", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24:duration=12", "-c:v", "libx265", "-preset",
+				"fast", "-x265-params", "log-level=error:keyint=48:min-keyint=48:scenecut=0:bframes=3:open-gop=0:radl=2",
+				"-b:v", "4M", "-pix_fmt", "yuv420p", "whole.mkv"),
+			"select='gte(n\\,2)',tpad=stop=2:stop_mode=clone"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			src := filepath.Join(root, "movie.mkv")
+			tc.make(t, ffmpeg, t.TempDir(), src)
+			listing := timesOf(t, ffprobe, src)
+			if !slices.ContainsFunc(listing.Packets, func(k probe.Packet) bool { return !k.HasPTS && !k.HasDTS }) ||
+				len(listing.Packets) != 242 {
+				t.Fatalf("fixture drifted: %d packets, none untimed", len(listing.Packets))
+			}
+			before := md5f(t, src)
+			enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
+				args := append([]string{"-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in, "-map", "0", "-vf",
+					tc.damage}, tc.codec...)
+				args = append(append(args, timestampArgs...), "-f", "matroska", "--", out)
+				return exec.CommandContext(ctx, ffmpeg, args...).Run()
+			})
+			st, _ := timingRun(t, ffmpeg, ffprobe, root, enc, func(c *config.Config) { c.Encoder = tc.encoder })
+			row := onlyRow(t, st)
+			if row.Status != store.Failed || !strings.Contains(row.Outcome.Reason, tc.want) {
+				t.Fatalf("row %s %q, want refused with %q", row.Status, row.Outcome.Reason, tc.want)
+			}
+			if md5f(t, src) != before {
+				t.Error("the source changed under a refused encode")
+			}
+		})
+	}
+}
+
 // TestTiming_ASourceThatCarriesFramesOnOneInstantIsNotRefusedForThem: a source that stores two
 // frames on one timestamp itself, re-encoded and remuxed. Either output reproduces the pair and
 // nothing more, so the gate, which refuses only frames on one instant beyond the source's own,

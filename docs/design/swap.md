@@ -136,34 +136,50 @@ encoder that rounds a 24 fps stretch onto a 30 fps grid moves frames by up to 16
 24 fps frame (20.8 ms), and no two of them collide. The comparison is exact, in integers, so a
 frame exactly one tick off passes and one a finer tick further does not.
 
+A source timed by decode timestamps alone (AVI, ASF) stores each frame's exact slot, so the only
+rounding is the output's: its tolerance is one tick of the output's base, and none at all where
+that tick is as long as the source's shortest frame. An AVI at 1/25 written back into AVI has a
+tick of a whole frame, where one tick of tolerance would pass a frame dropped and another padded;
+there the slots must be the same.
+
 The cost is one ffprobe packet listing of each file: every packet of that video stream with
 its timestamps, and the stream's time base, read by demuxing and never by decoding. It reads each
 file once more end to end, which is why it runs after the gates that cost a header read and before
-the full decode. Only where the counts differ does it pay one ffprobe more, which decodes the
-source's first packets and nothing past them (below).
+the full decode. Only where the counts differ, or a packet carries no timestamp, does it pay one
+ffprobe more, which decodes the source's first packets and nothing past them (below).
 
 Which frames a decoder shows. A packet the demuxer flags to discard is decoded and never shown -
 an MP4 cut between keyframes keeps, behind an edit list, the packets it needs from the keyframe
-before the cut and flags them - so it is not counted. Every other packet is a frame, except where a
-decoder starting at the stream's first packet drops some: the packets before its first keyframe in
-file order (a stream cut between keyframes), and an open GOP's or an HEVC CRA's leading pictures,
-which reference pictures before the keyframe. Which ones it drops a packet listing cannot say: a
-closed GOP's leading B-frames (a DVD title's first GOP) and an HEVC IDR's RADL pictures are also
-presented before their keyframe, and a decoder shows them. So where the output shows a different
-number of frames than the source has packets to show, the source's start is decoded: its packets up
-to its first keyframe and 48 after it (room for the most leading pictures a GOP carries, the
-pictures they reference and the decoder's reordering delay, at most 16 each), in one ffprobe that
-reads nothing past them (`-read_intervals %+#<n>`, `frame=best_effort_timestamp`). The frames that
-decode shows, timed as the decoder times them, and the rest of the source's packets are what the
-source shows, and the output must show exactly as many. Measured with the pinned build: an MP4 cut
-mid-GOP, H.264 starting at an open GOP's I-frame, MPEG-2 starting at an open GOP, HEVC starting at a
-CRA, and a transport stream cut mid-GOP with its leading packets copied are each encoded and pass,
-every frame on what a player shows
+before the cut and flags them - so it is not counted. Every other timed packet is a frame, except
+where a decoder starting at the stream's first packet drops some: the packets before its first
+keyframe in file order (a stream cut between keyframes), and an open GOP's or an HEVC CRA's leading
+pictures, which reference pictures before the keyframe. Which ones it drops a packet listing cannot
+say: a closed GOP's leading B-frames (a DVD title's first GOP) and an HEVC IDR's RADL pictures are
+also presented before their keyframe, and a decoder shows them. So where the output shows a
+different number of frames than the source has packets to show, or where any packet the source
+shows carries no timestamp at all (an untimed packet is never counted on the listing's word), the
+source's start is decoded: its packets up to its first keyframe and 48 after it (room for the most
+leading pictures a GOP carries, the pictures they reference and the decoder's reordering delay, at
+most 16 each), in one ffprobe that reads nothing past them (`-read_intervals %+#<n>`,
+`frame=best_effort_timestamp`). The frames that decode shows, timed as the decoder times them, and
+the rest of the source's packets are what the source shows, and the output must show exactly as
+many. A source timed by decode timestamps alone keeps them: the decode must show that a decoder
+drops exactly the packets before its first keyframe, and the rest are compared from that keyframe
+on, frame for frame (below); a decoder dropping any other number is refused.
+
+Measured with the pinned build: an MP4 cut mid-GOP, H.264 starting at an open GOP's I-frame, MPEG-2
+starting at an open GOP, HEVC starting at a CRA, and a transport stream cut mid-GOP with its leading
+packets copied are each encoded and pass, every frame on what a player shows
 (`TestTiming_ASourceWhoseFirstPacketsADecoderCannotShowIsNotRefused`); an MPEG-2 stream starting at a
 closed GOP's leading B-frames and an HEVC segment starting at an IDR with RADL pictures pass a
 faithful encode and refuse one two frames short, at its start or at its end
-(`TestTiming_LeadingPicturesADecoderShowsAreNotAllowedFor`). A frame a decoder drops in the middle
-of a film - a damaged frame it conceals by dropping - is past the decoded start, and the source is
+(`TestTiming_LeadingPicturesADecoderShowsAreNotAllowedFor`); an H.264 AVI cut between keyframes
+passes a faithful encode and refuses one drifting 4 ms a frame or with 20 frames dropped mid-film
+and 20 padded at its end (`TestTiming_ADecodeTimedSourceCutBetweenKeyframesIsHeldFrameForFrame`);
+and a Matroska cut whose untimed leading pictures a decoder drops refuses an output padded with
+two frames, one whose untimed leading pictures it shows an output missing them and padded
+(`TestTiming_UntimedPacketsAreCountedByTheDecoder`). A frame a decoder drops in the middle of a
+film, a damaged frame it conceals by dropping, is past the decoded start, and the source is
 refused, kept as it is: a count the source's shown frames do not account for is not guessed at.
 
 How each frame is timed, and what of it is checkable:
@@ -181,15 +197,15 @@ How each frame is timed, and what of it is checkable:
   of them exactly. The last d frames a decoder times by repeating its last frame's duration
   (`video_duration_estimate`, `fftools/ffmpeg_dec.c` at 5d4d3bdc61); each must follow the frame
   before it by no more than the source's longest interval among its last d+1, plus the tolerance;
-- otherwise some frames carry no timestamp: a raw elementary stream (`.h264`), which stores frames
-  and no times and which ffmpeg times at one guessed rate as it reads it, a leading picture
-  Matroska stores before zero and reads back with none, or a stream timed only in part. A source
-  like that is not refused for what it does not carry: its timed frames are placed and the rest
-  are not. Each timed frame must be presented where the output shows a frame, in order, within the
-  tolerance, with as many output frames left over as the source has untimed ones; the first timed
-  frame may be shown after up to 32 untimed ones, and is anchored on each such output frame in turn.
-  A source with no timed frame at all is held to the count and to an output that never presents
-  two frames at once. An output with an untimed frame is refused: an output whose frames cannot be
+- otherwise some packets carry no timestamp of either kind: a raw elementary stream (`.h264`),
+  which stores frames and no times and which ffmpeg times at one guessed rate as it reads it, a
+  leading picture Matroska stores before zero and reads back with none, or a stream timed only in
+  part. The source's start is decoded (above). A source none of whose shown frames carries a time
+  is held to what is checkable, the count and an output that never presents two frames at once,
+  and is not refused for what it does not carry. A source that shows a frame with no time beside
+  frames with one is refused: where that frame is shown cannot be read, and ffmpeg, given no time
+  for it, places it on another frame's instant. An untimed packet a decoder drops is no frame and
+  changes nothing. An output with an untimed frame is refused: an output whose frames cannot be
   placed in time cannot be shown to carry the source's;
 - a listing that cannot be read at all - no time base, a line or a value the reader does not know -
   is refused, never read as a match. The lines ffprobe adds beside the stream - a transport

@@ -651,8 +651,9 @@ func (e *Engine) lengthParity(ctx context.Context, in, out string) (store.Failur
 
 // timingParity is gate 3's timestamp half on its own: out's video is presented at in's times
 // (timing.Check). Where the output shows a different number of frames than the source has
-// packets left to show, the source's first packets are decoded - one more ffprobe, on that path
-// alone - so that only the packets a decoder really drops at its start are allowed for.
+// packets left to show, or a packet the source shows carries no timestamp, the source's first
+// packets are decoded - one more ffprobe, on that path alone - so that only the packets a decoder
+// really drops at its start are allowed for.
 //
 // A mismatch is DETERMINISTIC: the same source, configuration and ffmpeg build time the same
 // frames the same way. A listing that is ffprobe's own answer but cannot be compared - no video
