@@ -732,27 +732,35 @@ CREATE INDEX IF NOT EXISTS idx_node_leases_ended ON node_leases(ended_at);
 	},
 	{
 		// v26 - playback evidence (docs/design/playback-evidence.md#playback-evidence): the
-		// sessions a media server's history says were played on a file holdfast swapped, and
-		// where the poll that reads that history has got to.
+		// files holdfast swapped, the sessions a media server's history says were played on
+		// them, and where the poll that reads that history has got to.
 		//
 		// TABLES OF THEIR OWN and no column on jobs, for the reason the health sweep's are: a
 		// session is a REPORT about bytes that already replaced their source, and nothing in the
-		// encode pipeline reads either table, so what a viewer's player did can hold no file
+		// encode pipeline reads any of the three, so what a viewer's player did can hold no file
 		// back, license no encode and move no gate.
+		//
+		// A swap is kept here, keyed (path, fingerprint) with the second it committed, because
+		// the jobs row is not durable enough to be the identity: a changed encoder setting or a
+		// requeue re-opens a done row and the guard then records it skipped under the same key,
+		// and evidence keyed to the done status would vanish with it. superseded_at is NULL
+		// while the swap is the file at its path, and the second it stopped being (a restore, or
+		// another file at the path) after that.
 		//
 		// A session is keyed (source, session_id, path): the source's own id for the history
 		// row, and the swapped file it was played on, as holdfast knows it. fingerprint is the
-		// done row's, so a session is evidence about THOSE bytes and not about whatever later
-		// sits at the path. stopped_at, offset_ms and duration_ms are NULL when the source did
-		// not say: an offset of 0 is a session that never got past the first frame, which is a
-		// reading and not an absence.
+		// swap's, so a session is evidence about THOSE bytes. stopped_at, offset_ms, duration_ms
+		// and played_seconds are NULL when the source did not say: an offset of 0 is a session
+		// that never got past the first frame, which is a reading and not an absence.
+		// offset_derived says the offset was computed from a whole percent rather than read.
 		//
 		// A poll row carries the cursor the next poll reads from, and covered_through, the time
 		// the newest poll that read the history to its end began; it is NULL until one has, so
 		// a file nobody could ask about reads as unknown and never as unplayed.
 		name: "playback evidence",
-		// Two empty tables and one index. A session is recorded by the daemon's poll, never by
-		// a migration, and a fabricated one would be evidence about a playback nobody watched.
+		// Three empty tables and one index. A swap and a session are recorded by the daemon's
+		// poll, never by a migration, and a fabricated one would be evidence about a playback
+		// nobody watched.
 		rows: noRowChange,
 		sql: `
 CREATE TABLE IF NOT EXISTS playback_polls (
@@ -763,6 +771,15 @@ CREATE TABLE IF NOT EXISTS playback_polls (
 	last_failure    TEXT NOT NULL,
 	schema_version  INTEGER
 );
+CREATE TABLE IF NOT EXISTS playback_swaps (
+	path           TEXT NOT NULL,
+	fingerprint    TEXT NOT NULL,
+	swapped_at     INTEGER NOT NULL,
+	superseded_at  INTEGER,
+	recorded_at    INTEGER NOT NULL,
+	schema_version INTEGER,
+	PRIMARY KEY (path, fingerprint)
+);
 CREATE TABLE IF NOT EXISTS playback_sessions (
 	source         TEXT NOT NULL,
 	session_id     TEXT NOT NULL,
@@ -771,7 +788,10 @@ CREATE TABLE IF NOT EXISTS playback_sessions (
 	started_at     INTEGER NOT NULL,
 	stopped_at     INTEGER,
 	offset_ms      INTEGER,
+	offset_derived INTEGER NOT NULL,
 	duration_ms    INTEGER,
+	played_seconds INTEGER,
+	client         TEXT NOT NULL,
 	platform       TEXT NOT NULL,
 	player         TEXT NOT NULL,
 	decision       TEXT NOT NULL,

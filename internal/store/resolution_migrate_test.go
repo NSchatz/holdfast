@@ -146,9 +146,9 @@ func TestResolution_AMigrationThatCannotCompleteRefusesToOpenAndMovesNothing(t *
 	// It names a table the NEWEST step creates, for the reason every wind-back fixture in
 	// this package tracks the end of the migrations slice: a step appended after this line
 	// moves it, and pre-creating a shape an EARLIER step already created would break the
-	// fixture rather than the migration under test. The step's second table is already there
-	// WITHOUT the column its index needs, so the step's first table is created, its create of
-	// the second is a no-op and its index cannot be built.
+	// fixture rather than the migration under test. The step's third table is already there
+	// WITHOUT the column its index needs, so the step's first two tables are created, its
+	// create of the third is a no-op and its index cannot be built.
 	execRaw(t, dbPath, `CREATE TABLE playback_sessions (source TEXT NOT NULL, path TEXT NOT NULL)`)
 
 	st, err := Open(dbPath)
@@ -177,11 +177,13 @@ func TestResolution_AMigrationThatCannotCompleteRefusesToOpenAndMovesNothing(t *
 			t.Errorf("the failed step left %s behind: the transaction did not roll back", m[1])
 		}
 	}
-	// The step's FIRST table was created before its index failed, so its absence now is the
+	// The step's first two tables were created before its index failed, so their absence now is the
 	// proof the step's transaction rolled back. What was already there is still there: the
 	// failed step moved nothing.
-	if rawTableExists(t, dbPath, "playback_polls") {
-		t.Error("the failed step left playback_polls behind: the transaction did not roll back")
+	for _, table := range []string{"playback_polls", "playback_swaps"} {
+		if rawTableExists(t, dbPath, table) {
+			t.Errorf("the failed step left %s behind: the transaction did not roll back", table)
+		}
 	}
 	if rawIndexExists(t, dbPath, "idx_playback_sessions_file") {
 		t.Error("the failed step left idx_playback_sessions_file behind: the transaction did not roll back")

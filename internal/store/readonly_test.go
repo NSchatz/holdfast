@@ -75,7 +75,7 @@ func windBackOneSchemaVersion(t *testing.T, path string) int {
 		t.Fatalf("raw open %s: %v", path, err)
 	}
 	defer func() { _ = db.Close() }()
-	// Exactly what the NEWEST migration added, undone. That is playback evidence's two
+	// Exactly what the NEWEST migration added, undone. That is playback evidence's three
 	// tables and not any step before it: this helper has to track the END of the migrations slice,
 	// because the whole point of it is to produce the database the PREVIOUS build wrote, and
 	// a wind-back that undid a step which is no longer the last one leaves a database still
@@ -86,6 +86,7 @@ func windBackOneSchemaVersion(t *testing.T, path string) int {
 	for _, stmt := range []string{
 		`DROP INDEX IF EXISTS idx_playback_sessions_file`,
 		`DROP TABLE IF EXISTS playback_sessions`,
+		`DROP TABLE IF EXISTS playback_swaps`,
 		`DROP TABLE IF EXISTS playback_polls`,
 		fmt.Sprintf(`PRAGMA user_version = %d`, prev),
 	} {

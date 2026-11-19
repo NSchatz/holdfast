@@ -54,11 +54,21 @@ Two commands are sent, both reads:
   (a date: the day before the earliest start this poll needs, since Tautulli reads the date in its
   own time zone; rows before that start are dropped here), `start` and `length` (100 rows a page).
   Each row is read for `row_id` (or `id`), `started`, `stopped`, `view_offset`, `percent_complete`,
-  `rating_key`, `platform`, `player`, the stream decision, `media_type` and `live`. A live-TV row,
-  a music or photo row and a row with no id are skipped.
-- `get_metadata` with `rating_key`, once per rating key per poll, for the item's
-  `media_info[].parts[].file` and its `duration`. A history row's own `duration` is the time
-  PLAYED, and is never read as the file's length.
+  `play_duration`, `machine_id` (the client), `rating_key`, `platform`, `player`, the stream
+  decision, `media_type` and `live`. A live-TV row, a music or photo row and a row with no id are
+  skipped.
+- `get_metadata` with `rating_key`, for the item's `media_info[].parts[].file` and its `duration`.
+  A history row's own `duration` is the time PLAYED, and is never read as the file's length. The
+  answer is kept across polls and reused for every row that started BEFORE it was asked: the file it
+  names is then at least as new as the one that session played. A row that started later - a new
+  session, which may have played a file swapped since - asks again, so a poll that re-reads two days
+  of history asks Tautulli again only for what is new in it.
+
+**One refused item fails nothing.** An item Tautulli answers with a status other than 200 or a
+result other than `success`, or in a shape this does not read (an answer cut off at the client's
+1 MiB bound included), names no file for its rows and the read goes on; the next row of that item
+asks again. Only a request Tautulli never answered - refused, timed out, unreachable - fails the
+read, so an outage is not mistaken for a history with no swapped file in it.
 
 Sources, read 2026-11-18: the Tautulli API reference,
 <https://github.com/Tautulli/Tautulli/wiki/Tautulli-API-Reference> (`get_history`, `get_metadata`
@@ -81,14 +91,33 @@ A session is evidence about one swapped file, or about none:
   back through `plex_path_map` exactly as the play hold maps a session's file
   ([path maps](media-clients.md#path-maps)); with a map written, a file no entry's `to` covers is
   outside what holdfast shares with Plex and is ignored.
-- **The swap whose bytes it played.** A file is swapped when its done row is written; the session
-  belongs to the newest swap of that path at or before the session started. A session before every
-  swap of its path played the source and is nobody's evidence. The session is recorded against
-  the done row's path AND fingerprint, so it is evidence about those bytes: a restore removes that
-  done row and a later swap of the path supersedes it, and either retires the evidence with it.
+- **The swap whose bytes it played.** The session belongs to the newest swap of that path at or
+  before the session started, while that swap was still the file there. A session before every swap
+  of its path played the source, and one after the swap was superseded played other bytes; neither
+  is anybody's evidence. The session is recorded against the swap's path AND fingerprint, so it is
+  evidence about those bytes.
 - **Exactly one file.** An item whose media name more than one file (two versions of a film, or a
   film in parts) is attributed to nothing, because the history does not say which of them the
   session played, and guessing would put a stall on a file that never stalled.
+
+<a id="swap-identity"></a>
+
+**A swap is recorded in its own table, not read off the done row.** A done row is not durable
+enough to be the identity: a changed encoder setting (`crf`, `preset`, `encoder`, the target
+codec, `x265_open_gop`, `keep_bit_depth`) or a `requeue` re-opens it, and the guard then records it
+`skipped` (already at the target codec) under the same path and fingerprint. Evidence keyed to the
+`done` status would vanish at that moment, suspects included. So each poll, and `serve` once before
+its first scan, records every done row and every live retention's swapped file as a swap - path,
+fingerprint and the second it committed - in `playback_swaps`, and a swap stays **current** while:
+
+- the newest jobs row at its path, of ANY status, still carries its fingerprint (or there is none);
+- and no restore of it is recorded.
+
+When either stops holding - an operator restored the original, or another file arrived at the path
+and the scan recorded it - the swap is superseded at the earliest second the ledger shows for that,
+and its evidence is no longer reported. A swap made while playback evidence was off, whose done row
+a setting change re-opened before the first poll, is recorded only if the undo window still holds
+its original.
 
 ## The verdicts
 
@@ -97,26 +126,43 @@ A session is evidence about one swapped file, or about none:
 Each session says one of three things on its own. It **played the file through** when it ended at
 or past `playback_played_fraction` of the file (0.9 by default) or within **3 minutes** of the end,
 so a long film's credits do not hold it below the mark. It **stopped early** when it ended before
-both. It **says nothing** when it carries no offset or the item no positive length: it cannot have
-played the file through and it cannot be placed.
+**85%** of the file and started within the last **60 days**. Otherwise it **says nothing**: it has
+no offset or the item no positive length, it stopped in the last 15% without reaching the mark
+(viewers leave at the credits, and an animated feature's credits can start before 90%), or it is
+older than the window (a stop months ago is not evidence about how the file plays now, and
+sessions that never expire collide at one point by chance).
+
+Stopped-early sessions whose ends lie within **90 seconds** of one another ended at one point. Where
+an end was computed from a whole percent (no `view_offset`), the rounding can have moved it by half
+a percent of the file, so the tolerance widens by one percent of the file: on a 2h40m film, 186
+seconds. A point is a **stall** rather than people choosing to stop there when it holds at least
+**2** sessions and either:
+
+- they played on at least **2 distinct clients** (Tautulli's `machine_id`, or the platform and
+  player where it gives none); or
+- at least one of them was a **retry that got nowhere**: it played for no more than **5 minutes**,
+  so it began within 5 minutes of the file before where it ended - a resume at the point that froze.
 
 | verdict | when |
 | --- | --- |
-| `suspect-stall` | at least **2** sessions, on any clients, that stopped early and whose ends lie within **90 seconds** of one another |
+| `suspect-stall` | a stall, as above |
 | `played-through` | no stall, and at least one session played the file through |
 | `unplayed` | no stall and no play-through, and either a session exists or a poll has read the history to its end since the swap |
 | `unknown` | no session, and no poll has read the history to its end since the swap |
 
 A suspected stall **wins over a play-through**. In the issue the film played to the end twice on
 an Apple TV and stalled on the browser and desktop clients: one client that plays a file is not
-evidence that the others can. The cluster reported is the largest set of ends within the tolerance
-(the earliest on a tie), placed at its middle session's end.
+evidence that the others can. The issue's pattern is exactly what the rule asks for: Chrome stopped
+near 33:19 and resumed there to no avail, the desktop app resumed at 33:59 and froze at 34:02, and
+Firefox stopped near 34:00. The cluster reported is the largest set that qualifies (the earliest on
+a tie), placed at its middle session's end.
 
 It is a **suspicion**, and the name says so. Two people can stop a film at the same scene for
 reasons of their own. That is why nothing acts on it and why the report carries the sessions it
-rests on - their clients, their stream decisions and where each ended - so the operator can judge
-it. The three fixed figures (3 minutes, 90 seconds, 2 sessions) are not keys: they are stated here
-and asserted by the suite, and a deployment that needs others is a conversation, not a setting.
+rests on - their clients, how long each played, their stream decisions and where each ended - so
+the operator can judge it. The fixed figures (3 minutes, 85%, 90 seconds, 2 sessions, 5 minutes,
+60 days) are not keys: they are stated here and asserted by the suite, and a deployment that needs
+others is a conversation, not a setting.
 
 **No evidence is `unknown`, never `played-through`.** A poll that fails changes no verdict, and a
 file swapped since the last poll that read the history to its end stays `unknown` until one does.
@@ -127,9 +173,11 @@ file swapped since the last poll that read the history to its end stays `unknown
 
 The poll runs in `serve` only, on its own goroutine, every `playback_poll_minutes` (15 by default),
 and once at start. It holds no worker, takes no lease, asks nothing of the scheduler and touches no
-library file: it reads the ledger through the reporting door and writes its own two tables
-(`playback_sessions` and `playback_polls`, schema v26), which nothing in the encode pipeline reads.
-A Tautulli that is slow costs the poll its request timeout (5 seconds per request) and nothing else.
+library file: it reads the ledger through the reporting door and writes its own three tables
+(`playback_swaps`, `playback_sessions` and `playback_polls`, schema v26), which nothing in the
+encode pipeline reads. A Tautulli that is slow costs the poll its request timeout (5 seconds per
+request) and nothing else, and the metadata kept across polls keeps what it asks of the Tautulli
+the streaming pause shares small.
 
 - **Where it reads from.** The first poll reads from the earliest swap in the ledger. A poll that
   read the history to its end begins the next one **48 hours** before itself: a session joins the
@@ -137,8 +185,12 @@ A Tautulli that is slow costs the poll its request timeout (5 seconds per reques
   found by the next only if that one reads back to its start. A re-read session is the same row
   (keyed by Tautulli's row id and the file) and is recorded once.
 - **How much it reads.** At most 50 pages of 100 rows a poll. A backlog larger than that - a first
-  poll over a long history - is read forward over several polls, each continuing from the newest
-  session the last one read, and the history is not counted as covered until one reaches its end.
+  poll over a long history - is read forward over several polls, and the history is not counted as
+  covered until one reaches its end. Each continues from the newest row the last one went through,
+  SKIPPED rows included, so a run of music or of rows before the cursor cannot hold it in place;
+  and because Tautulli's `after` is a whole date, a read under the same date as an incomplete one
+  continues from the row offset that one reached rather than from the first row of the day. If
+  three polls in a row stop at the bound without moving, one `warn` record says so.
 - **When nothing is swapped**, Tautulli is not asked.
 - **It fails open.** A request that fails, an answer that is not the documented shape and a result
   other than `success` end the poll with a failure class (`request-failed`, `unparseable-response`,
@@ -152,7 +204,8 @@ A Tautulli that is slow costs the poll its request timeout (5 seconds per reques
 
 - **The log.** Each file that becomes a suspected stall is one `warn` record, once per process and
   again only after it stopped being one: the file, where it stalls (h:mm:ss), how many sessions
-  ended there, how many sessions there were and how many played it through, and the clients. Where
+  ended there, on how many clients and how many of them were retries that got nowhere, how many
+  sessions there were and how many played it through, and the clients. Where
   a live retention of THIS swap still holds the original, the record names the command,
   `holdfast restore <path>`; otherwise it says the original is no longer retained and the file has
   to be acquired again.
@@ -161,7 +214,8 @@ A Tautulli that is slow costs the poll its request timeout (5 seconds per reques
   stall with its cluster, its sessions and the restore command where it applies
   ([docs/api-reference.md](../api-reference.md#playback)).
 - **Metrics:** `holdfast_playback_suspect_files`, `holdfast_playback_played_through_files` and
-  `holdfast_playback_history_read_timestamp_seconds`, read from the ledger at scrape time and
+  `holdfast_playback_history_read_timestamp_seconds`, read at scrape time through the reporting
+  door - never on the one write connection the engine's claims and finishes go through - and
   absent until a poll has read the history to its end: a library nobody has asked about is not a
   library with no stalls.
 
@@ -180,8 +234,10 @@ from the documented shapes (`internal/playback`'s suite runs the real Tautulli c
 `httptest` server). `ASSUMED`, for the owner's live check:
 
 - that a `get_history` row carries `view_offset` (milliseconds) on the builds that record it. Where
-  a row does not, the offset is taken from `percent_complete` and the item's duration, to the
-  nearest percent - about 87 seconds on a 2h25m film, inside the 90-second tolerance but coarse;
+  a row does not - which may be the common case - the offset is taken from `percent_complete` and
+  the item's duration, to the nearest percent, and the stall tolerance widens to match;
+- that `play_duration` is the seconds the session played, paused time excluded, and that
+  `machine_id` names the playing client;
 - that `get_history` honours `grouping=0`, `include_activity=0` and ascending order by `started`
   for offset paging, and that `after` is inclusive;
 - that a rating key's `get_metadata` names the current file after a swap, including one that

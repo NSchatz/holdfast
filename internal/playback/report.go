@@ -5,6 +5,7 @@ import (
 	"context"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/store"
@@ -32,14 +33,14 @@ func groups(sessions []store.PlaybackSession) map[fileKey][]store.PlaybackSessio
 
 // Suspects is every file the recorded evidence says stalls, path order, each with the restore
 // command where the original is still retained.
-func Suspects(ctx context.Context, r Reader, rules Rules) ([]Suspect, error) {
+func Suspects(ctx context.Context, r Reader, rules Rules, now int64) ([]Suspect, error) {
 	ev, err := r.PlaybackEvidence(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var out []Suspect
 	for k, ss := range groups(ev) {
-		e := Derive(ss, true, rules)
+		e := Derive(ss, true, rules, now)
 		if e.Verdict != SuspectStall {
 			continue
 		}
@@ -112,11 +113,15 @@ type Report struct {
 type ReportRule struct {
 	PlayedFraction        float64 `json:"played_fraction"`
 	EndMarginSeconds      int64   `json:"end_margin_seconds"`
+	StallBefore           float64 `json:"stall_before"`
 	StallToleranceSeconds int64   `json:"stall_tolerance_seconds"`
 	StallMinSessions      int     `json:"stall_min_sessions"`
+	RetryWindowSeconds    int64   `json:"retry_window_seconds"`
+	StallWindowDays       int     `json:"stall_window_days"`
 }
 
-// ReportCounts is every current swapped file - the newest done row of each path - by verdict.
+// ReportCounts is every current swap - the newest swap of each path that is still the file
+// there - by verdict.
 type ReportCounts struct {
 	Swapped       int `json:"swapped"`
 	SuspectStall  int `json:"suspect_stall"`
@@ -142,6 +147,10 @@ type ReportFile struct {
 	StallFromSeconds int64 `json:"stall_from_seconds"`
 	StallToSeconds   int64 `json:"stall_to_seconds"`
 	StallSessions    int   `json:"stall_sessions"`
+	// StallClients is on how many distinct clients those sessions played, StallRetries how many
+	// of them played no longer than the retry window: what says the stop was the file's.
+	StallClients int `json:"stall_clients"`
+	StallRetries int `json:"stall_retries"`
 	// Restore is the command that walks the swap back, while the original is retained; null when
 	// it no longer is. Nothing runs it but an operator.
 	Restore *string `json:"restore"`
@@ -154,13 +163,17 @@ type ReportSession struct {
 	StartedAt     int64  `json:"started_at"`
 	StoppedAt     *int64 `json:"stopped_at"`
 	OffsetSeconds int64  `json:"offset_seconds"`
+	// OffsetFromPercent says the offset was computed from a whole percent of the file.
+	OffsetFromPercent bool `json:"offset_from_percent"`
+	// PlayedSeconds is how long the session played, null when the source did not say.
+	PlayedSeconds *int64 `json:"played_seconds"`
 	Platform      string `json:"platform"`
 	Player        string `json:"player"`
 	Decision      string `json:"decision"`
 }
 
 // BuildReport reads the ledger into the report. It reads and writes nothing else.
-func BuildReport(ctx context.Context, r Reader, cfg *config.Config) (Report, error) {
+func BuildReport(ctx context.Context, r Reader, cfg *config.Config, now time.Time) (Report, error) {
 	rules := RulesFor(cfg)
 	rep := Report{
 		Enabled:  cfg.PlaybackEnabled(),
@@ -169,8 +182,11 @@ func BuildReport(ctx context.Context, r Reader, cfg *config.Config) (Report, err
 		Rules: ReportRule{
 			PlayedFraction:        rules.PlayedFraction,
 			EndMarginSeconds:      int64(rules.EndMargin.Seconds()),
+			StallBefore:           rules.StallBefore,
 			StallToleranceSeconds: int64(rules.StallTolerance.Seconds()),
 			StallMinSessions:      rules.StallMinSessions,
+			RetryWindowSeconds:    int64(rules.RetryWindow.Seconds()),
+			StallWindowDays:       int(rules.StallWindow.Hours() / 24),
 		},
 	}
 	if rep.Enabled {
@@ -195,13 +211,17 @@ func BuildReport(ctx context.Context, r Reader, cfg *config.Config) (Report, err
 		}
 	}
 
-	files, err := r.SwappedFiles(ctx)
+	swaps, err := r.PlaybackSwaps(ctx)
 	if err != nil {
 		return Report{}, err
 	}
 	byPath := map[string][]store.SwappedFile{}
-	for _, f := range files {
-		byPath[f.Path] = append(byPath[f.Path], f)
+	swappedAt := make(map[fileKey]int64, len(swaps))
+	for _, f := range swaps {
+		swappedAt[fileKey{f.Path, f.Fingerprint}] = f.SwappedAt
+		if f.Current {
+			byPath[f.Path] = append(byPath[f.Path], f)
+		}
 	}
 	current := make(map[string]store.SwappedFile, len(byPath))
 	for p, fs := range byPath {
@@ -214,7 +234,7 @@ func BuildReport(ctx context.Context, r Reader, cfg *config.Config) (Report, err
 	byFile := groups(ev)
 	for _, f := range current {
 		rep.Counts.Swapped++
-		e := Derive(byFile[fileKey{f.Path, f.Fingerprint}], covered > f.SwappedAt, rules)
+		e := Derive(byFile[fileKey{f.Path, f.Fingerprint}], covered > f.SwappedAt, rules, now.Unix())
 		switch e.Verdict {
 		case SuspectStall:
 			rep.Counts.SuspectStall++
@@ -227,24 +247,25 @@ func BuildReport(ctx context.Context, r Reader, cfg *config.Config) (Report, err
 		}
 	}
 
-	sus, err := Suspects(ctx, r, rules)
+	sus, err := Suspects(ctx, r, rules, now.Unix())
 	if err != nil {
 		return Report{}, err
 	}
 	for _, s := range sus {
-		rep.Suspects = append(rep.Suspects, reportFile(s, current[s.Path]))
+		rep.Suspects = append(rep.Suspects, reportFile(s, swappedAt[fileKey{s.Path, s.Fingerprint}]))
 	}
 	return rep, nil
 }
 
 // reportFile projects one suspect onto the wire.
-func reportFile(s Suspect, swap store.SwappedFile) ReportFile {
+func reportFile(s Suspect, swappedAt int64) ReportFile {
 	st := s.Evidence.Stall
 	f := ReportFile{
-		Path: s.Path, Fingerprint: s.Fingerprint, SwappedAt: swap.SwappedAt, Verdict: string(s.Evidence.Verdict),
+		Path: s.Path, Fingerprint: s.Fingerprint, SwappedAt: swappedAt, Verdict: string(s.Evidence.Verdict),
 		Sessions: s.Evidence.Sessions, PlayedThrough: s.Evidence.PlayedThrough,
 		StallAtSeconds: st.AtMS / 1000, StallFromSeconds: st.FromMS / 1000, StallToSeconds: st.ToMS / 1000,
-		StallSessions: st.Sessions, StalledSessions: []ReportSession{},
+		StallSessions: st.Sessions, StallClients: st.Clients, StallRetries: st.Retries,
+		StalledSessions: []ReportSession{},
 	}
 	if s.Evidence.DurationMS > 0 {
 		d := s.Evidence.DurationMS / 1000
@@ -257,6 +278,7 @@ func reportFile(s Suspect, swap store.SwappedFile) ReportFile {
 	for _, m := range st.Members {
 		f.StalledSessions = append(f.StalledSessions, ReportSession{
 			StartedAt: m.StartedAt, StoppedAt: m.StoppedAt, OffsetSeconds: *m.OffsetMS / 1000,
+			OffsetFromPercent: m.OffsetDerived, PlayedSeconds: m.PlayedSeconds,
 			Platform: m.Platform, Player: m.Player, Decision: m.Decision,
 		})
 	}
@@ -266,9 +288,9 @@ func reportFile(s Suspect, swap store.SwappedFile) ReportFile {
 // Tally counts the files the given sessions - every session on a current swap, as
 // PlaybackEvidence returns them - say stall and say were played through. A file with no session
 // is in neither count.
-func Tally(sessions []store.PlaybackSession, rules Rules) (suspect, played int) {
+func Tally(sessions []store.PlaybackSession, rules Rules, now int64) (suspect, played int) {
 	for _, ss := range groups(sessions) {
-		switch Derive(ss, true, rules).Verdict {
+		switch Derive(ss, true, rules, now).Verdict {
 		case SuspectStall:
 			suspect++
 		case PlayedThrough:

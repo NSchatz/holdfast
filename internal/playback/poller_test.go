@@ -15,38 +15,59 @@ import (
 )
 
 // fakeSource is a history that answers what it is given and records each since it was asked.
+// Its read's Newest is newest where set, and otherwise the newest start among its rows.
 type fakeSource struct {
 	rows     []Observed
 	complete bool
+	newest   int64
 	err      error
 	asked    []int64
 }
 
 func (f *fakeSource) Name() string { return "tautulli" }
-func (f *fakeSource) Sessions(_ context.Context, since time.Time) ([]Observed, bool, error) {
+func (f *fakeSource) Sessions(_ context.Context, since time.Time) ([]Observed, Read, error) {
 	f.asked = append(f.asked, since.Unix())
 	if f.err != nil {
-		return nil, false, f.err
+		return nil, Read{}, f.err
 	}
-	return f.rows, f.complete, nil
+	read := Read{Complete: f.complete, Newest: f.newest}
+	for _, r := range f.rows {
+		if f.newest == 0 {
+			read.Newest = max(read.Newest, r.Started)
+		}
+	}
+	return f.rows, read, nil
 }
 
-// memLedger is the ledger a poll reads and writes, in memory, with a failure seam per read.
+// memLedger is the ledger a poll reads and writes, in memory, with a failure seam per read. A
+// swap reads as current while it is not superseded and not named in gone.
 type memLedger struct {
-	files      []store.SwappedFile
-	sessions   []store.PlaybackSession
-	poll       *store.PlaybackPoll
-	retained   map[string]store.Retained
-	filesErr   error
-	pollErr    error
-	evErr      error
-	recordErr  error
-	setPollErr error
-	retErr     error
+	swaps          []store.SwappedFile
+	gone           map[fileKey]bool
+	sessions       []store.PlaybackSession
+	poll           *store.PlaybackPoll
+	retained       map[string]store.Retained
+	recordedSwaps  int
+	recordSwapsErr error
+	swapsErr       error
+	pollErr        error
+	evErr          error
+	recordErr      error
+	setPollErr     error
+	retErr         error
 }
 
-func (m *memLedger) SwappedFiles(context.Context) ([]store.SwappedFile, error) {
-	return m.files, m.filesErr
+func (m *memLedger) RecordSwaps(context.Context, int64) (int, int, error) {
+	m.recordedSwaps++
+	return 0, 0, m.recordSwapsErr
+}
+func (m *memLedger) PlaybackSwaps(context.Context) ([]store.SwappedFile, error) {
+	out := make([]store.SwappedFile, len(m.swaps))
+	for i, w := range m.swaps {
+		w.Current = w.SupersededAt == 0 && !m.gone[fileKey{w.Path, w.Fingerprint}]
+		out[i] = w
+	}
+	return out, m.swapsErr
 }
 func (m *memLedger) PlaybackEvidence(context.Context) ([]store.PlaybackSession, error) {
 	return m.sessions, m.evErr
@@ -97,15 +118,15 @@ func newTestPoller(src *fakeSource, led *memLedger, paths config.PathMap, now in
 }
 
 func obs(id, file string, started, off int64) Observed {
-	return Observed{ID: id, File: file, Started: started, OffsetMS: ms(off), DurationMS: ms(film),
-		Platform: "Chrome", Player: "Plex Web", Decision: "copy"}
+	return Observed{ID: id, File: file, Started: started, OffsetMS: ms(off), OffsetDerived: true, DurationMS: ms(film),
+		PlayedSeconds: ms(600), Client: "client-" + id, Platform: "Chrome", Player: "Plex Web", Decision: "copy"}
 }
 
 // TestPoller_ReadsFromTheEarliestSwapThenFromTheCursor: the first poll reads from the earliest
 // swap; one that read to the end leaves the next to read from the overlap before it began and
 // marks the history covered to that moment; the next reads from there.
 func TestPoller_ReadsFromTheEarliestSwapThenFromTheCursor(t *testing.T) {
-	led := &memLedger{files: []store.SwappedFile{{Path: "/lib/b.mkv", Fingerprint: "2:2", SwappedAt: 5000}, {Path: "/lib/a.mkv", Fingerprint: "1:1", SwappedAt: 3000}}}
+	led := &memLedger{swaps: []store.SwappedFile{{Path: "/lib/b.mkv", Fingerprint: "2:2", SwappedAt: 5000}, {Path: "/lib/a.mkv", Fingerprint: "1:1", SwappedAt: 3000}}}
 	src := &fakeSource{complete: true}
 	now := int64(1_000_000)
 	p, _ := newTestPoller(src, led, nil, now)
@@ -134,39 +155,76 @@ func TestPoller_ReadsFromTheEarliestSwapThenFromTheCursor(t *testing.T) {
 	}
 }
 
-// TestPoller_AReadStoppedAtItsBoundContinuesForward: an incomplete read moves the cursor to its
-// newest session, with no overlap, and does not claim the history covered.
+// TestPoller_AReadStoppedAtItsBoundContinuesForward: an incomplete read moves the cursor to the
+// newest row it went through - skipped rows included - with no overlap, and does not claim the
+// history covered; one that went nowhere leaves the cursor, and after StuckPolls such polls says
+// so at warn, once.
 func TestPoller_AReadStoppedAtItsBoundContinuesForward(t *testing.T) {
-	led := &memLedger{files: []store.SwappedFile{{Path: "/lib/a.mkv", Fingerprint: "1:1", SwappedAt: 3000}},
+	led := &memLedger{swaps: []store.SwappedFile{{Path: "/lib/a.mkv", Fingerprint: "1:1", SwappedAt: 3000}},
 		poll: &store.PlaybackPoll{Source: "tautulli", Cursor: 4000, CoveredThrough: 4500, LastAttemptAt: 1}}
-	src := &fakeSource{rows: []Observed{obs("1", "/lib/a.mkv", 4100, 5), obs("2", "/lib/a.mkv", 4200, 5)}}
+	// Two kept rows, and music after them up to 4700 that the read skipped.
+	src := &fakeSource{rows: []Observed{obs("1", "/lib/a.mkv", 4100, 5), obs("2", "/lib/a.mkv", 4200, 5)}, newest: 4700}
 	p, buf := newTestPoller(src, led, nil, 9000)
 	res := p.PollOnce(context.Background())
 	if res.Complete || res.Read != 2 || res.Recorded != 2 {
 		t.Fatalf("result %+v", res)
 	}
-	if *led.poll != (store.PlaybackPoll{Source: "tautulli", Cursor: 4200, CoveredThrough: 4500, LastAttemptAt: 9000}) {
+	if *led.poll != (store.PlaybackPoll{Source: "tautulli", Cursor: 4700, CoveredThrough: 4500, LastAttemptAt: 9000}) {
 		t.Errorf("state %+v", led.poll)
 	}
 	if !strings.Contains(buf.String(), "the next poll continues from here") {
 		t.Errorf("an incomplete read was not said:\n%s", buf)
 	}
-	// An incomplete read that returned nothing leaves the cursor where it was.
-	src.rows = nil
+	if StuckPolls != 3 {
+		t.Errorf("StuckPolls %d", StuckPolls)
+	}
+	// Reads that went no further than the cursor leave it, and the third says so, once.
+	src.rows, src.newest = nil, 4700
+	for i := 1; i <= StuckPolls+1; i++ {
+		buf.Reset()
+		p.PollOnce(context.Background())
+		if led.poll.Cursor != 4700 {
+			t.Fatalf("poll %d moved the cursor to %d", i, led.poll.Cursor)
+		}
+		if said := strings.Contains(buf.String(), "has not moved for several polls"); said != (i == StuckPolls) {
+			t.Errorf("poll %d: stuck said %v:\n%s", i, said, buf)
+		}
+	}
+	// Progress clears the count: three more stuck polls are needed before it is said again.
+	src.newest = 4800
 	p.PollOnce(context.Background())
-	if led.poll.Cursor != 4200 {
-		t.Errorf("an empty incomplete read moved the cursor to %d", led.poll.Cursor)
+	src.newest = 4800
+	buf.Reset()
+	for i := 1; i < StuckPolls; i++ {
+		p.PollOnce(context.Background())
+	}
+	if strings.Contains(buf.String(), "has not moved") {
+		t.Errorf("said again before StuckPolls more polls:\n%s", buf)
+	}
+	// A complete read clears it too.
+	src.complete = true
+	p.PollOnce(context.Background())
+	src.complete, src.newest = false, 1
+	buf.Reset()
+	for i := 1; i < StuckPolls; i++ {
+		p.PollOnce(context.Background())
+	}
+	if strings.Contains(buf.String(), "has not moved") {
+		t.Errorf("said again after a complete read before StuckPolls more polls:\n%s", buf)
 	}
 }
 
-// TestPoller_NothingSwappedAsksNothing: with no done row there is nothing to attribute a session
-// to, so the source is not asked and no state is written.
+// TestPoller_NothingSwappedAsksNothing: with no swap recorded there is nothing to attribute a
+// session to, so the source is not asked and no state is written; the swaps are still recorded.
 func TestPoller_NothingSwappedAsksNothing(t *testing.T) {
 	led := &memLedger{}
 	src := &fakeSource{complete: true}
 	p, _ := newTestPoller(src, led, nil, 100)
-	if res := p.PollOnce(context.Background()); res.Asked || len(src.asked) != 0 || led.poll != nil {
-		t.Errorf("result %+v, asked %v, state %+v", res, src.asked, led.poll)
+	if res := p.PollOnce(context.Background()); res.Asked || len(src.asked) != 0 || led.poll != nil || led.recordedSwaps != 1 {
+		t.Errorf("result %+v, asked %v, state %+v, swaps recorded %d times", res, src.asked, led.poll, led.recordedSwaps)
+	}
+	if err := p.RecordSwaps(context.Background()); err != nil || led.recordedSwaps != 2 {
+		t.Errorf("RecordSwaps: %v, %d", err, led.recordedSwaps)
 	}
 }
 
@@ -174,7 +232,7 @@ func TestPoller_NothingSwappedAsksNothing(t *testing.T) {
 // recorded and the cursor and the coverage the previous poll left are kept; the outage is said
 // once at warn, again only at debug, and its end once.
 func TestPoller_AFailedReadRecordsTheAttemptAndChangesNoEvidence(t *testing.T) {
-	led := &memLedger{files: []store.SwappedFile{{Path: "/lib/a.mkv", Fingerprint: "1:1", SwappedAt: 3000}},
+	led := &memLedger{swaps: []store.SwappedFile{{Path: "/lib/a.mkv", Fingerprint: "1:1", SwappedAt: 3000}},
 		poll: &store.PlaybackPoll{Source: "tautulli", Cursor: 4000, CoveredThrough: 4500, LastAttemptAt: 1}}
 	src := &fakeSource{err: &SourceError{Class: ClassResult, Err: errors.New("tautulli: get_history answered result \"error\"")},
 		rows: []Observed{obs("1", "/lib/a.mkv", 4100, 5)}}
@@ -236,9 +294,10 @@ func TestPoller_LedgerFailuresAreFailuresOfTheirOwn(t *testing.T) {
 		led   *memLedger
 		asked bool
 	}{
-		{"swapped files", &memLedger{files: files, filesErr: boom}, false},
-		{"poll state", &memLedger{files: files, pollErr: boom}, false},
-		{"recording", &memLedger{files: files, recordErr: boom}, true},
+		{"recording swaps", &memLedger{swaps: files, recordSwapsErr: boom}, false},
+		{"swapped files", &memLedger{swaps: files, swapsErr: boom}, false},
+		{"poll state", &memLedger{swaps: files, pollErr: boom}, false},
+		{"recording", &memLedger{swaps: files, recordErr: boom}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := &fakeSource{complete: true, rows: []Observed{obs("1", "/lib/a.mkv", 4000, 5)}}
@@ -256,7 +315,7 @@ func TestPoller_LedgerFailuresAreFailuresOfTheirOwn(t *testing.T) {
 		})
 	}
 	// A poll whose state cannot be written still recorded its sessions, and says so.
-	led := &memLedger{files: files, setPollErr: boom}
+	led := &memLedger{swaps: files, setPollErr: boom}
 	p, buf := newTestPoller(&fakeSource{complete: true, rows: []Observed{obs("1", "/lib/a.mkv", 4000, 5)}}, led, nil, 9000)
 	if res := p.PollOnce(context.Background()); res.Recorded != 1 || res.Failure != "" {
 		t.Errorf("result %+v", res)
@@ -270,12 +329,16 @@ func TestPoller_LedgerFailuresAreFailuresOfTheirOwn(t *testing.T) {
 // reverse; to the newest swap at or before it started; never to a swap after it (it played the
 // source), to a file the map does not cover, or to a file with no name or a relative one.
 func TestPoller_ASessionIsAttributedToTheSwapWhoseBytesItPlayed(t *testing.T) {
-	led := &memLedger{files: []store.SwappedFile{
+	led := &memLedger{swaps: []store.SwappedFile{
 		{Path: "/media/movies/Film/Film.mkv", Fingerprint: "2:2", SwappedAt: 5000},
 		{Path: "/media/movies/Film/Film.mkv", Fingerprint: "1:1", SwappedAt: 3000},
 		{Path: "/media/tv/Show/e1.mkv", Fingerprint: "3:3", SwappedAt: 3000},
+		// Replaced by another file at 7000: a session from then on played the other file.
+		{Path: "/media/movies/Gone/Gone.mkv", Fingerprint: "4:4", SwappedAt: 3000, SupersededAt: 7000},
 	}}
 	src := &fakeSource{complete: true, rows: []Observed{
+		obs("gone-before", "/data/movies/Gone/Gone.mkv", 6999, 1),
+		obs("gone-after", "/data/movies/Gone/Gone.mkv", 7000, 1),
 		obs("before-any-swap", "/data/movies/Film/Film.mkv", 2999, 1),
 		obs("first-swap", "/data/movies/Film/Film.mkv", 3000, 1),
 		obs("still-first", "/data/movies/Film/Film.mkv", 4999, 1),
@@ -290,7 +353,7 @@ func TestPoller_ASessionIsAttributedToTheSwapWhoseBytesItPlayed(t *testing.T) {
 	paths := config.PathMap{{From: "/media/movies", To: "/data/movies"}, {From: "/media/tv", To: "/data/tv"}}
 	p, _ := newTestPoller(src, led, paths, 9000)
 	res := p.PollOnce(context.Background())
-	if res.Read != 10 || res.Recorded != 5 {
+	if res.Read != 12 || res.Recorded != 6 {
 		t.Fatalf("result %+v", res)
 	}
 	got := map[string]store.PlaybackSession{}
@@ -302,13 +365,20 @@ func TestPoller_ASessionIsAttributedToTheSwapWhoseBytesItPlayed(t *testing.T) {
 			t.Errorf("%s: %+v, want fingerprint %s", id, s, fp)
 		}
 	}
+	if _, ok := got["gone-before"]; !ok {
+		t.Error("a session before the swap was superseded was not attributed to it")
+	}
+	if _, ok := got["gone-after"]; ok {
+		t.Error("a session from the second the swap was superseded was attributed to it")
+	}
 	if s := got["tv"]; s.Path != "/media/tv/Show/e1.mkv" || s.Fingerprint != "3:3" || s.Source != "tautulli" ||
 		s.StartedAt != 6000 || *s.OffsetMS != 1 || *s.DurationMS != film || s.Platform != "Chrome" ||
-		s.Player != "Plex Web" || s.Decision != "copy" || s.RecordedAt != 9000 {
+		s.Player != "Plex Web" || s.Decision != "copy" || s.RecordedAt != 9000 || s.Client != "client-tv" ||
+		!s.OffsetDerived || s.PlayedSeconds == nil || *s.PlayedSeconds != 600 {
 		t.Errorf("tv: %+v", s)
 	}
 	// With no map, the media server's path is taken as holdfast's own.
-	led2 := &memLedger{files: []store.SwappedFile{{Path: "/data/movies/Film/Film.mkv", Fingerprint: "1:1", SwappedAt: 3000}}}
+	led2 := &memLedger{swaps: []store.SwappedFile{{Path: "/data/movies/Film/Film.mkv", Fingerprint: "1:1", SwappedAt: 3000}}}
 	src2 := &fakeSource{complete: true, rows: []Observed{obs("x", "/data/movies/Film/Film.mkv", 4000, 1)}}
 	p2, _ := newTestPoller(src2, led2, nil, 9000)
 	if res := p2.PollOnce(context.Background()); res.Recorded != 1 {
@@ -327,7 +397,7 @@ func TestPoller_ASuspectedStallIsSaidOnceWithWhatWouldWalkItBack(t *testing.T) {
 		return []store.PlaybackSession{a, b}
 	}
 	led := &memLedger{
-		files: []store.SwappedFile{{Path: "/lib/kept.mkv", Fingerprint: "1:1", SwappedAt: 10}, {Path: "/lib/gone.mkv", Fingerprint: "2:2", SwappedAt: 10}},
+		swaps: []store.SwappedFile{{Path: "/lib/kept.mkv", Fingerprint: "1:1", SwappedAt: 10}, {Path: "/lib/gone.mkv", Fingerprint: "2:2", SwappedAt: 10}},
 		retained: map[string]store.Retained{
 			"/lib/kept.mkv": {SourcePath: "/lib/kept.mkv", SwappedPath: "/lib/kept.mkv", SwappedFingerprint: "1:1"},
 		},
@@ -344,6 +414,7 @@ func TestPoller_ASuspectedStallIsSaidOnceWithWhatWouldWalkItBack(t *testing.T) {
 		!strings.Contains(log, "`holdfast restore /lib/kept.mkv` would put it back") ||
 		!strings.Contains(log, "no longer retained, so replacing it means acquiring it again") ||
 		!strings.Contains(log, "stall_at=0:33:20") || !strings.Contains(log, "sessions_ending_there=2") ||
+		!strings.Contains(log, "clients_stopped_there=2") || !strings.Contains(log, "retries_that_got_nowhere=0") ||
 		!strings.Contains(log, `clients="Chrome/Plex Web, macOS/Plex for Mac"`) {
 		t.Errorf("suspect records:\n%s", log)
 	}
@@ -390,7 +461,7 @@ type signalSource struct {
 	asked chan struct{}
 }
 
-func (s *signalSource) Sessions(ctx context.Context, since time.Time) ([]Observed, bool, error) {
+func (s *signalSource) Sessions(ctx context.Context, since time.Time) ([]Observed, Read, error) {
 	select {
 	case s.asked <- struct{}{}:
 	default:
@@ -401,7 +472,7 @@ func (s *signalSource) Sessions(ctx context.Context, since time.Time) ([]Observe
 // TestPoller_RunPollsAtOnceAndStopsWithItsContext. The test reads the ledger and the source only
 // after Run has returned, so nothing here races the poll.
 func TestPoller_RunPollsAtOnceAndStopsWithItsContext(t *testing.T) {
-	led := &memLedger{files: []store.SwappedFile{{Path: "/lib/a.mkv", Fingerprint: "1:1", SwappedAt: 3000}}}
+	led := &memLedger{swaps: []store.SwappedFile{{Path: "/lib/a.mkv", Fingerprint: "1:1", SwappedAt: 3000}}}
 	src := &signalSource{fakeSource: &fakeSource{complete: true}, asked: make(chan struct{}, 1)}
 	var buf bytes.Buffer
 	p := NewPoller(src, led, led, nil, rules, time.Hour, slog.New(slog.NewTextHandler(&buf, nil)))
@@ -428,53 +499,153 @@ func TestPoller_RunPollsAtOnceAndStopsWithItsContext(t *testing.T) {
 	}
 }
 
-// TestPoller_EndToEndThroughTheStoreAndAFakeTautulli: a real ledger, the real Tautulli client
-// against a fake server, and the issue's pattern - two clients ending near 33:19 and 34:00 of a
-// swapped film - read back as a suspected stall.
-func TestPoller_EndToEndThroughTheStoreAndAFakeTautulli(t *testing.T) {
+// e2eFilm is the synthetic swapped film the end-to-end tests below play.
+const e2ePath, e2eFP = "/media/movies/Film/Film.mkv", "3200:1"
+
+// e2eSwap opens a ledger with one swapped film and returns it with the swap's second.
+func e2eSwap(t *testing.T) (*store.SQLite, int64) {
+	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "jobs.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = st.Close() }()
+	t.Cleanup(func() { _ = st.Close() })
 	ctx := context.Background()
-	const path, fp = "/media/movies/Film/Film.mkv", "3200:1"
-	if _, err := st.Claim(ctx, path, fp, "w1", 3, store.InputsRead(nil)); err != nil {
+	if _, err := st.Claim(ctx, e2ePath, e2eFP, "w1", 3, store.InputsRead(map[string]string{"crf": "22"})); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Finish(ctx, path, fp, store.Done, &store.Outcome{}, 3); err != nil {
+	if err := st.Finish(ctx, e2ePath, e2eFP, store.Done, &store.Outcome{
+		DecisionInputs: store.InputsRead(map[string]string{"crf": "22"})}, 3); err != nil {
 		t.Fatal(err)
 	}
-	files, err := st.SwappedFiles(ctx)
-	if err != nil || len(files) != 1 {
-		t.Fatalf("swapped files %+v %v", files, err)
+	if _, _, err := st.RecordSwaps(ctx, time.Now().Unix()); err != nil {
+		t.Fatal(err)
 	}
-	swapped := files[0].SwappedAt
+	swaps, err := st.PlaybackSwaps(ctx)
+	if err != nil || len(swaps) != 1 {
+		t.Fatalf("swaps %+v %v", swaps, err)
+	}
+	return st, swaps[0].SwappedAt
+}
 
+// e2eRow is a history row on the film, on its own client.
+func e2eRow(id int, started int64, offsetMS int64, playedSec int64, client string) map[string]any {
+	r := row(id, started, 77, offsetMS)
+	r["play_duration"], r["machine_id"] = playedSec, client
+	return r
+}
+
+// TestPoller_EndToEndThroughTheStoreAndAFakeTautulli: a real ledger, the real Tautulli client
+// against a fake server, and the issue's pattern - a viewer stopping near 33:19 and resuming
+// there to no avail, and another client stopping near 34:00 - read back as a suspected stall. A
+// changed encoder setting re-opens the done row and the guard re-derives it skipped: the evidence
+// stays. Another file arrives at the path: sessions after that are attributed to nothing.
+func TestPoller_EndToEndThroughTheStoreAndAFakeTautulli(t *testing.T) {
+	st, swapped := e2eSwap(t)
+	ctx := context.Background()
 	f := &fakeTautulli{items: map[string]any{"77": filmItem(film, "/data/movies/Film/Film.mkv")}}
 	f.rows = []map[string]any{
-		row(1, swapped-3600, 77, film), // played the source, before the swap
-		row(2, swapped+60, 77, int64((33*60+19)*1000)),
-		row(3, swapped+86400, 77, int64(34*60*1000)),
+		e2eRow(1, swapped-3600, film, 8700, "a"), // played the source, before the swap
+		e2eRow(2, swapped+60, (33*60+19)*1000, 2000, "chrome"),
+		e2eRow(3, swapped+86400, (33*60+21)*1000, 90, "chrome"),
+		e2eRow(4, swapped+90000, 34*60*1000, 2040, "firefox"),
 	}
 	src, _ := newFake(t, f)
-	p := NewPoller(src, st, st, config.PathMap{{From: "/media", To: "/data"}}, rules, time.Minute, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
-	p.now = func() time.Time { return time.Unix(swapped+2*86400, 0) }
+	clock := swapped + 2*86400
+	p := NewPoller(src, st, st, config.PathMap{{From: "/media", To: "/data"}}, rules, time.Minute,
+		slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	p.now = func() time.Time { return time.Unix(clock, 0) }
 	res := p.PollOnce(ctx)
-	if res.Failure != "" || res.Recorded != 2 || len(res.Suspects) != 1 {
+	if res.Failure != "" || res.Recorded != 3 || len(res.Suspects) != 1 {
 		t.Fatalf("result %+v", res)
 	}
 	s := res.Suspects[0]
-	if s.Path != path || s.Fingerprint != fp || s.Evidence.Stall.FromMS != (33*60+19)*1000 || s.Restore != "" {
+	if s.Path != e2ePath || s.Fingerprint != e2eFP || s.Evidence.Stall.FromMS != (33*60+19)*1000 ||
+		s.Evidence.Stall.Clients != 2 || s.Evidence.Stall.Retries != 1 || s.Restore != "" {
 		t.Errorf("suspect %+v", s)
 	}
 	cfg := &config.Config{PlaybackSource: "tautulli"}
-	rep, err := BuildReport(ctx, st, cfg)
-	if err != nil {
+	report := func() Report {
+		t.Helper()
+		rep, err := BuildReport(ctx, st, cfg, time.Unix(clock, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rep
+	}
+	if rep := report(); rep.Counts.SuspectStall != 1 || rep.Counts.Swapped != 1 || len(rep.Suspects) != 1 ||
+		rep.LastFailure != nil || rep.CoveredThrough == nil || *rep.CoveredThrough != clock {
+		t.Errorf("report %+v", rep)
+	}
+
+	// The owner changes crf: the next scan re-opens the done row and re-derives it skipped
+	// already-at-target-codec, under the same path and fingerprint.
+	if ok, err := st.Claim(ctx, e2ePath, e2eFP, "w1", 3, store.InputsRead(map[string]string{"crf": "20"})); err != nil || !ok {
+		t.Fatalf("re-open: %v %v", ok, err)
+	}
+	if err := st.Finish(ctx, e2ePath, e2eFP, store.Skipped, &store.Outcome{Reason: "already-at-target-codec"}, 3); err != nil {
 		t.Fatal(err)
 	}
-	if rep.Counts.SuspectStall != 1 || rep.Counts.Swapped != 1 || len(rep.Suspects) != 1 ||
-		rep.LastFailure != nil || rep.CoveredThrough == nil || *rep.CoveredThrough != swapped+2*86400 {
-		t.Errorf("report %+v", rep)
+	clock += 900
+	if res := p.PollOnce(ctx); res.Failure != "" || len(res.Suspects) != 1 {
+		t.Errorf("after the re-derived skip: %+v", res)
+	}
+	if rep := report(); rep.Counts.SuspectStall != 1 || rep.Counts.Swapped != 1 {
+		t.Errorf("report after the re-derived skip: %+v", rep.Counts)
+	}
+
+	// An arr imports a new release at the path; the scan records the new bytes.
+	clock += 900
+	if _, err := st.Claim(ctx, e2ePath, "5000:2", "w1", 3, store.InputsRead(nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Finish(ctx, e2ePath, "5000:2", store.Skipped, &store.Outcome{Reason: "low-bitrate"}, 3); err != nil {
+		t.Fatal(err)
+	}
+	replacedAt := time.Now().Unix()
+	f.mu.Lock()
+	f.rows = append(f.rows, e2eRow(5, replacedAt+60, 34*60*1000, 2040, "tv"))
+	f.mu.Unlock()
+	clock = replacedAt + 3600
+	res = p.PollOnce(ctx)
+	if res.Failure != "" || res.Recorded != 0 || len(res.Suspects) != 0 {
+		t.Errorf("after the file was replaced: %+v", res)
+	}
+	if rep := report(); rep.Counts.Swapped != 0 || len(rep.Suspects) != 0 {
+		t.Errorf("report after the file was replaced: %+v", rep)
+	}
+}
+
+// TestPoller_ABoundOfMusicCannotHoldTheReadInPlace: 300 music rows before a film, read 2 pages of
+// 100 a poll. The first poll goes through 200 rows and keeps none; the second continues past
+// them and finds the film. The music's metadata is never asked.
+func TestPoller_ABoundOfMusicCannotHoldTheReadInPlace(t *testing.T) {
+	st, swapped := e2eSwap(t)
+	ctx := context.Background()
+	f := &fakeTautulli{items: map[string]any{"77": filmItem(film, "/data/movies/Film/Film.mkv")}}
+	for i := 0; i < 300; i++ {
+		r := row(1000+i, swapped+10+int64(i), 9, 1)
+		r["media_type"] = "track"
+		f.rows = append(f.rows, r)
+	}
+	f.rows = append(f.rows, e2eRow(2000, swapped+400, (33*60+19)*1000, 2000, "chrome"))
+	src, _ := newFake(t, f)
+	src.PageSize, src.MaxPages = 100, 2
+	p := NewPoller(src, st, st, config.PathMap{{From: "/media", To: "/data"}}, rules, time.Minute,
+		slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	p.now = func() time.Time { return time.Unix(swapped+1000, 0) }
+	first := p.PollOnce(ctx)
+	if first.Failure != "" || first.Complete || first.Recorded != 0 {
+		t.Fatalf("first poll %+v", first)
+	}
+	second := p.PollOnce(ctx)
+	if second.Failure != "" || !second.Complete || second.Recorded != 1 {
+		t.Fatalf("second poll %+v", second)
+	}
+	if f.meta["9"] != 0 || f.meta["77"] != 1 {
+		t.Errorf("metadata asked %v", f.meta)
+	}
+	if got := f.history[2].Get("start"); got != "200" {
+		t.Errorf("the second poll's first page started at row %s, want 200", got)
 	}
 }

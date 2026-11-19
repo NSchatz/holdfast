@@ -26,10 +26,11 @@ var stepsSinceDecisionInputs = []struct {
 	version int
 	undo    []string
 }{
-	// v26 creates two TABLES and one index, so its reverse drops them, the index first.
+	// v26 creates three TABLES and one index, so its reverse drops them, the index first.
 	{26, []string{
 		`DROP INDEX IF EXISTS idx_playback_sessions_file`,
 		`DROP TABLE IF EXISTS playback_sessions`,
+		`DROP TABLE IF EXISTS playback_swaps`,
 		`DROP TABLE IF EXISTS playback_polls`,
 	}},
 	// v25 creates one TABLE and two indexes, so its reverse drops them, the indexes first.

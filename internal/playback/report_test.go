@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/store"
@@ -22,9 +23,9 @@ func on(path, fp string, s store.PlaybackSession) store.PlaybackSession {
 func TestReport_CountsEveryCurrentSwapByVerdict(t *testing.T) {
 	stopped := int64(4200)
 	s1, s2 := at("s1", 2_000_000, film), at("s2", 2_030_000, film)
-	s1.StoppedAt = &stopped
+	s1.StoppedAt, s2.OffsetDerived = &stopped, true
 	led := &memLedger{
-		files: []store.SwappedFile{
+		swaps: []store.SwappedFile{
 			{Path: "/lib/stall.mkv", Fingerprint: "new", SwappedAt: 200}, {Path: "/lib/stall.mkv", Fingerprint: "old", SwappedAt: 100},
 			{Path: "/lib/played.mkv", Fingerprint: "1:1", SwappedAt: 300},
 			{Path: "/lib/partial.mkv", Fingerprint: "1:1", SwappedAt: 300},
@@ -45,14 +46,15 @@ func TestReport_CountsEveryCurrentSwapByVerdict(t *testing.T) {
 		},
 	}
 	cfg := &config.Config{PlaybackSource: " tautulli ", PlaybackPollMinutes: 30, PlaybackPlayedFraction: 0.8}
-	rep, err := BuildReport(context.Background(), led, cfg)
+	rep, err := BuildReport(context.Background(), led, cfg, time.Unix(now0, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !rep.Enabled || rep.Source != "tautulli" || rep.PollMinutes != 30 {
 		t.Errorf("header %+v", rep)
 	}
-	if rep.Rules != (ReportRule{PlayedFraction: 0.8, EndMarginSeconds: 180, StallToleranceSeconds: 90, StallMinSessions: 2}) {
+	if rep.Rules != (ReportRule{PlayedFraction: 0.8, EndMarginSeconds: 180, StallBefore: 0.85, StallToleranceSeconds: 90,
+		StallMinSessions: 2, RetryWindowSeconds: 300, StallWindowDays: 60}) {
 		t.Errorf("rules %+v", rep.Rules)
 	}
 	if rep.LastAttemptAt == nil || *rep.LastAttemptAt != 700 || rep.LastFailure == nil || *rep.LastFailure != ClassRequest ||
@@ -73,19 +75,26 @@ func TestReport_CountsEveryCurrentSwapByVerdict(t *testing.T) {
 	if f.Path != "/lib/stall.mkv" || f.Fingerprint != "new" || f.SwappedAt != 200 || f.Verdict != "suspect-stall" ||
 		f.Sessions != 2 || f.PlayedThrough != 0 || f.DurationSeconds == nil || *f.DurationSeconds != film/1000 ||
 		f.StallAtSeconds != 2000 || f.StallFromSeconds != 2000 || f.StallToSeconds != 2030 || f.StallSessions != 2 ||
-		f.Restore == nil || *f.Restore != "holdfast restore /lib/stall.mkv" {
+		f.StallClients != 2 || f.StallRetries != 0 || f.Restore == nil || *f.Restore != "holdfast restore /lib/stall.mkv" {
 		t.Errorf("suspect %+v", f)
 	}
-	if len(f.StalledSessions) != 2 || f.StalledSessions[0] != (ReportSession{StartedAt: 1000, StoppedAt: &stopped,
-		OffsetSeconds: 2000, Platform: "Chrome", Player: "Plex Web"}) || f.StalledSessions[1].StoppedAt != nil {
-		t.Errorf("stalled sessions %+v", f.StalledSessions)
+	if len(f.StalledSessions) != 2 {
+		t.Fatalf("stalled sessions %+v", f.StalledSessions)
+	}
+	if g := f.StalledSessions[0]; g.StartedAt != now0-86400 || g.StoppedAt != &stopped || g.OffsetSeconds != 2000 ||
+		g.OffsetFromPercent || g.PlayedSeconds == nil || *g.PlayedSeconds != 3600 || g.Platform != "Chrome" ||
+		g.Player != "Plex Web" || g.Decision != "" {
+		t.Errorf("first stalled session %+v", g)
+	}
+	if g := f.StalledSessions[1]; g.StoppedAt != nil || !g.OffsetFromPercent || g.OffsetSeconds != 2030 {
+		t.Errorf("second stalled session %+v", g)
 	}
 }
 
 // TestReport_OffAndEmptyIsStatedAsSuch: a daemon that polls nothing says so, every time it would
 // carry is null, the lists are empty rather than null, and a duration nobody stated is null.
 func TestReport_OffAndEmptyIsStatedAsSuch(t *testing.T) {
-	rep, err := BuildReport(context.Background(), &memLedger{}, &config.Config{})
+	rep, err := BuildReport(context.Background(), &memLedger{}, &config.Config{}, time.Unix(now0, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,9 +107,9 @@ func TestReport_OffAndEmptyIsStatedAsSuch(t *testing.T) {
 	}
 	// A source that has polled once and never read to the end: the attempt is reported, the
 	// coverage is not, and a file with no session is unknown.
-	led := &memLedger{files: []store.SwappedFile{{Path: "/lib/a.mkv", Fingerprint: "1:1", SwappedAt: 1}},
+	led := &memLedger{swaps: []store.SwappedFile{{Path: "/lib/a.mkv", Fingerprint: "1:1", SwappedAt: 1}},
 		poll: &store.PlaybackPoll{Source: "tautulli", LastAttemptAt: 9}}
-	rep, err = BuildReport(context.Background(), led, &config.Config{PlaybackSource: "tautulli"})
+	rep, err = BuildReport(context.Background(), led, &config.Config{PlaybackSource: "tautulli"}, time.Unix(now0, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,14 +119,14 @@ func TestReport_OffAndEmptyIsStatedAsSuch(t *testing.T) {
 	}
 	// A suspect whose sessions stated no duration reports none.
 	a, b2 := at("a", 1000, film), at("b", 2000, film)
-	f := reportFile(Suspect{Path: "/x", Evidence: Derive([]store.PlaybackSession{a, b2}, true, rules)}, store.SwappedFile{SwappedAt: 5})
+	f := reportFile(Suspect{Path: "/x", Evidence: Derive([]store.PlaybackSession{a, b2}, true, rules, now0)}, 5)
 	if f.Restore != nil || f.SwappedAt != 5 {
 		t.Errorf("file %+v", f)
 	}
 	f.DurationSeconds = nil
-	ev := Derive([]store.PlaybackSession{a, b2}, true, rules)
+	ev := Derive([]store.PlaybackSession{a, b2}, true, rules, now0)
 	ev.DurationMS = 0
-	if g := reportFile(Suspect{Path: "/x", Evidence: ev}, store.SwappedFile{}); g.DurationSeconds != nil {
+	if g := reportFile(Suspect{Path: "/x", Evidence: ev}, 0); g.DurationSeconds != nil {
 		t.Errorf("no duration: %v", *g.DurationSeconds)
 	}
 }
@@ -172,15 +181,15 @@ func TestReport_AnUnreadableLedgerIsAnError(t *testing.T) {
 	}
 	for name, led := range map[string]*memLedger{
 		"poll":     {pollErr: boom},
-		"files":    {filesErr: boom},
+		"files":    {swapsErr: boom},
 		"evidence": {evErr: boom},
-		"retained": {retErr: boom, files: []store.SwappedFile{{Path: "/a", Fingerprint: "1", SwappedAt: 1}}, sessions: two()},
+		"retained": {retErr: boom, swaps: []store.SwappedFile{{Path: "/a", Fingerprint: "1", SwappedAt: 1}}, sessions: two()},
 	} {
-		if _, err := BuildReport(context.Background(), led, &config.Config{PlaybackSource: "tautulli"}); !errors.Is(err, boom) {
+		if _, err := BuildReport(context.Background(), led, &config.Config{PlaybackSource: "tautulli"}, time.Unix(now0, 0)); !errors.Is(err, boom) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	if _, err := Suspects(context.Background(), &memLedger{retErr: boom, sessions: two()}, rules); !errors.Is(err, boom) {
+	if _, err := Suspects(context.Background(), &memLedger{retErr: boom, sessions: two()}, rules, now0); !errors.Is(err, boom) {
 		t.Errorf("Suspects: %v", err)
 	}
 }
@@ -191,7 +200,7 @@ func TestReport_SuspectsAreInPathOrder(t *testing.T) {
 	for _, k := range []fileKey{{"/c", "1"}, {"/a", "2"}, {"/b", "1"}, {"/a", "1"}} {
 		ss = append(ss, on(k.path, k.fingerprint, at("x", 1000, film)), on(k.path, k.fingerprint, at("y", 1000, film)))
 	}
-	sus, err := Suspects(context.Background(), &memLedger{sessions: ss}, rules)
+	sus, err := Suspects(context.Background(), &memLedger{sessions: ss}, rules, now0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,10 +222,10 @@ func TestReport_TallyCountsEachFileOnce(t *testing.T) {
 		on("/c", "1", at("5", film, film)),
 		on("/d", "1", at("6", 1000, film)),
 	}
-	if s, p := Tally(ss, rules); s != 1 || p != 2 {
+	if s, p := Tally(ss, rules, now0); s != 1 || p != 2 {
 		t.Errorf("tally %d suspect, %d played; want 1 and 2", s, p)
 	}
-	if s, p := Tally(nil, rules); s != 0 || p != 0 {
+	if s, p := Tally(nil, rules, now0); s != 0 || p != 0 {
 		t.Errorf("tally of nothing %d %d", s, p)
 	}
 }

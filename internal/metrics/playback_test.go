@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/playback"
@@ -25,11 +26,18 @@ func seedPlayback(t *testing.T, st *store.SQLite) {
 			t.Fatal(err)
 		}
 	}
+	if _, _, err := st.RecordSwaps(ctx, time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
 	off := func(v int64) *int64 { return &v }
+	recent := time.Now().Unix() - 3600
 	if _, err := st.RecordPlaybackSessions(ctx, []store.PlaybackSession{
-		{Source: "tautulli", SessionID: "1", Path: "/lib/stalls.mkv", Fingerprint: "1:1", OffsetMS: off(2_000_000), DurationMS: &dur},
-		{Source: "tautulli", SessionID: "2", Path: "/lib/stalls.mkv", Fingerprint: "1:1", OffsetMS: off(2_050_000), DurationMS: &dur},
-		{Source: "tautulli", SessionID: "3", Path: "/lib/plays.mkv", Fingerprint: "1:1", OffsetMS: off(dur), DurationMS: &dur},
+		{Source: "tautulli", SessionID: "1", Path: "/lib/stalls.mkv", Fingerprint: "1:1", StartedAt: recent,
+			OffsetMS: off(2_000_000), DurationMS: &dur, Client: "a"},
+		{Source: "tautulli", SessionID: "2", Path: "/lib/stalls.mkv", Fingerprint: "1:1", StartedAt: recent,
+			OffsetMS: off(2_050_000), DurationMS: &dur, Client: "b"},
+		{Source: "tautulli", SessionID: "3", Path: "/lib/plays.mkv", Fingerprint: "1:1", StartedAt: recent,
+			OffsetMS: off(dur), DurationMS: &dur},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +62,7 @@ func TestMetrics_PlaybackSeries(t *testing.T) {
 		}
 	}
 	absent("evidence off")
-	m.SetPlayback("tautulli", playback.RulesFor(&config.Config{}))
+	m.SetPlayback("tautulli", playback.RulesFor(&config.Config{}), st)
 	absent("before any poll")
 	if err := st.SetPlaybackPoll(context.Background(), store.PlaybackPoll{Source: "tautulli", LastAttemptAt: 5,
 		LastFailure: "request-failed"}); err != nil {
@@ -77,7 +85,7 @@ func TestMetrics_PlaybackSeries(t *testing.T) {
 		t.Error("a playback series names a file")
 	}
 	// Another source's state is not this daemon's.
-	m.SetPlayback("other", playback.RulesFor(&config.Config{}))
+	m.SetPlayback("other", playback.RulesFor(&config.Config{}), st)
 	absent("a source that has not polled")
 }
 
@@ -98,7 +106,8 @@ func (f failingPlayback) PlaybackEvidence(context.Context) ([]store.PlaybackSess
 	return nil, errors.New("disk on fire")
 }
 
-// TestMetrics_AFailedPlaybackReadCostsOnlyItsOwnGauges.
+// TestMetrics_AFailedPlaybackReadCostsOnlyItsOwnGauges: the series are read through the door
+// SetPlayback names - in serve, the reporting door - and a failed read there costs only them.
 func TestMetrics_AFailedPlaybackReadCostsOnlyItsOwnGauges(t *testing.T) {
 	st := openStore(t)
 	seedPlayback(t, st)
@@ -106,8 +115,8 @@ func TestMetrics_AFailedPlaybackReadCostsOnlyItsOwnGauges(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, pollFails := range []bool{true, false} {
-		m := New(failingPlayback{Store: st, pollFails: pollFails}, nil)
-		m.SetPlayback("tautulli", playback.RulesFor(&config.Config{}))
+		m := New(st, nil)
+		m.SetPlayback("tautulli", playback.RulesFor(&config.Config{}), failingPlayback{Store: st, pollFails: pollFails})
 		body := scrape(t, m)
 		if strings.Contains(body, "holdfast_playback_") {
 			t.Errorf("poll read fails %v: a failed read published a gauge", pollFails)

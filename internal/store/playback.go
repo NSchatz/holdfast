@@ -13,29 +13,41 @@ import (
 // what a viewer's player did on a swapped file cannot hold a file back from an encode, license
 // one, move a gate or release a retained original.
 
-// SwappedFile is one file holdfast swapped in, as its done row records it: the path and
-// fingerprint the replacement sits under, and the unix second the row was written, which is
-// the moment the swap committed.
+// SwappedFile is one file holdfast swapped in: the path and fingerprint the replacement sits
+// under, and the unix second the swap committed.
+//
+// SupersededAt is 0 while the swap is the file at its path as far as the newest poll saw, and
+// the second it stopped being after that: an operator restored the original, or another file
+// arrived at the path. Current is the same question asked of the ledger as it is NOW, so a
+// restore since the last poll is not reported as the file there.
 type SwappedFile struct {
-	Path        string
-	Fingerprint string
-	SwappedAt   int64
+	Path         string
+	Fingerprint  string
+	SwappedAt    int64
+	SupersededAt int64
+	Current      bool
 }
 
 // PlaybackSession is one session a media server's history says was played on a swapped file,
-// attributed to the done row whose bytes it played.
+// attributed to the swap whose bytes it played.
 //
-// StoppedAt, OffsetMS and DurationMS are nil when the source did not say. OffsetMS is where in
-// the file the session ended; DurationMS is the file's length as the source states it.
+// StoppedAt, OffsetMS, DurationMS and PlayedSeconds are nil when the source did not say.
+// OffsetMS is where in the file the session ended, OffsetDerived says it was computed from a
+// whole percent rather than read, DurationMS is the file's length as the source states it and
+// PlayedSeconds how long the session played. Client is the source's identifier for the playing
+// client, "" when it gave none.
 type PlaybackSession struct {
-	Source      string
-	SessionID   string
-	Path        string
-	Fingerprint string
-	StartedAt   int64
-	StoppedAt   *int64
-	OffsetMS    *int64
-	DurationMS  *int64
+	Source        string
+	SessionID     string
+	Path          string
+	Fingerprint   string
+	StartedAt     int64
+	StoppedAt     *int64
+	OffsetMS      *int64
+	OffsetDerived bool
+	DurationMS    *int64
+	PlayedSeconds *int64
+	Client        string
 	// Platform, Player and Decision are the client's platform, its name and the server's
 	// stream decision (direct play, copy, transcode), as the source names them; "" when it
 	// named none.
@@ -61,13 +73,17 @@ type PlaybackPoll struct {
 // PlaybackLedger is playback evidence's half of the store. Nothing in the encode pipeline reads
 // it.
 type PlaybackLedger interface {
-	// SwappedFiles is every done row: the files a session can be attributed to.
-	SwappedFiles(ctx context.Context) ([]SwappedFile, error)
+	// RecordSwaps records every swap the ledger shows - each done row, and each live retention's
+	// swapped file - that is not recorded yet, and marks superseded each recorded swap that is
+	// no longer the file at its path. It reports how many swaps it added and superseded.
+	RecordSwaps(ctx context.Context, now int64) (added, superseded int, err error)
+	// PlaybackSwaps is every recorded swap, path order and oldest first within a path.
+	PlaybackSwaps(ctx context.Context) ([]SwappedFile, error)
 	// RecordPlaybackSessions writes the sessions not already recorded and reports how many
 	// were new. A session already recorded is left exactly as it is.
 	RecordPlaybackSessions(ctx context.Context, sessions []PlaybackSession) (int, error)
-	// PlaybackEvidence is every recorded session on the current swap of its path - the newest
-	// done row there - grouped by file (path, then fingerprint) and oldest first within one.
+	// PlaybackEvidence is every recorded session on a current swap, grouped by file (path,
+	// then fingerprint) and oldest first within one.
 	PlaybackEvidence(ctx context.Context) ([]PlaybackSession, error)
 	// PlaybackPollOf is one source's poll state, if it has polled.
 	PlaybackPollOf(ctx context.Context, source string) (PlaybackPoll, bool, error)
@@ -75,26 +91,92 @@ type PlaybackLedger interface {
 	SetPlaybackPoll(ctx context.Context, p PlaybackPoll) error
 }
 
-// SwappedFiles is documented on PlaybackLedger. Path order, oldest swap first within a path,
-// so a caller can attribute a session to the newest swap at or before it in one pass.
-func (s *SQLite) SwappedFiles(ctx context.Context) ([]SwappedFile, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT path, fingerprint, updated_at FROM jobs WHERE status = ? ORDER BY path ASC, updated_at ASC, fingerprint ASC`,
-		string(Done))
+// stillAtPath is the one statement of whether a recorded swap, aliased as w, is still the file
+// at its path in the ledger as it is now: no restore of it is recorded, and the newest jobs row
+// at the path - of ANY status - carries its fingerprint, or there is none. Any status, because a
+// changed encoder setting or a requeue re-opens the done row and the guard records it skipped
+// under the same key: the bytes are the swap's, and so is the evidence about them.
+func stillAtPath(w string) string {
+	return `COALESCE((SELECT j.fingerprint FROM jobs j WHERE j.path = ` + w + `.path
+			ORDER BY j.updated_at DESC, j.fingerprint DESC LIMIT 1), ` + w + `.fingerprint) = ` + w + `.fingerprint
+		AND NOT EXISTS (SELECT 1 FROM retained_originals r WHERE r.swapped_path = ` + w + `.path
+			AND r.swapped_fingerprint = ` + w + `.fingerprint AND r.restored_at IS NOT NULL)`
+}
+
+// RecordSwaps is documented on PlaybackLedger. One transaction, so a poll that reads the swaps
+// after it sees all of what it did or none.
+//
+// The second a swap was superseded is the earliest of: the first transition recorded for
+// another file at the path at or after the swap's second, the restore of it, and now. A row's time is its
+// LATEST transition, so this can be later than the moment the other file arrived, never earlier.
+func (s *SQLite) RecordSwaps(ctx context.Context, now int64) (int, int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("store: swapped files: %w", err)
+		return 0, 0, fmt.Errorf("store: record swaps begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // no-op once committed
+	added := 0
+	for _, q := range []string{
+		`INSERT INTO playback_swaps (path, fingerprint, swapped_at, recorded_at, schema_version)
+		 SELECT path, fingerprint, updated_at, ?, ? FROM jobs WHERE status = 'done'
+		 ON CONFLICT(path, fingerprint) DO NOTHING`,
+		`INSERT INTO playback_swaps (path, fingerprint, swapped_at, recorded_at, schema_version)
+		 SELECT swapped_path, swapped_fingerprint, retained_at, ?, ? FROM retained_originals WHERE restored_at IS NULL
+		 ON CONFLICT(path, fingerprint) DO NOTHING`,
+	} {
+		res, err := tx.ExecContext(ctx, q, now, currentStamp())
+		if err != nil {
+			return 0, 0, fmt.Errorf("store: record swaps: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, 0, fmt.Errorf("store: record swaps rows affected: %w", err)
+		}
+		added += int(n)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE playback_swaps SET schema_version = ?, superseded_at = MIN(?,
+			COALESCE((SELECT MIN(j.updated_at) FROM jobs j WHERE j.path = playback_swaps.path
+				AND j.fingerprint != playback_swaps.fingerprint AND j.updated_at >= playback_swaps.swapped_at), ?),
+			COALESCE((SELECT MIN(r.restored_at) FROM retained_originals r WHERE r.swapped_path = playback_swaps.path
+				AND r.swapped_fingerprint = playback_swaps.fingerprint AND r.restored_at IS NOT NULL), ?))
+		 WHERE superseded_at IS NULL AND NOT (`+stillAtPath("playback_swaps")+`)`,
+		currentStamp(), now, now, now)
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: supersede swaps: %w", err)
+	}
+	superseded, err := res.RowsAffected()
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: supersede swaps rows affected: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("store: record swaps commit: %w", err)
+	}
+	return added, int(superseded), nil
+}
+
+// PlaybackSwaps is documented on PlaybackLedger.
+func (s *SQLite) PlaybackSwaps(ctx context.Context) ([]SwappedFile, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT w.path, w.fingerprint, w.swapped_at, w.superseded_at,
+			(w.superseded_at IS NULL AND `+stillAtPath("w")+`)
+		 FROM playback_swaps w ORDER BY w.path ASC, w.swapped_at ASC, w.fingerprint ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("store: playback swaps: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []SwappedFile
 	for rows.Next() {
 		var f SwappedFile
-		if err := rows.Scan(&f.Path, &f.Fingerprint, &f.SwappedAt); err != nil {
-			return nil, fmt.Errorf("store: swapped files scan: %w", err)
+		var superseded sql.NullInt64
+		if err := rows.Scan(&f.Path, &f.Fingerprint, &f.SwappedAt, &superseded, &f.Current); err != nil {
+			return nil, fmt.Errorf("store: playback swaps scan: %w", err)
 		}
+		f.SupersededAt = superseded.Int64
 		out = append(out, f)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: swapped files rows: %w", err)
+		return nil, fmt.Errorf("store: playback swaps rows: %w", err)
 	}
 	return out, nil
 }
@@ -114,13 +196,13 @@ func (s *SQLite) RecordPlaybackSessions(ctx context.Context, sessions []Playback
 	for _, ps := range sessions {
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO playback_sessions
-				(source, session_id, path, fingerprint, started_at, stopped_at, offset_ms, duration_ms,
-				 platform, player, decision, recorded_at, schema_version)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				(source, session_id, path, fingerprint, started_at, stopped_at, offset_ms, offset_derived,
+				 duration_ms, played_seconds, client, platform, player, decision, recorded_at, schema_version)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(source, session_id, path) DO NOTHING`,
 			ps.Source, ps.SessionID, ps.Path, ps.Fingerprint, ps.StartedAt, nullInt(ps.StoppedAt),
-			nullInt(ps.OffsetMS), nullInt(ps.DurationMS), ps.Platform, ps.Player, ps.Decision,
-			ps.RecordedAt, currentStamp())
+			nullInt(ps.OffsetMS), ps.OffsetDerived, nullInt(ps.DurationMS), nullInt(ps.PlayedSeconds), ps.Client,
+			ps.Platform, ps.Player, ps.Decision, ps.RecordedAt, currentStamp())
 		if err != nil {
 			return 0, fmt.Errorf("store: record playback session: %w", err)
 		}
@@ -137,20 +219,18 @@ func (s *SQLite) RecordPlaybackSessions(ctx context.Context, sessions []Playback
 }
 
 const playbackSessionColumns = `ps.source, ps.session_id, ps.path, ps.fingerprint, ps.started_at, ps.stopped_at,
-	ps.offset_ms, ps.duration_ms, ps.platform, ps.player, ps.decision, ps.recorded_at`
+	ps.offset_ms, ps.offset_derived, ps.duration_ms, ps.played_seconds, ps.client, ps.platform, ps.player,
+	ps.decision, ps.recorded_at`
 
-// PlaybackEvidence is documented on PlaybackLedger. Only the CURRENT swap of each path is
-// evidence about the file there: the newest done row for that path. A session whose done row
-// has gone - the file was restored - or has been superseded by a newer swap of the same path is
-// about bytes that are no longer the file at that path, and is not returned.
+// PlaybackEvidence is documented on PlaybackLedger. A session on a swap that is no longer the
+// file at its path - restored, or replaced by another file - is about bytes that are no longer
+// there, and is not returned.
 func (s *SQLite) PlaybackEvidence(ctx context.Context) ([]PlaybackSession, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+playbackSessionColumns+` FROM playback_sessions ps
-		 WHERE EXISTS (SELECT 1 FROM jobs j WHERE j.path = ps.path AND j.fingerprint = ps.fingerprint AND j.status = ?
-		   AND NOT EXISTS (SELECT 1 FROM jobs k WHERE k.path = j.path AND k.status = ?
-		     AND (k.updated_at > j.updated_at OR (k.updated_at = j.updated_at AND k.fingerprint > j.fingerprint))))
-		 ORDER BY ps.path ASC, ps.fingerprint ASC, ps.started_at ASC, ps.source ASC, ps.session_id ASC`,
-		string(Done), string(Done))
+		 JOIN playback_swaps w ON w.path = ps.path AND w.fingerprint = ps.fingerprint
+		 WHERE w.superseded_at IS NULL AND `+stillAtPath("w")+`
+		 ORDER BY ps.path ASC, ps.fingerprint ASC, ps.started_at ASC, ps.source ASC, ps.session_id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("store: playback evidence: %w", err)
 	}
@@ -158,12 +238,14 @@ func (s *SQLite) PlaybackEvidence(ctx context.Context) ([]PlaybackSession, error
 	var out []PlaybackSession
 	for rows.Next() {
 		var ps PlaybackSession
-		var stopped, offset, duration sql.NullInt64
+		var stopped, offset, duration, played sql.NullInt64
 		if err := rows.Scan(&ps.Source, &ps.SessionID, &ps.Path, &ps.Fingerprint, &ps.StartedAt, &stopped,
-			&offset, &duration, &ps.Platform, &ps.Player, &ps.Decision, &ps.RecordedAt); err != nil {
+			&offset, &ps.OffsetDerived, &duration, &played, &ps.Client, &ps.Platform, &ps.Player, &ps.Decision,
+			&ps.RecordedAt); err != nil {
 			return nil, fmt.Errorf("store: playback evidence scan: %w", err)
 		}
-		ps.StoppedAt, ps.OffsetMS, ps.DurationMS = nullableInt(stopped), nullableInt(offset), nullableInt(duration)
+		ps.StoppedAt, ps.OffsetMS = nullableInt(stopped), nullableInt(offset)
+		ps.DurationMS, ps.PlayedSeconds = nullableInt(duration), nullableInt(played)
 		out = append(out, ps)
 	}
 	if err := rows.Err(); err != nil {

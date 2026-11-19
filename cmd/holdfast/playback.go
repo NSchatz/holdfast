@@ -14,7 +14,7 @@ import (
 // The source is the Tautulli client the streaming pause already holds, so the api key is the one
 // resolved at start and every failure leaves through that client's sanitizer. Server paths are
 // mapped back through plex_path_map, because Tautulli names a file as Plex sees it. The poller
-// reads through the reporting door and writes only its own two tables; nothing in the encode
+// reads through the reporting door and writes only its own three tables; nothing in the encode
 // pipeline reads what it records, and nothing is restored on the strength of it.
 func newPlaybackPoller(cfg *config.Config, tautulli *schedule.Tautulli, reads playback.Reader, writes playback.Writer,
 	log *slog.Logger) *playback.Poller {

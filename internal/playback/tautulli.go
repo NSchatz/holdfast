@@ -24,11 +24,24 @@ type Observed struct {
 	// Started and Stopped are unix seconds; Stopped is nil when the source did not say.
 	Started int64
 	Stopped *int64
-	// OffsetMS is where in the file the session ended and DurationMS the file's length, each nil
-	// when the source did not say.
-	OffsetMS, DurationMS *int64
-	// Platform, Player and Decision name the client and the server's stream decision.
-	Platform, Player, Decision string
+	// OffsetMS is where in the file the session ended, OffsetDerived says it was computed from a
+	// whole percent, DurationMS is the file's length and PlayedSeconds how long the session
+	// played; each pointer is nil when the source did not say.
+	OffsetMS, DurationMS, PlayedSeconds *int64
+	OffsetDerived                       bool
+	// Client is the source's identifier for the playing client; Platform, Player and Decision
+	// name it and the server's stream decision.
+	Client, Platform, Player, Decision string
+}
+
+// Read is how far one read of a history got.
+type Read struct {
+	// Complete is whether the read reached the end of the history. When it did not, it stopped
+	// at its page bound and the rows it returned are the oldest ones.
+	Complete bool
+	// Newest is the latest start of any row the read went through, kept or skipped, 0 when it
+	// went through none: where the next read continues from when this one was not complete.
+	Newest int64
 }
 
 // Source is a history of finished sessions.
@@ -36,9 +49,7 @@ type Source interface {
 	// Name is the source's name in the ledger and in every record: tautulli.
 	Name() string
 	// Sessions returns the finished sessions that started at or after since, oldest first.
-	// complete is false when the read stopped at its page bound before the end of the history;
-	// the sessions returned are then the oldest ones and the next read continues after them.
-	Sessions(ctx context.Context, since time.Time) (rows []Observed, complete bool, err error)
+	Sessions(ctx context.Context, since time.Time) ([]Observed, Read, error)
 }
 
 // TautulliAPI sends one Tautulli API v2 command and returns the body. Production passes
@@ -58,10 +69,47 @@ type TautulliAPI func(ctx context.Context, cmd string, params url.Values) ([]byt
 // it - where it does not, the offset is taken from percent_complete and the duration, to the
 // nearest percent - and that a row's duration field is the time PLAYED (it is never read here
 // as the file's length).
+//
+// get_metadata is asked once per rating key, and its answer is kept across polls for every row
+// that STARTED BEFORE it was asked: the file it names is then at least as new as the one that
+// session played. A row that started later - a new session, which may have played a file swapped
+// since - asks again. An item Tautulli refuses or answers in a shape this does not read names no
+// file for that row and fails nothing; only a request Tautulli never answered fails the read, so
+// an outage is not mistaken for a history with no swapped file in it.
 type Tautulli struct {
 	API TautulliAPI
 	// PageSize and MaxPages bound one read: at most MaxPages requests of PageSize rows each.
 	PageSize, MaxPages int
+
+	// now is a test seam for the clock; production leaves it nil.
+	now func() time.Time
+	// items is the metadata kept across polls, by rating key.
+	items map[string]cachedItem
+	// resume is where an incomplete read stopped: the `after` date it read under and the row
+	// offset it reached. Tautulli's `after` is a whole date, so a cursor that moved within one
+	// day asks for the same rows again; a read under the same date continues from the offset
+	// instead, and the bound cannot hold it on a day busier than one read. Kept in memory: after
+	// a restart the first read starts that day again, which is one bound of rows read twice.
+	resume pageResume
+}
+
+// pageResume is where an incomplete read stopped.
+type pageResume struct {
+	after string
+	start int
+}
+
+// cachedItem is one rating key's metadata and the unix second it was asked.
+type cachedItem struct {
+	item
+	askedAt int64
+}
+
+func (t *Tautulli) clock() time.Time {
+	if t.now != nil {
+		return t.now()
+	}
+	return time.Now()
 }
 
 // DefaultPageSize and DefaultMaxPages are the bounds a zero Tautulli reads under: 100 rows a
@@ -150,6 +198,8 @@ type historyRow struct {
 	MediaType       string          `json:"media_type"`
 	Platform        string          `json:"platform"`
 	Player          string          `json:"player"`
+	PlayDuration    json.RawMessage `json:"play_duration"`
+	MachineID       string          `json:"machine_id"`
 }
 
 // decisionField is the name of the history row's stream decision field (direct play, copy,
@@ -171,7 +221,7 @@ type item struct {
 const historyOverlapDate = 24 * time.Hour
 
 // Sessions is documented on Source.
-func (t *Tautulli) Sessions(ctx context.Context, since time.Time) ([]Observed, bool, error) {
+func (t *Tautulli) Sessions(ctx context.Context, since time.Time) ([]Observed, Read, error) {
 	size, pages := t.PageSize, t.MaxPages
 	if size <= 0 {
 		size = DefaultPageSize
@@ -179,83 +229,105 @@ func (t *Tautulli) Sessions(ctx context.Context, since time.Time) ([]Observed, b
 	if pages <= 0 {
 		pages = DefaultMaxPages
 	}
-	items := map[string]item{}
+	// Metadata asked before since cannot serve any row this read keeps.
+	for k, it := range t.items {
+		if it.askedAt < since.Unix() {
+			delete(t.items, k)
+		}
+	}
+	after := since.Add(-historyOverlapDate).UTC().Format("2006-01-02")
+	first := 0
+	if t.resume.after == after {
+		first = t.resume.start
+	}
 	var out []Observed
+	var read Read
 	for page := 0; page < pages; page++ {
 		if err := ctx.Err(); err != nil {
-			return nil, false, &SourceError{Class: ClassRequest, Err: err}
+			return nil, Read{}, &SourceError{Class: ClassRequest, Err: err}
 		}
 		params := url.Values{
 			"grouping":         {"0"},
 			"include_activity": {"0"},
 			"order_column":     {"started"},
 			"order_dir":        {"asc"},
-			"after":            {since.Add(-historyOverlapDate).UTC().Format("2006-01-02")},
-			"start":            {strconv.Itoa(page * size)},
+			"after":            {after},
+			"start":            {strconv.Itoa(first + page*size)},
 			"length":           {strconv.Itoa(size)},
 		}
 		data, err := t.call(ctx, "get_history", params)
 		if err != nil {
-			return nil, false, err
+			return nil, Read{}, err
 		}
 		var hp historyPage
 		if err := json.Unmarshal(data, &hp); err != nil {
-			return nil, false, &SourceError{Class: ClassUnparseable, Err: errors.New("tautulli: a get_history page is not the documented shape")}
+			return nil, Read{}, &SourceError{Class: ClassUnparseable, Err: errors.New("tautulli: a get_history page is not the documented shape")}
 		}
 		for _, raw := range hp.Data {
-			obs, keep, err := t.observe(ctx, raw, since, items)
+			obs, started, keep, err := t.observe(ctx, raw, since)
 			if err != nil {
-				return nil, false, err
+				return nil, Read{}, err
 			}
+			read.Newest = max(read.Newest, started)
 			if keep {
 				out = append(out, obs)
 			}
 		}
 		total, known := flexInt(hp.RecordsFiltered)
-		read := int64(page*size + len(hp.Data))
-		if len(hp.Data) < size || (known && read >= total) {
-			return out, true, nil
+		seen := int64(first + page*size + len(hp.Data))
+		if len(hp.Data) < size || (known && seen >= total) {
+			read.Complete = true
+			t.resume = pageResume{}
+			return out, read, nil
 		}
 	}
-	return out, false, nil
+	t.resume = pageResume{after: after, start: first + pages*size}
+	return out, read, nil
 }
 
-// observe reads one history row. A row that started before since, a live-TV row, a row with no
-// id and a row of a kind that is not a video file are skipped; a row whose rating key's
-// metadata names no single file is kept with no file, so it is counted and attributed to nothing.
-func (t *Tautulli) observe(ctx context.Context, raw json.RawMessage, since time.Time, items map[string]item) (Observed, bool, error) {
+// observe reads one history row, and returns its start beside it, 0 when it has none. A row that
+// started before since, a live-TV row, a row with no id and a row of a kind that is not a video
+// file are skipped; a row whose rating key's metadata names no single file is kept with no file,
+// so it is counted and attributed to nothing.
+func (t *Tautulli) observe(ctx context.Context, raw json.RawMessage, since time.Time) (Observed, int64, bool, error) {
 	var row historyRow
 	if err := json.Unmarshal(raw, &row); err != nil {
-		return Observed{}, false, &SourceError{Class: ClassUnparseable, Err: errors.New("tautulli: a get_history row is not the documented shape")}
+		return Observed{}, 0, false, &SourceError{Class: ClassUnparseable, Err: errors.New("tautulli: a get_history row is not the documented shape")}
 	}
 	id := flexString(row.RowID)
 	if id == "" {
 		id = flexString(row.ID)
 	}
 	started, ok := flexInt(row.Started)
-	if id == "" || !ok || started < since.Unix() {
-		return Observed{}, false, nil
+	if !ok {
+		return Observed{}, 0, false, nil
+	}
+	if id == "" || started < since.Unix() {
+		return Observed{}, started, false, nil
 	}
 	if live, _ := flexInt(row.Live); live != 0 {
-		return Observed{}, false, nil
+		return Observed{}, started, false, nil
 	}
 	switch row.MediaType {
 	case "track", "photo":
-		return Observed{}, false, nil
+		return Observed{}, started, false, nil
 	}
 	// The same object, read by name for the one field a struct tag cannot spell here. It parsed
 	// as a row above, so it parses as a map.
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &fields)
-	obs := Observed{ID: id, Started: started, Platform: row.Platform, Player: row.Player,
-		Decision: flexString(fields[decisionField])}
+	obs := Observed{ID: id, Started: started, Client: strings.TrimSpace(row.MachineID), Platform: row.Platform,
+		Player: row.Player, Decision: flexString(fields[decisionField])}
 	if stopped, ok := flexInt(row.Stopped); ok && stopped > 0 {
 		obs.Stopped = &stopped
 	}
+	if played, ok := flexInt(row.PlayDuration); ok && played >= 0 {
+		obs.PlayedSeconds = &played
+	}
 	if key := flexString(row.RatingKey); key != "" {
-		it, err := t.metadata(ctx, key, items)
+		it, err := t.metadata(ctx, key, started)
 		if err != nil {
-			return Observed{}, false, err
+			return Observed{}, 0, false, err
 		}
 		obs.File = it.file
 		if it.durationMS > 0 {
@@ -267,9 +339,9 @@ func (t *Tautulli) observe(ctx context.Context, raw json.RawMessage, since time.
 		obs.OffsetMS = &off
 	} else if pct, ok := flexFloat(row.PercentComplete); ok && obs.DurationMS != nil && pct >= 0 && pct <= 100 {
 		off := int64(math.Round(pct / 100 * float64(*obs.DurationMS)))
-		obs.OffsetMS = &off
+		obs.OffsetMS, obs.OffsetDerived = &off, true
 	}
-	return obs, true, nil
+	return obs, started, true, nil
 }
 
 // metadataData is the part of get_metadata's data this reads.
@@ -282,24 +354,33 @@ type metadataData struct {
 	} `json:"media_info"`
 }
 
-// metadata is one rating key's file and duration, asked once per read. An item whose media name
-// no file, or more than one (two versions of a film, or a film in parts), names no file here:
-// the history does not say which of them a session played, and guessing would attribute a
-// stall to a file that never stalled.
-func (t *Tautulli) metadata(ctx context.Context, key string, items map[string]item) (item, error) {
-	if it, ok := items[key]; ok {
-		return it, nil
+// metadata is one rating key's file and duration, for a row that started at started. An item
+// whose media name no file, or more than one (two versions of a film, or a film in parts), names
+// no file here: the history does not say which of them a session played, and guessing would
+// attribute a stall to a file that never stalled.
+//
+// A refusal of this one item - an answered request with a status other than 200, a result other
+// than success, an answer this does not read (one cut off at the client's size bound included) -
+// names no file for this row and is not kept, so a later row asks again. A request Tautulli never
+// answered is the read's failure.
+func (t *Tautulli) metadata(ctx context.Context, key string, started int64) (item, error) {
+	if it, ok := t.items[key]; ok && it.askedAt >= started {
+		return it.item, nil
 	}
+	asked := t.clock().Unix()
 	data, err := t.call(ctx, "get_metadata", url.Values{"rating_key": {key}})
 	if err != nil {
-		return item{}, err
+		if ClassOf(err) == ClassRequest && !answered(err) {
+			return item{}, err
+		}
+		return item{}, nil
 	}
 	var md metadataData
 	// An item Tautulli no longer knows answers an empty list, an empty object or nothing: it
 	// names no file.
 	if bytes.HasPrefix(bytes.TrimSpace(data), []byte("{")) {
 		if err := json.Unmarshal(data, &md); err != nil {
-			return item{}, &SourceError{Class: ClassUnparseable, Err: errors.New("tautulli: a get_metadata answer is not the documented shape")}
+			return item{}, nil
 		}
 	}
 	var files []string
@@ -317,8 +398,18 @@ func (t *Tautulli) metadata(ctx context.Context, key string, items map[string]it
 	if d, ok := flexInt(md.Duration); ok {
 		it.durationMS = d
 	}
-	items[key] = it
+	if t.items == nil {
+		t.items = map[string]cachedItem{}
+	}
+	t.items[key] = cachedItem{item: it, askedAt: asked}
 	return it, nil
+}
+
+// answered reports whether the request behind err got an answer from Tautulli, which
+// (*schedule.Tautulli).API's failures say. A failure that does not say is taken as no answer.
+func answered(err error) bool {
+	var a interface{ Answered() bool }
+	return errors.As(err, &a) && a.Answered()
 }
 
 // flexString reads a JSON string or number as its text, and anything else as "".

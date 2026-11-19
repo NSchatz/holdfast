@@ -2,6 +2,7 @@ package schedule
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -64,6 +65,10 @@ func TestTautulli_API_AFailureNamesTheCommandAndTheReferenceAndNeverTheKey(t *te
 			t.Errorf("failure %q does not name %q", err, want)
 		}
 	}
+	var ae *APIError
+	if !errors.As(err, &ae) || !ae.Answered() {
+		t.Errorf("a 401 is an answer: %#v", err)
+	}
 	for _, leak := range []string{apiKeySentinel, "apikey=", "length=100"} {
 		if strings.Contains(err.Error(), leak) {
 			t.Errorf("failure %q carries %q", err, leak)
@@ -89,6 +94,9 @@ func TestTautulli_API_AFailureNamesTheCommandAndTheReferenceAndNeverTheKey(t *te
 	if !strings.Contains(err.Error(), "the get_history request") || strings.Contains(err.Error(), apiKeySentinel) ||
 		strings.Contains(err.Error(), "apikey") {
 		t.Errorf("outage failure %q", err)
+	}
+	if !errors.As(err, &ae) || ae.Answered() {
+		t.Errorf("an outage is not an answer: %#v", err)
 	}
 	// The activity check still names itself as it always has.
 	if _, err := taut.Streaming(context.Background()); err == nil || !strings.Contains(err.Error(), "the activity check") {

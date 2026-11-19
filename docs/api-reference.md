@@ -632,26 +632,30 @@ operator runs, and there is no endpoint that restores, re-encodes or releases a 
 | field | meaning |
 |---|---|
 | `enabled`, `source`, `poll_minutes` | whether this daemon polls a source, which (`tautulli`, or `""`), and `playback_poll_minutes` (`0` when off) |
-| `rules` | what the verdicts were derived under: `played_fraction` (`playback_played_fraction`), `end_margin_seconds` (180), `stall_tolerance_seconds` (90), `stall_min_sessions` (2) |
+| `rules` | what the verdicts were derived under: `played_fraction` (`playback_played_fraction`), `end_margin_seconds` (180), `stall_before` (0.85: a stop past it is no part of a stall), `stall_tolerance_seconds` (90, widened by one percent of the file where an offset came from a whole percent), `stall_min_sessions` (2), `retry_window_seconds` (300) and `stall_window_days` (60) |
 | `last_attempt_at` | Unix seconds of the newest poll, `null` before the first |
 | `last_failure` | the class the newest poll failed with - `request-failed`, `error-result`, `unparseable-response` or `ledger-failed` - or `null` when it succeeded |
 | `covered_through` | Unix seconds the newest poll that read the history to its end began, `null` until one has. A file swapped before it has had every session since its swap read |
-| `counts` | every current swap - the newest done row of each path - by verdict: `swapped` (the total), `suspect_stall`, `played_through`, `unplayed` and `unknown` ([the verdicts](design/playback-evidence.md#verdicts)) |
+| `counts` | every current swap - the newest swap of each path that is still the file there, whatever its jobs row's status ([swap identity](design/playback-evidence.md#swap-identity)) - by verdict: `swapped` (the total), `suspect_stall`, `played_through`, `unplayed` and `unknown` ([the verdicts](design/playback-evidence.md#verdicts)) |
 | `suspects` | every suspected stall, path order (`[]` when none) |
 
 Each suspect carries `path`, `fingerprint` and `swapped_at` (the swap the evidence is about),
 `verdict`, `sessions` (every session on the file since the swap) and `played_through` (how many of
 them reached the mark), `duration_seconds` (the file's length as Tautulli stated it, `null` when it
 did not), `stall_at_seconds` (the middle session's end), `stall_from_seconds` and
-`stall_to_seconds` (the first and last), `stall_sessions` (how many ended there), `restore` (the
-command that puts the original back while a live retention of this very swap holds it, quoted for a
-shell, `null` otherwise) and `stalled_sessions`: each session that ended there, with `started_at`,
-`stopped_at` (`null` when Tautulli did not say), `offset_seconds`, `platform`, `player` and
-`decision` (Tautulli's stream decision).
+`stall_to_seconds` (the first and last), `stall_sessions` (how many ended there), `stall_clients`
+(on how many distinct clients) and `stall_retries` (how many played for no more than the retry
+window: resumes that got nowhere) - one of the last two is what made the point a stall rather than
+a choice - `restore` (the command that puts the original back while a live retention of this very
+swap holds it, quoted for a shell, `null` otherwise) and `stalled_sessions`: each session that ended
+there, with `started_at`, `stopped_at` (`null` when Tautulli did not say), `offset_seconds`,
+`offset_from_percent` (the offset was computed from a whole percent rather than read),
+`played_seconds` (`null` when Tautulli did not say), `platform`, `player` and `decision`
+(Tautulli's stream decision).
 
-A sample: a swapped film whose sessions on three clients ended near 34 minutes, its original still
-retained, beside a film one session played through and one no session has played (the paths are
-synthetic):
+A sample: a swapped film whose sessions on three clients ended near 34 minutes - the last a resume
+that played for 200 seconds and got nowhere - its original still retained, beside a film one session played
+through and one no session has played (the paths are synthetic):
 
 ```json
 {
@@ -661,12 +665,15 @@ synthetic):
   "rules": {
     "played_fraction": 0.9,
     "end_margin_seconds": 180,
+    "stall_before": 0.85,
     "stall_tolerance_seconds": 90,
-    "stall_min_sessions": 2
+    "stall_min_sessions": 2,
+    "retry_window_seconds": 300,
+    "stall_window_days": 60
   },
-  "last_attempt_at": 1795489600,
+  "last_attempt_at": 1795492371,
   "last_failure": null,
-  "covered_through": 1795489600,
+  "covered_through": 1795492371,
   "counts": {
     "swapped": 3,
     "suspect_stall": 1,
@@ -678,7 +685,7 @@ synthetic):
     {
       "path": "/media/movies/Film (2001)/Film (2001).mkv",
       "fingerprint": "3200000000:1790000000",
-      "swapped_at": 1795057600,
+      "swapped_at": 1795060371,
       "verdict": "suspect-stall",
       "sessions": 3,
       "played_through": 0,
@@ -687,28 +694,36 @@ synthetic):
       "stall_from_seconds": 1999,
       "stall_to_seconds": 2042,
       "stall_sessions": 3,
+      "stall_clients": 3,
+      "stall_retries": 1,
       "restore": "holdfast restore '/media/movies/Film (2001)/Film (2001).mkv'",
       "stalled_sessions": [
         {
-          "started_at": 1795316800,
-          "stopped_at": 1795319200,
+          "started_at": 1795319571,
+          "stopped_at": 1795321971,
           "offset_seconds": 1999,
+          "offset_from_percent": false,
+          "played_seconds": 2400,
           "platform": "Chrome",
           "player": "Plex Web",
           "decision": "copy"
         },
         {
-          "started_at": 1795324000,
-          "stopped_at": 1795326600,
+          "started_at": 1795326771,
+          "stopped_at": 1795329371,
           "offset_seconds": 2040,
+          "offset_from_percent": false,
+          "played_seconds": 2600,
           "platform": "Firefox",
           "player": "Plex Web",
           "decision": "transcode"
         },
         {
-          "started_at": 1795403200,
-          "stopped_at": 1795403400,
+          "started_at": 1795405971,
+          "stopped_at": 1795406171,
           "offset_seconds": 2042,
+          "offset_from_percent": false,
+          "played_seconds": 200,
           "platform": "macOS",
           "player": "Plex for Mac",
           "decision": "direct play"
@@ -1259,7 +1274,7 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   | `holdfast_health_sweep_corrupt_files` | files the newest FINISHED health sweep found corrupt, read at scrape time | the damage the library holds as of that sweep. Absent until a sweep has finished: nobody having looked is not zero. Alert on any rise |
   | `holdfast_health_sweep_unreadable_files` | files the newest finished health sweep could not read at all, read at scrape time | permissions, a non-regular file under a video name, or a file that kept changing. Absent until a sweep has finished |
   | `holdfast_health_sweep_last_completed_timestamp_seconds` | Unix time the newest health sweep finished, read at scrape time | whether the sweep is keeping up. Older than the interval plus a sweep's length means it is not; absent until one has finished |
-  | `holdfast_playback_suspect_files` | swapped files whose playback evidence is a suspected stall - at least two sessions ending within 90 seconds of one another well before the end - read at scrape time | replacements real viewers cannot get through. Alert on any rise: each is named, with the restore command while its original is retained, on `GET /api/playback` and in a `warn` record. Absent unless `playback_source` is set and until a poll has read the history to its end |
+  | `holdfast_playback_suspect_files` | swapped files whose playback evidence is a suspected stall - recent sessions ending at one point well before the end, on two or more clients or with a resume that got nowhere - read at scrape time through the reporting door | replacements real viewers cannot get through. Alert on any rise: each is named, with the restore command while its original is retained, on `GET /api/playback` and in a `warn` record. Absent unless `playback_source` is set and until a poll has read the history to its end |
   | `holdfast_playback_played_through_files` | swapped files a session has played through since the swap and no stall is suspected in, read at scrape time | context for the figure above: how much of what was swapped has been watched to the end. Absent on the same terms |
   | `holdfast_playback_history_read_timestamp_seconds` | Unix time the newest poll that read Tautulli's history to its end began, read at scrape time | whether the evidence is current. Older than a few poll intervals means Tautulli is not answering (`GET /api/playback` says how); absent on the same terms |
 

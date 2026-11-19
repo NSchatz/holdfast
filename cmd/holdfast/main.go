@@ -1526,8 +1526,14 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	// what was played on the files this tool swapped; a file several sessions stop at the same
 	// point is reported, and nothing is acted on.
 	poller := newPlaybackPoller(cfg, tautulli, reads, st, log)
-	if poller != nil && mx != nil {
-		mx.SetPlayback(poller.Source.Name(), poller.Rules)
+	if poller != nil {
+		// The swaps are recorded before the first scan can re-open a done row a changed setting
+		// no longer matches, so the evidence keeps its identity through the re-derived skip. A
+		// ledger read that fails here is said and retried by every poll; it stops nothing.
+		_ = poller.RecordSwaps(ctx)
+		if mx != nil {
+			mx.SetPlayback(poller.Source.Name(), poller.Rules, reads)
+		}
 	}
 
 	// WORKER NODES, only where node_token is set (docs/design/nodes.md#restart). The leases a

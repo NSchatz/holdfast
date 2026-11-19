@@ -36,8 +36,8 @@ const (
 	// PlayedThrough: at least one session reached the played-through mark, and the sessions
 	// that did not form no stall.
 	PlayedThrough Verdict = "played-through"
-	// SuspectStall: at least StallMinSessions sessions, on any clients, ended within
-	// StallTolerance of one another at a point well before the end. It wins over a play-through:
+	// SuspectStall: recent sessions stopped at one point well before the end, in a way that
+	// looks like the file and not the viewer (see Rules.stall). It wins over a play-through:
 	// one client that plays the file is not evidence that the others can.
 	SuspectStall Verdict = "suspect-stall"
 )
@@ -49,20 +49,37 @@ const (
 	// EndMargin: a session that ended within this of the end played the file through, whatever
 	// the fraction, so a long film's credits do not hold it below the mark.
 	EndMargin = 3 * time.Minute
+	// StallBefore: only a session that stopped before this fraction of the file can be part of
+	// a stall. Viewers stop at the credits, and an animated feature's credits can start well
+	// before the played-through mark; a cluster there is people leaving, not a file stalling.
+	StallBefore = 0.85
 	// StallTolerance: sessions whose ends lie within this of one another ended at the same point.
+	// Where an offset was computed from a whole percent, each such offset widens it by half a
+	// percent of the file, the most the rounding can have moved it.
 	StallTolerance = 90 * time.Second
 	// StallMinSessions: how many sessions must end at the same point for a stall to be suspected.
 	StallMinSessions = 2
+	// RetryWindow: a session that played for no longer than this and ended at the point began
+	// within this of it - a resume or a retry that got nowhere, which is what a stall looks like
+	// from one client.
+	RetryWindow = 5 * time.Minute
+	// StallWindow: only sessions that started within this of now can form a stall. A stop
+	// months ago is not evidence about how the file plays now, and sessions that never expire
+	// collide at one point by chance.
+	StallWindow = 60 * 24 * time.Hour
 )
 
 // Rules is what the derivation is decided under.
 type Rules struct {
 	// PlayedFraction is the fraction of the file a session must reach to play it through.
 	PlayedFraction float64
-	// EndMargin, StallTolerance and StallMinSessions are the fixed figures above.
+	// The fixed figures above.
 	EndMargin        time.Duration
+	StallBefore      float64
 	StallTolerance   time.Duration
 	StallMinSessions int
+	RetryWindow      time.Duration
+	StallWindow      time.Duration
 }
 
 // RulesFor is the rules a configuration decides under.
@@ -70,8 +87,11 @@ func RulesFor(cfg *config.Config) Rules {
 	return Rules{
 		PlayedFraction:   cfg.EffectivePlaybackPlayedFraction(),
 		EndMargin:        EndMargin,
+		StallBefore:      StallBefore,
 		StallTolerance:   StallTolerance,
 		StallMinSessions: StallMinSessions,
+		RetryWindow:      RetryWindow,
+		StallWindow:      StallWindow,
 	}
 }
 
@@ -82,8 +102,11 @@ type Stall struct {
 	AtMS int64
 	// FromMS and ToMS are the first and last session ends in the cluster.
 	FromMS, ToMS int64
-	// Sessions is how many sessions ended in it, and Members are they.
+	// Sessions is how many sessions ended in it, Clients on how many distinct clients, Retries
+	// how many of them were a resume or retry that got nowhere, and Members are they.
 	Sessions int
+	Clients  int
+	Retries  int
 	Members  []store.PlaybackSession
 }
 
@@ -105,28 +128,33 @@ type Evidence struct {
 type sessionReading int
 
 const (
-	readingNone         sessionReading = iota // no offset or no duration: it says nothing
+	readingNone         sessionReading = iota // no offset, no duration, near the end but short of the mark, or too old
 	readingPlayed                             // it reached the mark
-	readingStoppedEarly                       // it ended well before the end
+	readingStoppedEarly                       // it stopped well before the end, recently
 )
 
 // read classifies one session. A session with no offset, or no positive duration, says nothing
-// either way: it cannot have played the file through and it cannot be placed in a cluster.
-func (r Rules) read(s store.PlaybackSession) sessionReading {
+// either way: it cannot have played the file through and it cannot be placed in a cluster. One
+// that stopped past StallBefore without reaching the mark, or started before the stall window,
+// played nothing through and is no part of a stall.
+func (r Rules) read(s store.PlaybackSession, now int64) sessionReading {
 	if s.OffsetMS == nil || s.DurationMS == nil || *s.DurationMS <= 0 {
 		return readingNone
 	}
 	off, dur := *s.OffsetMS, *s.DurationMS
-	if float64(off) >= r.PlayedFraction*float64(dur) || dur-off <= r.EndMargin.Milliseconds() {
+	switch {
+	case float64(off) >= r.PlayedFraction*float64(dur) || dur-off <= r.EndMargin.Milliseconds():
 		return readingPlayed
+	case float64(off) >= r.StallBefore*float64(dur) || s.StartedAt < now-int64(r.StallWindow.Seconds()):
+		return readingNone
 	}
 	return readingStoppedEarly
 }
 
-// Derive is the verdict the given sessions - all of them attributed to one swapped file - support.
-// covered says whether a poll has read the history to its end since the file was swapped: with
-// no session and no such poll, nothing is known.
-func Derive(sessions []store.PlaybackSession, covered bool, r Rules) Evidence {
+// Derive is the verdict the given sessions - all of them attributed to one swapped file - support,
+// at unix second now. covered says whether a poll has read the history to its end since the file
+// was swapped: with no session and no such poll, nothing is known.
+func Derive(sessions []store.PlaybackSession, covered bool, r Rules, now int64) Evidence {
 	ev := Evidence{Sessions: len(sessions)}
 	var early []store.PlaybackSession
 	for _, s := range sessions {
@@ -134,14 +162,14 @@ func Derive(sessions []store.PlaybackSession, covered bool, r Rules) Evidence {
 		if s.DurationMS != nil {
 			ev.DurationMS = max(ev.DurationMS, *s.DurationMS)
 		}
-		switch r.read(s) {
+		switch r.read(s, now) {
 		case readingPlayed:
 			ev.PlayedThrough++
 		case readingStoppedEarly:
 			early = append(early, s)
 		}
 	}
-	if st := r.cluster(early); st != nil {
+	if st := r.stall(early); st != nil {
 		ev.Verdict, ev.Stall = SuspectStall, st
 		return ev
 	}
@@ -156,35 +184,76 @@ func Derive(sessions []store.PlaybackSession, covered bool, r Rules) Evidence {
 	return ev
 }
 
-// cluster finds the largest set of sessions whose ends lie within StallTolerance of one another,
-// the earliest such set on a tie, and returns it when it holds at least StallMinSessions.
-func (r Rules) cluster(early []store.PlaybackSession) *Stall {
+// clientOf names the client a session played on: the source's own identifier, or its platform
+// and player where it gave none.
+func clientOf(s store.PlaybackSession) string {
+	if s.Client != "" {
+		return "id:" + s.Client
+	}
+	return "name:" + s.Platform + "/" + s.Player
+}
+
+// isRetry reports whether a session played for no longer than the retry window: it began
+// within that much of the file before where it ended, since a player cannot move through a
+// file faster than it plays it.
+func (r Rules) isRetry(s store.PlaybackSession) bool {
+	return s.PlayedSeconds != nil && *s.PlayedSeconds <= int64(r.RetryWindow.Seconds())
+}
+
+// stall finds the largest set of sessions whose ends lie within the tolerance of one another
+// AND that look like the file stalling rather than viewers choosing to stop - sessions on at
+// least two distinct clients, or at least one resume or retry that got nowhere - the earliest
+// such set on a tie, and returns it when it holds at least StallMinSessions.
+func (r Rules) stall(early []store.PlaybackSession) *Stall {
 	if len(early) < r.StallMinSessions || len(early) == 0 {
 		return nil
 	}
 	sorted := append([]store.PlaybackSession(nil), early...)
 	slices.SortStableFunc(sorted, func(a, b store.PlaybackSession) int { return cmp.Compare(*a.OffsetMS, *b.OffsetMS) })
 	tol := r.StallTolerance.Milliseconds()
-	bestFrom, bestLen := 0, 0
-	j := 0
+	for _, s := range sorted {
+		if s.OffsetDerived {
+			// Each of two percent-derived ends can sit half a percent from where it was.
+			tol += *s.DurationMS / 100
+			break
+		}
+	}
+	var best *Stall
 	for i := range sorted {
-		j = max(j, i)
+		j := i
 		for j+1 < len(sorted) && *sorted[j+1].OffsetMS-*sorted[i].OffsetMS <= tol {
 			j++
 		}
-		if n := j - i + 1; n > bestLen {
-			bestFrom, bestLen = i, n
+		members := sorted[i : j+1]
+		st := r.describe(members)
+		if st.Sessions < r.StallMinSessions || (st.Clients < 2 && st.Retries == 0) {
+			continue
+		}
+		if best == nil || st.Sessions > best.Sessions {
+			best = st
 		}
 	}
-	if bestLen < r.StallMinSessions {
-		return nil
+	return best
+}
+
+// describe is one candidate cluster: its place, its size, its clients and its retries.
+func (r Rules) describe(members []store.PlaybackSession) *Stall {
+	n := len(members)
+	clients := map[string]bool{}
+	retries := 0
+	for _, m := range members {
+		clients[clientOf(m)] = true
+		if r.isRetry(m) {
+			retries++
+		}
 	}
-	members := sorted[bestFrom : bestFrom+bestLen]
 	return &Stall{
-		AtMS:     *members[(bestLen-1)/2].OffsetMS,
+		AtMS:     *members[(n-1)/2].OffsetMS,
 		FromMS:   *members[0].OffsetMS,
-		ToMS:     *members[bestLen-1].OffsetMS,
-		Sessions: bestLen,
+		ToMS:     *members[n-1].OffsetMS,
+		Sessions: n,
+		Clients:  len(clients),
+		Retries:  retries,
 		Members:  append([]store.PlaybackSession(nil), members...),
 	}
 }

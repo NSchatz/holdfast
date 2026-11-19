@@ -172,7 +172,7 @@ func New(st store.Store, log *slog.Logger) *Metrics {
 	m.reg.MustRegister(m.queue)
 	m.reg.MustRegister(newUndoWindowCollector(st, log))
 	m.reg.MustRegister(newHealthCollector(st, log))
-	m.playback = newPlaybackCollector(st, log)
+	m.playback = newPlaybackCollector(log)
 	m.reg.MustRegister(m.playback)
 	m.reg.MustRegister(collectors.NewGoCollector())
 	m.reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))

@@ -741,7 +741,7 @@ const PlaybackPath = "/api/playback"
 // collected, where its poll has got to, every current swap by verdict, and every suspected
 // stall with the restore command while the original is retained.
 func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
-	rep, err := playback.BuildReport(r.Context(), s.reads(), &s.cfg)
+	rep, err := playback.BuildReport(r.Context(), s.reads(), &s.cfg, time.Now())
 	if err != nil {
 		s.fail(w, "playback", err)
 		return

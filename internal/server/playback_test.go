@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/playback"
@@ -34,12 +35,15 @@ func TestPlaybackEndpoint_ReportsASuspectedStallThroughTheReadAPI(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	files, err := st.SwappedFiles(ctx)
+	if _, _, err := st.RecordSwaps(ctx, time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	swaps, err := st.PlaybackSwaps(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var swapped int64
-	for _, f := range files {
+	for _, f := range swaps {
 		if f.Path == film {
 			swapped = f.SwappedAt
 		}
@@ -51,16 +55,16 @@ func TestPlaybackEndpoint_ReportsASuspectedStallThroughTheReadAPI(t *testing.T) 
 		t.Fatal(err)
 	}
 	dur := int64(8_700_000)
-	sess := func(id string, started, stopped, off int64, platform, player, decision string) store.PlaybackSession {
+	sess := func(id string, started, stopped, off, played int64, client, platform, player, decision string) store.PlaybackSession {
 		return store.PlaybackSession{Source: "tautulli", SessionID: id, Path: film, Fingerprint: "3200000000:1790000000",
-			StartedAt: swapped + started, StoppedAt: &stopped, OffsetMS: &off, DurationMS: &dur, Platform: platform,
-			Player: player, Decision: decision, RecordedAt: swapped + 4*86400}
+			StartedAt: swapped + started, StoppedAt: &stopped, OffsetMS: &off, DurationMS: &dur, PlayedSeconds: &played,
+			Client: client, Platform: platform, Player: player, Decision: decision, RecordedAt: swapped + 4*86400}
 	}
 	full := dur
 	if _, err := st.RecordPlaybackSessions(ctx, []store.PlaybackSession{
-		sess("1101", 3*86400, swapped+3*86400+2400, 1_999_000, "Chrome", "Plex Web", "copy"),
-		sess("1102", 3*86400+7200, swapped+3*86400+9800, 2_040_000, "Firefox", "Plex Web", "transcode"),
-		sess("1103", 4*86400, swapped+4*86400+200, 2_042_000, "macOS", "Plex for Mac", "direct play"),
+		sess("1101", 3*86400, swapped+3*86400+2400, 1_999_000, 2400, "c-chrome", "Chrome", "Plex Web", "copy"),
+		sess("1102", 3*86400+7200, swapped+3*86400+9800, 2_040_000, 2600, "c-firefox", "Firefox", "Plex Web", "transcode"),
+		sess("1103", 4*86400, swapped+4*86400+200, 2_042_000, 200, "c-mac", "macOS", "Plex for Mac", "direct play"),
 		{Source: "tautulli", SessionID: "1104", Path: played, Fingerprint: "3200000000:1790000000", StartedAt: swapped + 60,
 			OffsetMS: &full, DurationMS: &dur, Platform: "tvOS", Player: "Apple TV", Decision: "direct play"},
 	}); err != nil {
@@ -110,7 +114,7 @@ func TestPlaybackEndpoint_ReportsASuspectedStallThroughTheReadAPI(t *testing.T) 
 		t.Fatalf("report %+v", rep)
 	}
 	f := rep.Suspects[0]
-	if f.Path != film || f.StallSessions != 3 || f.StallAtSeconds != 2040 || f.Restore == nil ||
+	if f.Path != film || f.StallSessions != 3 || f.StallClients != 3 || f.StallRetries != 1 || f.StallAtSeconds != 2040 || f.Restore == nil ||
 		*f.Restore != "holdfast restore '"+film+"'" || len(f.StalledSessions) != 3 {
 		t.Errorf("suspect %+v", f)
 	}

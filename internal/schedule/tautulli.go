@@ -68,10 +68,34 @@ func (t *Tautulli) sanitizeAs(what string, err error) error {
 	if errors.As(err, &ue) {
 		cause = ue.Op + ": " + unwrapMessage(ue)
 	}
-	return fmt.Errorf("tautulli: %s against %s failed: %s (tautulli_api_key "+
-		"is %s; neither the key nor the request URL is reported, because the URL carries the key)",
-		what, t.destination(), cause, label(t.ref))
+	var se *statusError
+	return &APIError{
+		msg: fmt.Sprintf("tautulli: %s against %s failed: %s (tautulli_api_key "+
+			"is %s; neither the key nor the request URL is reported, because the URL carries the key)",
+			what, t.destination(), cause, label(t.ref)),
+		answered: errors.As(err, &se),
+	}
 }
+
+// APIError is a failed Tautulli request, reported in words that carry neither the key nor the
+// request URL. It wraps nothing on purpose: the transport error it was made from quotes the
+// URL, and the URL carries the key.
+type APIError struct {
+	msg      string
+	answered bool
+}
+
+func (e *APIError) Error() string { return e.msg }
+
+// Answered reports whether Tautulli answered the request at all, with a status other than 200.
+// A request refused, timed out or never sent was not answered. A caller reading several items
+// tells "Tautulli refused this one" from "Tautulli is down" by it.
+func (e *APIError) Answered() bool { return e.answered }
+
+// statusError is an answer with a status other than 200.
+type statusError struct{ code int }
+
+func (e *statusError) Error() string { return fmt.Sprintf("it answered HTTP %d", e.code) }
 
 // destination is the most of the configured Tautulli URL a failure may name: scheme, host
 // and path, with any userinfo, query and fragment dropped. tautulli_url is not itself a
@@ -122,7 +146,7 @@ func (t *Tautulli) httpGet(ctx context.Context, rawURL string) ([]byte, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("it answered HTTP %d", resp.StatusCode)
+		return nil, &statusError{code: resp.StatusCode}
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 }

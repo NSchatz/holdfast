@@ -963,8 +963,8 @@ playback_played_fraction: 0.9   # how far a session must get to play a file thro
 Three daemon-wide keys, read by `holdfast serve` only. With `playback_source: tautulli`, the daemon
 reads Tautulli's session history every `playback_poll_minutes`, ties each finished session to the
 swapped file whose bytes it played (mapping Tautulli's paths back through `plex_path_map`), and
-reports a file at least two of whose sessions ended within 90 seconds of one another well before
-the end as a **suspected stall**: one `warn` record, `GET /api/playback`
+reports a file whose recent sessions stopped at one point well before the end - on two or more
+clients, or with a resume there that got nowhere - as a **suspected stall**: one `warn` record, `GET /api/playback`
 ([docs/api-reference.md](api-reference.md#playback)) and the `holdfast_playback_*` metrics, with
 the `holdfast restore` command while the original is still retained. It is **report only**: nothing
 is restored, re-encoded, released or held on the strength of it, and the undo window closes on its
