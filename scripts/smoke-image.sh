@@ -116,7 +116,16 @@ ok "image default user is non-root ($user)"
 #
 #    arm64 carries no hardware runtime (its pinned ffmpeg has no VAAPI and no libvpl; see
 #    the Dockerfile's hwruntime stage), so there is nothing there to prove.
-arch="$(docker image inspect -f '{{.Architecture}}' "$IMAGE")" || fail "could not read the image's architecture"
+#    The architecture under test is the platform this run was asked for when it names one:
+#    with Docker's containerd image store, `docker image inspect` on a multi-platform
+#    reference answers for the HOST's platform, so a linux/arm64 smoke on an amd64 runner
+#    would read amd64 and run the amd64 loader inside the arm64 image. Without a platform,
+#    the image's own config is the answer.
+if [ -n "$PLATFORM" ]; then
+  arch="${PLATFORM#linux/}"; arch="${arch%%/*}"
+else
+  arch="$(docker image inspect -f '{{.Architecture}}' "$IMAGE")" || fail "could not read the image's architecture"
+fi
 if [ "$arch" = "amd64" ]; then
   hwlib=/usr/lib/x86_64-linux-gnu
   # The dynamic loader's list mode is the entrypoint: the image has no shell and no ldd,
