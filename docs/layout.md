@@ -29,6 +29,8 @@ Where each part of the repository lives and what it owns.
 - `internal/queuekey` - the `savings_per_hour` ordering key: estimated bytes saved per hour of work.
 - `internal/health` - the report-only health sweep: its schedule, resumable full decode and read-API report.
 - `internal/mediaclient` - the Radarr, Sonarr and Plex clients: the post-swap rescan and the Plex play hold.
+- `internal/playback` - playback evidence: reads Tautulli's session history, ties each session to the swapped file it
+  played, and reports the files whose sessions stall at one point; it acts on nothing.
 - `internal/encoder` - the codec matrix registry.
 - `internal/hwdevice` - the render nodes a hardware encoder can open, and the one VAAPI and QSV are each assigned.
 - `internal/store` - the persistent job and outcome state.

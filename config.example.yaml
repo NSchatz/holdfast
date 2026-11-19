@@ -1065,6 +1065,27 @@ dry_run: false
 #                              #   transcoding). tautulli_url is an ADDRESS and stays
 #                              #   plain; tautulli_api_key is a SECRET REFERENCE:
 #                              #     tautulli_api_key: file:/run/secrets/tautulli-key
+# tautulli_pause: true         # with Tautulli configured, pause new work while anything
+#                              #   streams (true, the default: what Tautulli has always
+#                              #   done here). false keeps Tautulli for playback evidence
+#                              #   only, so playback_source: tautulli does not also stop
+#                              #   reclamation whenever someone watches.
+# playback_source: tautulli   # playback evidence, OFF unset (the default). serve reads
+#                              #   Tautulli's session history (tautulli_url and
+#                              #   tautulli_api_key above, both required), ties each
+#                              #   session to the swapped file it played (paths mapped
+#                              #   back through plex_path_map) and REPORTS a file whose
+#                              #   sessions keep ending at one point well before the end
+#                              #   as a suspected stall (a warn record, GET /api/playback,
+#                              #   the holdfast_playback_* metrics), naming
+#                              #   `holdfast restore <path>` while the original is still
+#                              #   retained. It never restores, re-encodes or releases
+#                              #   anything. plex is refused: Plex's own history cannot
+#                              #   see a stall. See docs/design/playback-evidence.md.
+# playback_poll_minutes: 15    # minutes between two reads of the history (1-1440;
+#                              #   0 means the default of 15).
+# playback_played_fraction: 0.9  # how far into a file a session must get to have
+#                              #   played it through (0.5-1; 0 means the default of 0.9).
 
 # --- RADARR, SONARR AND PLEX (docs/post-swap-hook.md) ---------------------------
 # All OFF by default: with none of these nine keys written holdfast sends no request to

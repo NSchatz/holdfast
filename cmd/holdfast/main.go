@@ -1478,9 +1478,8 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	// only ever DELAYS work. The engine consults it (throttled) between files; Rescan
 	// consults it before starting a scan.
 	window, _ := schedule.ParseWindow(cfg.RunWindow) // already validated
-	tautulli := schedule.NewTautulli(cfg.TautulliURL,
-		cfg.SecretRef("tautulli_api_key"), secrets.Get("tautulli_api_key"))
-	sched := schedule.New(window, cfg.MaxLoad, tautulli, log)
+	tautulli, streamPause := tautulliClients(cfg, secrets)
+	sched := schedule.New(window, cfg.MaxLoad, streamPause, log)
 	ctrl.SetGate(func() (bool, string) { return sched.MayRun(ctx) })
 	eng.Paused = func() bool {
 		if ctrl.Paused() {
@@ -1536,6 +1535,21 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		srv.SetHealth(sweep)
 	}
 
+	// Playback evidence (docs/design/playback-evidence.md), OFF unless playback_source is set. It
+	// reads Tautulli's session history on its own interval, off the engine's workers, and records
+	// what was played on the files this tool swapped; a file several sessions stop at the same
+	// point is reported, and nothing is acted on.
+	poller := newPlaybackPoller(cfg, tautulli, reads, st, log)
+	if poller != nil {
+		// The swaps are recorded before the first scan can re-open a done row a changed setting
+		// no longer matches, so the evidence keeps its identity through the re-derived skip. A
+		// ledger read that fails here is said and retried by every poll; it stops nothing.
+		_ = poller.RecordSwaps(ctx)
+		if mx != nil {
+			mx.SetPlayback(poller.Source.Name(), poller.Rules, reads)
+		}
+	}
+
 	// WORKER NODES, only where node_token is set (docs/design/nodes.md#restart). The leases a
 	// previous process left live are recovered and taken back - or abandoned - here, before
 	// the listener accepts and before the first scan can offer a file to a node; the hub
@@ -1561,6 +1575,10 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		bg.Add(1)
 		go func() { defer bg.Done(); sweep.Run(ctx) }() // the report-only health sweep
 	}
+	if poller != nil {
+		bg.Add(1)
+		go func() { defer bg.Done(); poller.Run(ctx) }() // the report-only playback evidence poll
+	}
 
 	addr := cfg.EffectiveServerAddr()
 	httpSrv := &http.Server{Addr: addr, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
@@ -1578,13 +1596,17 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 			"notify", notifier.Enabled(),
 			"run_window", window.String(),
 			"max_load", cfg.MaxLoad,
-			"tautulli", tautulli != nil,
+			"tautulli", streamPause != nil,
 			"version", version.Version,
 		}
 		if cfg.NodesEnabled() {
 			// Said only where nodes are on, so an existing configuration's record is the
 			// one it always was.
 			listening = append(listening, "nodes_enabled", true)
+		}
+		if poller != nil {
+			// Said only where playback evidence is on, for the reason nodes_enabled is.
+			listening = append(listening, "playback_source", poller.Source.Name())
 		}
 		serve := httpSrv.ListenAndServe
 		if tlsConfig != nil {

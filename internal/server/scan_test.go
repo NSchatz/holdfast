@@ -778,6 +778,10 @@ func TestScanEndpoint_AddsNoRouteBeyondScan(t *testing.T) {
 		// The health sweep's report is a READ: the sweep never changes a file, and nothing
 		// on this route starts, stops or acts on one.
 		"GET /api/health": true,
+		// Playback evidence's report is a READ of what viewers' sessions said: nothing on this
+		// route restores, re-encodes or releases a file, and the restore command it may name
+		// is a LOCAL command an operator runs.
+		"GET /api/playback": true,
 		// The worker nodes and their leases are a READ of the hub's view and the lease
 		// ledger: the route grants, ends, adopts and re-opens no lease, and it serves no
 		// lease id, so nothing read here can be used to act on one.

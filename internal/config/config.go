@@ -60,11 +60,12 @@ var knownKeys = map[string]bool{
 	"server_addr": true, "server_auth_token": true, "server_read_token": true,
 	"scan_interval_sec": true,
 	"metrics_enable":    true, "notify_url": true, "run_window": true,
-	"max_load": true, "tautulli_url": true, "tautulli_api_key": true,
+	"max_load": true, "tautulli_url": true, "tautulli_api_key": true, tautulliPauseKey: true,
 	"bitrate_kbps": true, "encode_profiles": true,
 	"scratch_dir": true, "scratch_min_free_gb": true,
 	queueOrderKey:          true,
 	healthSweepIntervalKey: true, healthSweepWorkersKey: true,
+	playbackSourceKey: true, playbackPollKey: true, playbackFractionKey: true,
 	radarrURLKey: true, radarrAPIKeyKey: true, radarrPathMapKey: true,
 	sonarrURLKey: true, sonarrAPIKeyKey: true, sonarrPathMapKey: true,
 	plexURLKey: true, plexTokenKey: true, plexPathMapKey: true,
@@ -154,10 +155,18 @@ func defaultLayer() map[string]any {
 		"max_load":          0.0,
 		"tautulli_url":      "",
 		"tautulli_api_key":  "",
+		// The streaming pause is ON wherever Tautulli is configured, as it always was: an
+		// existing configuration pauses exactly as it did before this key existed.
+		tautulliPauseKey: true,
 		// The health sweep is OFF unless an interval is written (I5): an existing
 		// configuration schedules no decode it did not schedule before.
 		healthSweepIntervalKey: 0,
 		healthSweepWorkersKey:  1,
+		// Playback evidence is OFF unless a source is written (I5): an existing configuration
+		// asks Tautulli for nothing it did not ask before.
+		playbackSourceKey:   "",
+		playbackPollKey:     DefaultPlaybackPollMinutes,
+		playbackFractionKey: DefaultPlaybackPlayedFraction,
 		// The media-server clients are OFF until a target's address and credential are both
 		// written (I5): an existing configuration sends no request it did not send before.
 		radarrURLKey: "", radarrAPIKeyKey: "",
@@ -803,6 +812,11 @@ type Config struct {
 	// startup REFUSAL.
 	TautulliURL    string `yaml:"tautulli_url"`
 	TautulliAPIKey string `yaml:"tautulli_api_key"`
+	// TautulliPause says whether a configured Tautulli pauses new work while anything streams.
+	// nil and true (the default) do, as they always have; false keeps the Tautulli client for
+	// playback evidence alone, so `playback_source: tautulli` does not also pause reclamation
+	// every evening someone watches. See TautulliPauseEnabled.
+	TautulliPause *bool `yaml:"tautulli_pause"`
 
 	// --- the library health sweep (`serve` only; docs/design/health-sweep.md) ---
 
@@ -812,6 +826,19 @@ type Config struct {
 	HealthSweepIntervalHours int `yaml:"health_sweep_interval_hours"`
 	// HealthSweepWorkers is how many sweep decodes run at once (default 1).
 	HealthSweepWorkers int `yaml:"health_sweep_workers"`
+
+	// --- playback evidence (`serve` only; docs/design/playback-evidence.md) ---
+
+	// PlaybackSource, when "tautulli", makes `serve` read Tautulli's session history every
+	// PlaybackPollMinutes and tie each session played on a swapped file to that file, so a
+	// replacement that stalls for real viewers is reported. "" (default) = off. It reports
+	// only: nothing is restored, re-encoded or released on the strength of it.
+	PlaybackSource string `yaml:"playback_source"`
+	// PlaybackPollMinutes is the time between two polls (default 15).
+	PlaybackPollMinutes int `yaml:"playback_poll_minutes"`
+	// PlaybackPlayedFraction is the fraction of a file a session must reach to count as
+	// played through (default 0.9).
+	PlaybackPlayedFraction float64 `yaml:"playback_played_fraction"`
 
 	// --- the media-server clients (docs/design/media-clients.md, docs/post-swap-hook.md) ---
 
@@ -1983,6 +2010,9 @@ func (c *Config) validateRest() error {
 		return err
 	}
 	if err := c.validateWebhookToken(); err != nil {
+		return err
+	}
+	if err := c.validatePlayback(); err != nil {
 		return err
 	}
 	if err := c.validateNodes(); err != nil {

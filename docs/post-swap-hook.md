@@ -119,6 +119,11 @@ holdfast sees it, `to` is the same directory as that service sees it.
 The Plex play hold uses `plex_path_map` in the other direction, to turn the file Plex says it is
 playing back into the path holdfast knows it by.
 
+Playback evidence (`playback_source: tautulli`) reads `plex_path_map` in that direction too: Tautulli
+names a played file as Plex sees it, so the map turns it back into the path holdfast swapped
+([docs/design/playback-evidence.md](design/playback-evidence.md#attribution)). It needs only the map,
+not `plex_url`.
+
 The webhook intake uses `sonarr_path_map` and `radarr_path_map` in that other direction too, to
 turn the path an arr announces an import by into the path holdfast knows the file by. It needs
 neither `sonarr_url` nor `radarr_url`: the maps are read whether or not the rescan target is on

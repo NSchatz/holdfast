@@ -291,7 +291,7 @@ func TestUI_ThePageIsOpenAndTheReadGateStillStands(t *testing.T) {
 	if code := getAs(t, gated, "/assets/"+uiScript).Code; code != http.StatusOK {
 		t.Errorf("GET an asset with a read token configured and none sent: code %d, want 200", code)
 	}
-	for _, ep := range []string{"/api/summary", "/api/queue", "/api/history", "/api/health"} {
+	for _, ep := range []string{"/api/summary", "/api/queue", "/api/history", "/api/health", "/api/playback"} {
 		if code := getAs(t, gated, ep, browserAccept).Code; code != http.StatusUnauthorized {
 			t.Errorf("GET %s with no credential: code %d, want 401 - wiring a UI must not open a read", ep, code)
 		}
