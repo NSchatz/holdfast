@@ -756,10 +756,14 @@ reset
 #         guard is a comparison, not a freeze. The digest is left as it is; only the
 #         registry can say whether it matches, and the stage's own `node --version` check
 #         is what asks.
-printf '24.21.1\n' > "$repo/web/.node-version"
-sed -i 's|node:24\.21\.0-trixie-slim@|node:24.21.1-trixie-slim@|' "$repo/Dockerfile"
-grep -q 'node:24.21.1-trixie-slim@sha256:' "$repo/Dockerfile" || { echo "::error::selftest: could not bump the ui stage, so this case did NOT run" >&2; exit 1; }
-expect 0 "a Node bump made in web/.node-version AND the Dockerfile together passes" "built on Node 24\.21\.1"
+#         The bump is computed from the tree's own pin (its patch number plus one), so a real
+#         Node update never strands this case on a version the tree no longer carries.
+node_cur="$(tr -d '[:space:]' < "$repo/web/.node-version")"
+node_next="${node_cur%.*}.$(( ${node_cur##*.} + 1 ))"
+printf '%s\n' "$node_next" > "$repo/web/.node-version"
+sed -i "s|node:${node_cur//./\\.}-trixie-slim@|node:${node_next}-trixie-slim@|" "$repo/Dockerfile"
+grep -q "node:${node_next}-trixie-slim@sha256:" "$repo/Dockerfile" || { echo "::error::selftest: could not bump the ui stage from ${node_cur} to ${node_next}, so this case did NOT run" >&2; exit 1; }
+expect 0 "a Node bump made in web/.node-version AND the Dockerfile together passes" "built on Node ${node_next//./\\.}"
 reset
 
 # --- 75. The Svelte entry with its permission notice gone: the binary would embed MIT code
