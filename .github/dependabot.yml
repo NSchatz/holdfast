@@ -39,6 +39,12 @@ updates:
     commit-message:
       prefix: "build"
       include: "scope"
+    # A Node major moves by hand: from Node 25 the distribution ships no corepack, and the ui
+    # stage installs the pinned pnpm through `corepack enable pnpm`, so a major is a change to
+    # how pnpm is installed and verified (with web/.node-version), not a version move.
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "gomod"
     directory: "/"
