@@ -85,7 +85,9 @@ var knownKeys = map[string]bool{
 	downscaleAckKey:  true,
 	hwFallbackKey:    true,
 	hwDecodeKey:      true,
+	keepBitDepthKey:  true,
 	x265CPUsKey:      true,
+	x265OpenGOPKey:   true,
 	qualityKey:       true,
 	// The divisor `workers: auto` sizes the pool by. It describes the PROCESS, so a
 	// library_roots entry naming it is refused as a daemon-level key, exactly as one
@@ -211,6 +213,9 @@ func defaultLayer() map[string]any {
 		// A source is decoded in software, as every job always was: hardware decode is off
 		// until configured (docs/design/hardware.md#decode).
 		hwDecodeKey: HWDecodeSoftware,
+		// pixel_format: auto floors an 8-bit source at 10 bits, as it always has: keeping the
+		// source's depth is off until configured (docs/design/encode-plan.md#bit-depth).
+		keepBitDepthKey: false,
 		// No sidecar is written until configured (docs/design/subtitles.md#sidecars).
 		subtitleSidecarsKey: SubtitleSidecarsOff,
 		// Nothing is cropped until configured (docs/design/crop.md#crop).
@@ -221,6 +226,10 @@ func defaultLayer() map[string]any {
 		// No configured libx265 parallelism: the run derives it from the CPU quota of its
 		// own cgroup, or passes none where there is no quota to read.
 		x265CPUsKey: 0,
+		// libx265 is told nothing about GOPs and keeps its own default, open GOP: the key is
+		// unset until configured (docs/design/encode-plan.md#gop). It is a knob in profileKnobs,
+		// so it has an entry here, and the entry is the absence of a value.
+		x265OpenGOPKey: nil,
 		// The CPUs of quota one worker is sized for under `workers: auto`. It is read only
 		// when workers is auto, so the default moves no configuration that does not ask.
 		coresPerWorkerKey: DefaultCoresPerWorker,
@@ -388,6 +397,12 @@ type Config struct {
 	// reads them. A job encoded in software decodes in software. A library root may override
 	// it. See docs/design/hardware.md#decode.
 	HWDecode string `yaml:"hw_decode"`
+	// KeepBitDepth is whether `pixel_format: auto` keeps each source's own bit depth (an
+	// 8-bit source encoded 8-bit, HEVC Main under libx265) rather than flooring it at 10 (HEVC
+	// Main 10), which is the default. It never lowers a depth, so a 10-bit HDR source stays
+	// 10-bit. It is refused beside a forced pixel_format. A library root may override it. See
+	// docs/design/encode-plan.md#bit-depth.
+	KeepBitDepth *bool `yaml:"keep_bit_depth"`
 	// The audio keys, each off until configured and each overridable per library root: see
 	// Profile and docs/design/audio.md.
 	AudioReencode     string `yaml:"audio_reencode"`
@@ -410,6 +425,15 @@ type Config struct {
 	// default) or "convert" to profile 8.1 before the encode. A library root may override it.
 	// See docs/design/dynamic-hdr.md#profile-7.
 	DolbyVisionP7 string `yaml:"dolby_vision_p7"`
+	// X265OpenGOP is whether libx265 codes open GOPs (open-gop=1) or closed ones
+	// (open-gop=0). nil - absent, the default - passes nothing, and libx265 keeps its own
+	// default, which is open. Closed GOPs are what a media server's segmenter and a player
+	// that starts decoding at a keyframe other than the first need: at an open GOP's CRA
+	// keyframe the leading (RASL) pictures reference the GOP before it and must be dropped.
+	// It is a libx265 parameter and no other encoder reads it; a root none of whose files
+	// libx265 can encode refuses it at start. A library root may override it. See
+	// docs/design/encode-plan.md#gop.
+	X265OpenGOP *bool `yaml:"x265_open_gop"`
 	// CRF is the software encoders' quality knob (lower = bigger/better): libx265's
 	// and libsvtav1's constant rate factor, 0-51. Each hardware encoder's quality is
 	// set on its own scale by Quality below, and a hardware encoder with no entry there
@@ -440,8 +464,8 @@ type Config struct {
 	// (see internal/engine.svtav1Preset). Ignored by the hardware encoders.
 	Preset string `yaml:"preset"`
 	// PixelFormat is the output pixel format. "auto" (default) derives it per
-	// source — preserve chroma subsampling, floor bit-depth at 10 (see
-	// internal/hdr.DerivePixFmt); an exotic/unrecognized source pix_fmt is SKIPPED,
+	// source - preserve chroma subsampling, floor bit-depth at 10, or keep the source's
+	// depth under KeepBitDepth (see internal/hdr.DeriveOutputPixFmt); an exotic/unrecognized source pix_fmt is SKIPPED,
 	// never silently subsampled. Any other value forces that pix_fmt for every
 	// source (back-compat with TRANSCODE-1's fixed yuv420p10le behaviour).
 	PixelFormat string `yaml:"pixel_format"`
@@ -1144,6 +1168,7 @@ func (c *Config) TopLevelProfile() Profile {
 		DownscaleAck:      c.DownscaleAck,
 		HWFallback:        c.HWFallback,
 		HWDecode:          c.HWDecode,
+		KeepBitDepth:      c.KeepBitDepth,
 		AudioReencode:     c.AudioReencode,
 		AudioCodec:        c.AudioCodec,
 		AudioMonoKbps:     c.AudioMonoKbps,
@@ -1156,6 +1181,7 @@ func (c *Config) TopLevelProfile() Profile {
 		SubtitleSidecars:  c.SubtitleSidecars,
 		Crop:              c.Crop,
 		DolbyVisionP7:     c.DolbyVisionP7,
+		X265OpenGOP:       c.X265OpenGOP,
 	}
 }
 
@@ -1373,6 +1399,18 @@ func Load(path string) (*Config, error) {
 				return nil, err
 			}
 			preserveMtimeWritten = true
+		}
+	}
+
+	// x265_open_gop is a BOOLEAN, checked against the value the file or the environment
+	// CARRIED for preserve_mtime's reason: the weakly typed decoder would read 3 as true. A key
+	// written with no value is the absent key, unset, as preserve_mtime's is.
+	if explicitTop[x265OpenGOPKey] {
+		if raw := carriedValue(x265OpenGOPKey, k, kf, ke); raw != nil {
+			if err := checkX265OpenGOPValue("the top level of "+path+" (or "+envPrefix+
+				strings.ToUpper(x265OpenGOPKey)+")", raw); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -1981,6 +2019,10 @@ func (c *Config) validateRest() error {
 	for _, r := range c.RootProfiles() {
 		if err := r.Profile.validate(); err != nil {
 			return fmt.Errorf("library root %s: %w", r.Clean, err)
+		}
+		// x265_open_gop on a root libx265 never encodes is a setting nothing reads.
+		if err := c.validateX265OpenGOP(r); err != nil {
+			return err
 		}
 		// The watch's own per-value refusal, run here as well as at parse time so a
 		// Config assembled in Go rather than read from a file is held to it too. A

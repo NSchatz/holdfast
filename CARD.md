@@ -20,7 +20,7 @@ a source only after the replacement passed every gate. Public repository, AGPL.
 
 ## Hand it work
 
-`~/.local/bin/goals task add holdfast "<title>" --project <id> --body-file <spec>`
+`harness plan add holdfast "<ask>" --details-file <spec>`
 
 A spec for this repo must name:
 
@@ -54,5 +54,5 @@ Docs: <docs/... and docs/design/...#anchor>
 ## Not here
 
 - The live deployment, its compose file, mounts, GPU passthrough and routes: `homelab`.
-- The dev container and its GPU guard: `claude-containers`. The task harness: `goals`.
+- The dev container and its GPU guard: `claude-containers`. The task harness: `harness` (NSchatz/harness).
 - Python libraries (CAD, rendering, electronics and the like): `shopkit`.

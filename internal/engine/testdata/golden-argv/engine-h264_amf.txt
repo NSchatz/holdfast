@@ -115,3 +115,18 @@ row: skipped already-at-target-codec
 == crop/auto/letterbox
 (no invocation)
 row: skipped already-at-target-codec
+== keep-bit-depth/false/every-encoder
+(no invocation)
+row: skipped already-at-target-codec
+== keep-bit-depth/every-encoder
+(no invocation)
+row: skipped already-at-target-codec
+== keep-bit-depth/source-mpeg4/every-encoder
+-hide_banner -nostdin -loglevel error -y -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_amf -pix_fmt yuv420p -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== keep-bit-depth/source-ffv1-pq/every-encoder
+-hide_banner -nostdin -loglevel error -y -i <library>/ffv1-pq.mkv -map 0 -map -0:d? -c copy -c:v h264_amf -pix_fmt p010le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -vf setparams=color_primaries=bt2020:color_trc=smpte2084 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/ffv1-pq.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== keep-bit-depth/top-level/source-mpeg4
+-hide_banner -nostdin -loglevel error -y -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_amf -pix_fmt yuv420p -color_range tv -fps_mode passthrough -rc cqp -qp_i 22 -qp_p 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty

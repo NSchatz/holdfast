@@ -328,7 +328,7 @@ func TestDynamicHDR_Profile7IsSkippedByDefaultAndConvertedWhenOptedIn(t *testing
 	}
 	argv := argvWith(calls2, "libx265")
 	joined := strings.Join(argv, " ")
-	for _, want := range []string{"-f hevc -framerate 24/1 -i ", ".dynhdr1 -map 1:v:0 -map 0:1", "-dolbyvision 1"} {
+	for _, want := range []string{"-f hevc -framerate 24/1 -i ", ".dynhdr1 -map 1:v:0 -map 0:1", "-map_chapters 0", "-dolbyvision 1"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("the conversion's command line lacks %q: %s", want, joined)
 		}
@@ -577,7 +577,7 @@ func TestEncodePlan_DynamicHDRIsDeclaredFromThePrePassAndRefusedOtherwise(t *tes
 	}{
 		"profile 8.1": {dv(), []string{"-x265-params", ":vbv-maxrate=1500:vbv-bufsize=1500", "-dolbyvision 1"}},
 		"HDR10+":      {plus(), []string{`:dhdr10-info=/w/m.dynhdr0.json`}},
-		"converted":   {conv(), []string{"-f hevc -framerate 24/1 -i /w/m.dynhdr1 -map 1:v:0 -map 0:1", "-dolbyvision 1"}},
+		"converted":   {conv(), []string{"-f hevc -framerate 24/1 -i /w/m.dynhdr1 -map 1:v:0 -map 0:1", "-map_chapters 0", "-dolbyvision 1"}},
 	} {
 		job, err := derivePlanCarrying(t, cfg, src, out, c.d, false)
 		if err != nil {
@@ -598,6 +598,11 @@ func TestEncodePlan_DynamicHDRIsDeclaredFromThePrePassAndRefusedOtherwise(t *tes
 		}
 		if c.d.Intent.Convert && strings.Contains(joined, "-map 0 ") {
 			t.Errorf("%s: the source's own video is still mapped: %s", name, joined)
+		}
+		// The chapters are named from the source only where a second input exists; a
+		// single-input command line keeps the argv it always had.
+		if !c.d.Intent.Convert && strings.Contains(joined, "-map_chapters") {
+			t.Errorf("%s: a single-input command line names a chapter source: %s", name, joined)
 		}
 	}
 

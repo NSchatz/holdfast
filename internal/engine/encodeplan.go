@@ -201,7 +201,7 @@ type VideoPlan struct {
 	DecodeDevice string
 	// PixelFormat is the pixel format the video is encoded to: the one the settings force,
 	// or the one derived from the source's so that its chroma subsampling is kept and its
-	// bit depth is floored at 10.
+	// bit depth is floored at 10 - or, under keep_bit_depth, kept (planPixelFormat).
 	PixelFormat string
 	// InputFormat is the format the encoder is handed, named explicitly on the command
 	// line: a format the encoder lists that carries PixelFormat's chroma subsampling and
@@ -211,6 +211,41 @@ type VideoPlan struct {
 	InputFormat string
 	// Quality is the rate control the encode runs under.
 	Quality Quality
+	// GOP is what libx265 is told about open GOPs (docs/design/encode-plan.md#gop): the
+	// root's x265_open_gop where libx265 encodes the job, and nothing on every other plan.
+	GOP GOP
+}
+
+// GOP is what one libx265 encode is told about open GOPs. The zero value tells it nothing,
+// which is every plan whose root does not set x265_open_gop and every plan another encoder
+// writes: libx265 keeps its own default, and the command line is the one it always was.
+type GOP struct {
+	// Set says the encode is told; Open is then what it is told.
+	Set, Open bool
+}
+
+// X265Params is the fragment this GOP adds to libx265's colon-separated -x265-params string,
+// colon-led so it appends to the fragment before it, and "" for the zero value.
+func (g GOP) X265Params() string {
+	if !g.Set {
+		return ""
+	}
+	if g.Open {
+		return ":open-gop=1"
+	}
+	return ":open-gop=0"
+}
+
+// gopFor is the GOP a plan for spec under prof declares, and the one place it is derived: the
+// root's x265_open_gop where spec is libx265, and nothing where it is any other encoder,
+// which reads no x265 parameter (config.Validate refuses the key on a root libx265 never
+// encodes).
+func gopFor(spec encoder.Spec, prof config.Profile) GOP {
+	if spec.FFmpegCodec != "libx265" {
+		return GOP{}
+	}
+	open, set := prof.OpenGOP()
+	return GOP{Set: set, Open: open}
 }
 
 // HardwareDecode reports whether the source is decoded on a device (DecodeCUDA or
@@ -439,16 +474,12 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 		return nil, err
 	}
 
-	pixFmt := ts.PixelFormat
-	if ts.PixelFormatAuto() {
-		derived, ok := hdr.DerivePixFmt(props.PixFmt())
-		if !ok {
-			// The engine's pix_fmt guard runs before any plan is derived and should already
-			// have skipped an exotic source - this is a defence-in-depth backstop so the
-			// encode can never silently subsample if that guard is ever bypassed.
-			return nil, fmt.Errorf("cannot derive an output pixel format for %q (unrecognized/exotic source pix_fmt)", in.source)
-		}
-		pixFmt = derived
+	pixFmt, ok := planPixelFormat(ts, props.PixFmt())
+	if !ok {
+		// The engine's pix_fmt guard runs before any plan is derived and should already
+		// have skipped an exotic source - this is a defence-in-depth backstop so the
+		// encode can never silently subsample if that guard is ever bypassed.
+		return nil, fmt.Errorf("cannot derive an output pixel format for %q (unrecognized/exotic source pix_fmt)", in.source)
 	}
 	// The deinterlace and the scale, resolved from the profile and the source's own snapshot:
 	// the filters the encode runs, the reference the perceptual gate builds and the provenance
@@ -512,6 +543,7 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 		PixelFormat:  pixFmt,
 		InputFormat:  inputFmt,
 		Quality:      quality,
+		GOP:          gopFor(spec, in.prof),
 	}
 	p.Picture = PictureOps{Deinterlace: film, Downscale: shrink, Crop: cut}
 	// The fidelity declaration names every HDR10 block the source carries, read from its side
@@ -539,6 +571,21 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 	// The audio last: its first loudness passes are the one costly step of a derivation, so
 	// every refusal above is met before any runs.
 	return p, p.deriveAudio(in)
+}
+
+// planPixelFormat is the pixel format a job's video is encoded to, and the ONE reading of
+// pixel_format and keep_bit_depth together: the engine's pixel-format guard, the crop's
+// decision and the plan derivation all ask here, so none of them can plan a depth another
+// did not. A forced pixel_format is returned as it is. `auto` derives one from the source's
+// own format (srcPixFmt): its chroma subsampling kept and its bit depth floored at 10, or,
+// under keep_bit_depth, its bit depth kept (hdr.DeriveOutputPixFmt), which never lowers a
+// depth. ok is false where `auto` cannot derive one (an exotic or deeper-than-12-bit
+// source), and the caller skips or refuses.
+func planPixelFormat(ts config.Transcode, srcPixFmt string) (string, bool) {
+	if !ts.PixelFormatAuto() {
+		return ts.PixelFormat, true
+	}
+	return hdr.DeriveOutputPixFmt(srcPixFmt, ts.KeepBitDepth)
 }
 
 // deriveDynamic declares the dynamic HDR the output carries, from the job's pre-pass: what the
@@ -905,6 +952,9 @@ func (p *EncodePlan) buildable() error {
 			p.Video.Decode, p.Video.DecodeDevice, p.Video.Encoder.Key)}
 	case p.Video.Device != deviceFor(p.Video.Encoder, p.devices):
 		return &UnbuildablePlanError{What: fmt.Sprintf("the device %q for encoder %q", p.Video.Device, p.Video.Encoder.Key)}
+	case p.Video.GOP != gopFor(p.Video.Encoder, p.Profile):
+		return &UnbuildablePlanError{What: fmt.Sprintf("the GOP %+v for encoder %q under x265_open_gop %s",
+			p.Video.GOP, p.Video.Encoder.Key, p.Profile.OpenGOPMode())}
 	}
 	// The input format is the one the encoder's own list gives for the plan's pixel format,
 	// and nothing else: a plan naming another would hand the encoder a format that does not
@@ -935,8 +985,16 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 	// A converted profile 7 source is encoded from the converted stream, a second input read
 	// at the source's exact rate, which takes the source's video's place in the map; every
 	// other stream is still the source's (docs/design/dynamic-hdr.md#profile-7).
+	//
+	// The chapters are named from the source explicitly on this path and only on it. ffmpeg
+	// copies chapters from the first input that has any, which is the source wherever the
+	// source has them; but a second input is the one place another file could ever supply
+	// them, and the chapter-parity gate holds the output to the SOURCE's table, so the source
+	// is the only input chapters may come from. A single-input command line has nowhere else
+	// to take them from, and stays as it was.
 	if raw := p.dynamic.InputArgs(); raw != nil {
 		mapArgs = append(raw, convertedMapArgs(p.Streams, len(p.coverArt.attached) > 0)...)
+		mapArgs = append(mapArgs, "-map_chapters", "0")
 	}
 	body = append([]string(nil), mapArgs...)
 	if p.Video.Copy {
@@ -961,8 +1019,9 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 	// resampler run first would have blended two fields into every line it produced.
 	//
 	// The libx265 parallelism joins the same -x265-params string as the colour block, ahead
-	// of it, and is "" when the run carries none. Every other family ignores the string, so
-	// their argv cannot move with it.
+	// of it, and is "" when the run carries none; the GOP follows it, and is "" where the root
+	// does not set x265_open_gop. Every other family ignores the string, so their argv cannot
+	// move with it.
 	//
 	// Every encoder but libx265 takes its colour primaries and transfer from the frames it is
 	// handed, not from -color_primaries/-color_trc, so the declared ones are stamped onto the
@@ -970,7 +1029,7 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 	// to - after them, and before any upload to a hardware surface. libx265 writes them from
 	// its own parameters, and its command line does not change.
 	video := videoArgs(p.Video, p.Metadata.Color.FFmpegFlags(),
-		x265.Params()+p.Metadata.Color.X265Params()+p.dynamic.X265Params())
+		x265.Params()+p.Video.GOP.X265Params()+p.Metadata.Color.X265Params()+p.dynamic.X265Params())
 	if p.Video.Encoder.FFmpegCodec != "libx265" {
 		video = withHeadFilter(video, p.Metadata.Color.SetParams())
 	}

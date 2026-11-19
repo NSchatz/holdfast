@@ -153,9 +153,9 @@ func TestNodeFixture_AnHTTPModeLeaseIsGrantedInHTTPModeAndItsSourceIsStreamedAnd
 	if got := f.streamedOnceRecorded(a.LeaseID); got != want {
 		t.Fatalf("the server recorded %q for what it streamed, want the source's sha-256 %s", got, want)
 	}
-	if n := f.transfers(); n != 0 {
-		t.Errorf("%d transfer slot(s) are still held after the stream", n)
-	}
+	// The slot is released by a defer that runs after the handler has written its response,
+	// so it is waited for rather than read the instant the digest appears.
+	eventually(t, "the stream's transfer slot to be released", func() bool { return f.transfers() == 0 })
 
 	if up := f.put(a.LeaseID, a.Epoch, output, digestOf(output)); up.status != http.StatusOK {
 		t.Fatalf("upload: %d %s", up.status, up.body)
@@ -403,9 +403,7 @@ func TestNodeFixture_ASourceThatIsNotTheLeasedFileIsRefused(t *testing.T) {
 		if got := f.streamed(a.LeaseID); got != "" {
 			t.Errorf("%s recorded a streamed digest", what)
 		}
-		if n := f.transfers(); n != 0 {
-			t.Errorf("%s holds %d transfer slot(s)", what, n)
-		}
+		eventually(t, what+" to release its transfer slot", func() bool { return f.transfers() == 0 })
 	}
 	// Same size, a later modification time.
 	if err := os.Chtimes(job.Path, fi.ModTime().Add(time.Second), fi.ModTime().Add(time.Second)); err != nil {
@@ -554,9 +552,7 @@ func TestNodeFixture_SourceStreamsAndUploadsShareTheTransferCap(t *testing.T) {
 	if r := <-answered; r.status != http.StatusOK {
 		t.Fatalf("the upload answered %d %s", r.status, r.body)
 	}
-	if n := f.transfers(); n != 0 {
-		t.Errorf("%d transfer slot(s) are held after everything ended", n)
-	}
+	eventually(t, "every transfer slot to be released after everything ended", func() bool { return f.transfers() == 0 })
 }
 
 // TestNodeFixture_ASourceStreamEndsWhenItsLeaseDoes: a source is streamed only on a live
@@ -936,9 +932,10 @@ func TestNodeFixture_ASymlinkSwappedInAtTheLeasedPathIsNeverFollowed(t *testing.
 	if !strings.Contains(string(r.body), "symbolic link") {
 		t.Errorf("the refusal does not say a symbolic link stands there: %s", r.body)
 	}
-	if got := f.streamed(a.LeaseID); got != "" || f.transfers() != 0 {
-		t.Errorf("the refused request recorded %q and holds %d transfer slot(s)", got, f.transfers())
+	if got := f.streamed(a.LeaseID); got != "" {
+		t.Errorf("the refused request recorded %q", got)
 	}
+	eventually(t, "the refused request to release its transfer slot", func() bool { return f.transfers() == 0 })
 	if row := f.row(a.LeaseID); row.State != store.LeaseGranted || call.returned() {
 		t.Errorf("the refused request moved the lease to %s", row.State)
 	}

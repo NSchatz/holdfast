@@ -46,7 +46,7 @@ one value it derives, and refuses a plan carrying any other (below).
 
 | Part | What this build declares | Read by |
 |---|---|---|
-| `Video` | the registry encoder and the device it opens (the render node for `vaapi`, none for every other encoder); the decode path (software, `DecodeSoftware`); the pixel format (forced, or derived from the source's); the quality value (`crf`, or `bitrate_kbps`, and the preset); the codec the output must be in, or a copy of the source's video on a remux-only root | the command line; the codec gate; on a copy, the video-identity check |
+| `Video` | the registry encoder and the device it opens (the render node for `vaapi`, none for every other encoder); the decode path (software, `DecodeSoftware`); the pixel format (forced, or derived from the source's); the quality value (`crf`, or `bitrate_kbps`, and the preset); the GOP libx265 is told (`x265_open_gop`, [below](#gop)), and nothing for any other encoder; the codec the output must be in, or a copy of the source's video on a remux-only root | the command line; the codec gate; on a copy, the video-identity check |
 | `Audio`, `Subtitles` | every carried stream is copied (`CopyStreams`) | the command line |
 | `AudioTracks` | what the encode does to each audio track: copied (and why), re-encoded in place, kept beside its added re-encode, a stereo downmix added, the codec, layout, sample rate and bitrate of each, and the first loudness pass's figures where one is normalised ([docs/design/audio.md](audio.md)); the zero plan copies every track | the command line; the stream-parity gate's additions; the audio and loudness gates; the row's `audio_tracks` |
 | `Streams` | the intended stream map: which source streams the output carries (the same value the row's dropped streams are recorded from) | the command line; the stream-parity gate |
@@ -85,8 +85,8 @@ the encoder's own refusal always recorded, and the encoder is then never called.
 
 **The plan names the format the encoder is handed, from the encoder's own list, and a plan
 the encoder cannot carry exactly is never derived.** `Video.PixelFormat` is what the output
-is meant to be (the source's chroma subsampling, depth floored at 10, or a forced
-`pixel_format`); `Video.InputFormat` is the format the encoder receives: that format where
+is meant to be (the source's chroma subsampling, depth floored at 10 or - under
+`keep_bit_depth` - [kept](#bit-depth), or a forced `pixel_format`); `Video.InputFormat` is the format the encoder receives: that format where
 the encoder lists it, else the planar or semi-planar spelling of the same chroma and depth
 that it lists (`yuv420p10le` is `p010le` on NVENC, QSV and AMF), chosen once by
 `encoder.Spec.InputFormat` from the registry's copy of the pinned binary's "Supported pixel
@@ -118,6 +118,95 @@ encoders moved to name their input format (and VAAPI to upload `p010le`), and ev
 held by `TestGoldenArgv_EveryArgvNamesItsPixelFormat` to name a format its encoder lists.
 libx265 and libsvtav1 are handed every format they list unchanged.
 
+## Open and closed GOPs
+
+<a id="gop"></a>
+
+**libx265 is told about GOPs only where a root sets `x265_open_gop`, and an unset key passes
+nothing.** The plan declares `Video.GOP` from the effective profile, only for libx265:
+`x265_open_gop: false` appends `:open-gop=0` to `-x265-params`, after the run's parallelism and
+ahead of the colour block, and `true` appends `:open-gop=1`, on the quality and the bitrate path
+alike. Every other encoder's plan declares nothing, and the builder refuses a plan whose GOP is
+not the one its derivation gives (`gopFor`).
+
+Unset is the default because a new instruction to the encoder changes the command line and so the
+profile digest every terminal row records: a configuration that did not ask for it keeps the
+argv and the digest it had. The key is digested only where it is set, on the conditional terms
+the deinterlace knob set.
+
+The recommendation is closed GOPs (`false`) for any library a media server streams. libx265's
+own default is open GOPs: each keyframe after the first is a CRA, and its leading pictures in
+display order (RASL) reference the GOP before it. A decoder that starts at a CRA - a player
+seeking or resuming, a segmenter cutting HLS, DASH or fragmented MP4 there, a hardware decoder
+handed one segment - must drop those pictures. That path is legal and most decoders take it,
+but it is the one the gates do not exercise: the decode-integrity gate is one linear decode from
+the first frame, which never starts at a CRA. Under closed GOPs every keyframe is an IDR with no
+picture referencing across it, so a cold start anywhere decodes everything it is handed. It costs
+a little compression, which is why it is a choice rather than a change to every library.
+
+The key is a libx265 parameter. A root whose files libx265 can encode - its own encoder, a
+rule's, an encode profile's, or the software fallback `hw_fallback: software` gives a hardware
+HEVC encoder or `auto` - accepts it, and it applies to exactly the jobs libx265 encodes. A root
+none of whose files libx265 can encode refuses it at start, naming the key: on such a root it is
+a setting nothing reads, and an operator who wrote it would believe their library had closed
+GOPs. A real libx265 encode under each value proves what reaches the bitstream: a CRA with RASL
+pictures at the keyframe interval unset or under `true`, and an IDR with none under `false`
+(`TestX265OpenGOP_ReachesTheBitstream`).
+
+## The output bit depth
+
+<a id="bit-depth"></a>
+
+**Under `pixel_format: auto` an 8-bit source is encoded at 10 bits unless the root asks to keep
+its depth; no setting ever plans a source shallower than it is.** `hdr.DeriveOutputPixFmt` is
+the one derivation, and `planPixelFormat` the one place the engine reads it, so the
+pixel-format guard, the crop's decision and the plan cannot disagree about a depth:
+
+| source | `keep_bit_depth` unset or `false` (default) | `keep_bit_depth: true` |
+|---|---|---|
+| 8-bit (`yuv420p`, `yuvj420p`, `yuv422p`, `yuv444p`) | 10-bit, same chroma (`yuv420p10le`): HEVC Main 10 under libx265 | 8-bit, same chroma (`yuv420p`): HEVC Main under libx265 |
+| 10-bit or 12-bit, SDR or HDR10/HLG | its own depth | its own depth (identical plan) |
+| exotic, or deeper than 12 bits | skipped (`exotic-pixel-format`) | skipped (`exotic-pixel-format`) |
+
+**Why 10 bits is the default.** An 8-bit source encoded at 10 bits compresses slightly better at
+the same quality target and does not add banding in smooth gradients, because the encoder's
+quantisation and in-loop filters work in the finer steps; libx265 and the AV1 encoders all do
+it well. That is why the derivation has floored at 10 since the first build, and why every
+configuration that does not set the key keeps doing so: `keep_bit_depth` unset or `false`
+contributes nothing to `Profile.Digest()` and changes no command line (the golden argv cases
+`keep-bit-depth/false` are byte-identical to `base`).
+
+**Why a library would keep 8 bits.** The 10-bit output changes which clients can direct play the
+file. 8-bit HEVC Main decodes in hardware on more devices, browsers and TVs than HEVC Main 10,
+and a client that cannot direct play the replacement makes the media server transcode it on
+every play (issue #200). An H.264 output at 10 bits (High 10) has almost no hardware decode
+support at all. So a library whose clients direct play 8-bit HEVC but not Main 10 sets
+`keep_bit_depth: true` and accepts the slightly larger, banding-prone 8-bit output.
+
+**What it never does.** It never lowers a depth: a 10-bit HDR10 or HLG source is a 10-bit plan
+with or without it, so it cannot push an HDR source to 8 bits. It changes only how `auto`
+derives a depth, so it is refused at start beside a forced `pixel_format` on the same root (one
+of the two would be silently ignored); an encode profile's own `pixel_format` names the format
+for the files it selects and wins there.
+
+**Every encoder in the registry carries an 8-bit 4:2:0 plan** (`TestKeepBitDepth_ThePlanOnEveryEncoder`):
+libx265, libsvtav1, libx264, NVENC and AMF are handed `yuv420p`, QSV is handed `nv12`, and
+VAAPI uploads `nv12` with no `-profile:v main10` (the Main 10 profile is named only for a
+`p010le` upload). An 8-bit 4:2:2 or 4:4:4 plan, and a deeper source the key keeps, are held to
+the encoder's list exactly as any plan is ([above](#explicit-pixel-format)): where it lists no
+format of that chroma and depth the file is skipped as `exotic-pixel-format` and the derivation
+refuses it again by name, never handed to ffmpeg to auto-select. The key widens what two
+encoders carry: `h264_qsv` and `h264_vaapi` list 8 bits only, so under the floor they skip
+every 8-bit source, and under the key they encode it. That skip records `keep_bit_depth` beside
+`pixel_format` and `encoder`, so turning the key on offers those files back.
+
+**The gates agree with it by construction.** The fidelity declaration is taken from the plan's
+pixel format ([below](#fidelity)), so an 8-bit plan holds the output to 8 bits and an encoder
+that promoted it to 10 is rejected by `bit-depth`; the VMAF gate's comparison format is the
+deeper of the two streams' depths, which for an 8-bit source and an 8-bit output is `yuv420p`
+(`TestKeepBitDepth_An8BitSourceIsReplacedAt8Bits` encodes one with the pinned ffmpeg and checks
+both).
+
 ## The output fidelity gate
 
 <a id="fidelity"></a>
@@ -144,7 +233,7 @@ https://github.com/FFmpeg/FFmpeg/blob/5d4d3bdc61/fftools/ffmpeg_mux_init.c , rea
 proposal P2). The gate does not depend on the command line being right: it measures the file.
 
 What the plan declares it changes is part of the declaration, so it is never a mismatch: the
-bit-depth floor (8 to 10), a configured `pixel_format`, and the HDR10 tag defaults a source
+bit-depth floor (8 to 10) or its absence under `keep_bit_depth`, a configured `pixel_format`, and the HDR10 tag defaults a source
 carrying HDR10 metadata but under-signalling its tags is given. A tag the plan writes nothing
 for - the source signals none - has nothing to lose and is not compared.
 

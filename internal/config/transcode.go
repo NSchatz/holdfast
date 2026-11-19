@@ -90,6 +90,13 @@ type Transcode struct {
 	ContainerExt string
 	BitrateKbps  int
 
+	// KeepBitDepth is the library root's keep_bit_depth (Profile.BitDepthKept): whether a
+	// derived pixel format keeps the source's bit depth rather than flooring it at 10. It is
+	// read only where PixelFormat is auto, by the engine's planPixelFormat. It is the root's (or its
+	// rule-resolved profile's) and no encode profile can move it: an encode profile that wants
+	// a different depth for the files it selects names the format outright with pixel_format.
+	KeepBitDepth bool
+
 	// EncoderQuality is the `quality.<key>` entry the configuration carries for THIS
 	// job's encoder (its registry key, whatever alias the encoder was named by), and
 	// EncoderQualitySet reports whether there is one. Where there is none, the encoder
@@ -142,6 +149,7 @@ func (c *Config) BaseTranscode(prof Profile) Transcode {
 		PixelFormat:  prof.PixelFormat,
 		ContainerExt: prof.ContainerExt,
 		BitrateKbps:  c.BitrateKbps,
+		KeepBitDepth: prof.BitDepthKept(),
 	})
 }
 

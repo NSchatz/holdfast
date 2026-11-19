@@ -217,7 +217,8 @@ image `h264_amf` and `av1_amf` are refused exactly as `amf` is, naming `h264_vaa
 - **8-bit only on two of them.** `h264_qsv` lists no 10-bit format, and `h264_vaapi` uploads
   only `nv12` (ASSUMED: no VAAPI driver is documented taking a 10-bit H.264 surface), while the
   derived `pixel_format` of every source is at least 10-bit. With `pixel_format: auto` they skip
-  every file as `exotic-pixel-format`; set `pixel_format: yuv420p` for them. Whether
+  every file as `exotic-pixel-format`; set [`keep_bit_depth: true`](#keep-bit-depth) for them
+  (8-bit sources then encode, 10-bit ones still skip) or `pixel_format: yuv420p`. Whether
   `h264_nvenc` and `h264_amf` encode 10-bit is the device's to say: the start-time probe finds
   out, and a 10-bit plan on a device that failed it is skipped as `hardware-unavailable`.
 - **`encoder: auto` is unchanged**: it chooses among the HEVC hardware encoders only, so a
@@ -260,6 +261,36 @@ job, which `hw_fallback` then decides. It is a library root knob with a top-leve
 `hw_fallback`; the start-time probe runs under the top level's value. The reasoning, and the
 exact command lines, are in
 [docs/design/hardware.md](design/hardware.md#decode).
+
+## `keep_bit_depth` - 8-bit sources stay 8-bit
+
+<a id="keep-bit-depth"></a>
+
+```yaml
+keep_bit_depth: false      # the default: pixel_format: auto encodes an 8-bit source at 10 bits
+# keep_bit_depth: true     # keep each source's own bit depth: 8-bit in, 8-bit out
+```
+
+Under `pixel_format: auto` an 8-bit source is encoded at 10 bits by default: under `cpu` the
+output is HEVC Main 10. Main 10 compresses slightly better at the same quality target and
+avoids banding in smooth gradients, which is why it is the default. But it changes which
+clients can direct play the file: many browsers, TVs and set-top boxes decode 8-bit HEVC (Main)
+in hardware and not Main 10, and a media server then transcodes the replacement on every play
+where it direct played the source. `keep_bit_depth: true` keeps each source's own depth, so an
+8-bit source is replaced by an 8-bit output (HEVC Main under `cpu`, `yuv420p` on every encoder;
+VAAPI uploads `nv12` without the Main 10 profile), at the cost of a slightly larger file and
+the banding risk 10 bits avoids.
+
+It only ever keeps a depth, never lowers one: a 10-bit or 12-bit source, SDR or HDR10/HLG, is
+planned at its own depth exactly as without the key, so an HDR source is never pushed to 8 bits.
+An encoder that lists no format of a kept depth and chroma (a 10-bit source on `h264_qsv` or
+`h264_vaapi`, an 8-bit 4:2:2 source on `qsv`) skips the file as `exotic-pixel-format`, as any
+plan it cannot carry is skipped. It changes only how `auto` derives a depth, so it is refused at
+start beside a forced `pixel_format` on the same root; an encode profile cannot carry it, and an
+encode profile's own `pixel_format` names the format outright for the files it selects. It is a
+library root knob with a top-level default. Unset or `false` it moves no profile digest and no
+command line. The reasoning is in
+[docs/design/encode-plan.md](design/encode-plan.md#bit-depth).
 ## `subtitle_sidecars` - text subtitles copied beside the replacement
 
 <a id="subtitle-sidecars"></a>
@@ -324,6 +355,33 @@ skips a profile 7 source whatever this says. A row skipped under `skip` records 
 switching to `convert` offers it back. It is a library root knob with a top-level default, like
 `subtitle_sidecars`. The rules and their reasoning are in
 [docs/design/dynamic-hdr.md](design/dynamic-hdr.md#profile-7).
+
+## `x265_open_gop` - open or closed GOPs in libx265
+
+<a id="x265-open-gop"></a>
+
+```yaml
+# x265_open_gop:          # the default, unset: nothing is passed, libx265 keeps its own default (open)
+x265_open_gop: false      # recommended for a media-server library: open-gop=0, every keyframe an IDR
+# x265_open_gop: true     # open-gop=1, explicitly
+```
+
+Unset, a libx265 encode is told nothing about GOPs and libx265 codes open ones: each keyframe after
+the first is a CRA picture, and the pictures that lead it in display order (RASL) reference the GOP
+before it. A decoder that starts at that CRA - a player resuming or seeking, a media server's
+HLS or DASH segmenter cutting a stream there, a hardware decoder handed one segment - has to drop
+those pictures, and the gates' one linear decode from the first frame never takes that path.
+`false` passes `open-gop=0`: every keyframe is an IDR that decodes on its own, at a small cost in
+compression. It is the recommended value for a library Plex, Jellyfin or Emby streams or
+remuxes. `true` passes `open-gop=1`, libx265's default stated explicitly.
+
+The key applies only where libx265 encodes the job (`encoder: cpu`, or a rule, an encode profile or
+`hw_fallback: software` that hands the job to it); every other encoder reads no x265 parameter and
+its command line does not move. A root none of whose files libx265 can encode refuses the key at
+start, naming it. Unset, a root's profile digest is what it was before the key existed; either
+written value changes the command line and the digest. It is a library root knob with a top-level
+default; an encode profile does not carry it. The reasoning is in
+[docs/design/encode-plan.md](design/encode-plan.md#gop).
 
 ## `exclude_paths` and `include_paths` - which paths this tool may touch
 

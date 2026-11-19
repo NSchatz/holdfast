@@ -213,6 +213,21 @@ var pixFmtRe = regexp.MustCompile(`^yuv(j?)(420|422|444)p(\d*)(le|be)?$`)
 // etc.) returns ok=false — the caller must SKIP rather than silently subsample or
 // guess.
 func DerivePixFmt(srcPixFmt string) (out string, ok bool) {
+	return DeriveOutputPixFmt(srcPixFmt, false)
+}
+
+// DeriveOutputPixFmt is DerivePixFmt with the depth rule chosen: keepDepth false floors
+// the depth at 10, exactly as DerivePixFmt does (it is that function); keepDepth true
+// keeps the source's own depth, so an 8-bit source is encoded 8-bit (yuv420p -> yuv420p,
+// yuvj420p -> yuv420p, yuv422p -> yuv422p) and a 10- or 12-bit one keeps its depth exactly
+// as it would under the floor. It never LOWERS a depth under either rule: the floor only
+// raises an 8-bit source, and keeping a depth is keeping it, so a 10-bit HDR10 or HLG source
+// is a 10-bit plan whichever is asked for. The chroma subsampling, the refusal of an exotic
+// format and the 12-bit ceiling are the same under both.
+//
+// keepDepth is the profile's keep_bit_depth (docs/design/encode-plan.md#bit-depth): a
+// library whose clients direct play 8-bit HEVC but not Main 10 asks for it.
+func DeriveOutputPixFmt(srcPixFmt string, keepDepth bool) (out string, ok bool) {
 	p, ok := ParsePixFmt(srcPixFmt)
 	if !ok {
 		return "", false
@@ -223,7 +238,7 @@ func DerivePixFmt(srcPixFmt string) (out string, ok bool) {
 	if p.Depth > 12 {
 		return "", false
 	}
-	if p.Depth < 10 {
+	if p.Depth < 10 && !keepDepth {
 		p.Depth = 10 // floor at 10-bit (8 -> 10: better compression, no banding)
 	}
 	return p.String(), true

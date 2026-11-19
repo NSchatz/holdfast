@@ -13,7 +13,8 @@ import (
 
 // The chroma/bit-depth guard, extended to the encoder: a plan whose pixel format - derived or
 // forced - the job's encoder lists no exact carrier for is SKIPPED under exotic-pixel-format
-// before anything is encoded, recording both keys the verdict read. Without it, ffmpeg would
+// before anything is encoded, recording the keys the verdict read: the pixel format, the
+// encoder and keep_bit_depth, which decides the depth a derived plan asks the encoder for. Without it, ffmpeg would
 // auto-select a lossier format behind -loglevel error: a 4:2:2 plan into libsvtav1 silently
 // becomes 4:2:0. libsvtav1 is the encoder these cases run on because it is a real encoder
 // this container has whose list (yuv420p yuv420p10le) cannot carry 4:2:2: were the guard
@@ -55,8 +56,11 @@ func TestPixelFormatGuard_SkipsAPlanTheEncoderCannotCarry(t *testing.T) {
 				t.Fatalf("row %v %q (found %v), want skipped %s", status, out.Reason, found, SkipExoticPixelFormat)
 			}
 			in := out.DecisionInputs
-			if got := strings.Join(in.Keys(), ","); got != InputEncoder+","+InputPixelFormat {
-				t.Errorf("the row recorded inputs %q, want the encoder and the pixel format the verdict read", got)
+			if got := strings.Join(in.Keys(), ","); got != InputEncoder+","+InputKeepBitDepth+","+InputPixelFormat {
+				t.Errorf("the row recorded inputs %q, want the encoder, keep_bit_depth and the pixel format the verdict read", got)
+			}
+			if v, _ := in.Value(InputKeepBitDepth); v != "false" {
+				t.Errorf("recorded keep_bit_depth %q, want false (unset)", v)
 			}
 			if v, _ := in.Value(InputEncoder); v != "svtav1" {
 				t.Errorf("recorded encoder %q", v)

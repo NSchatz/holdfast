@@ -13,6 +13,7 @@ Where each part of the repository lives and what it owns.
 - `internal/startup` - the whole-run start-or-refuse decision over the storage every path sits on, taken before anything else runs.
 - `internal/probe` - ffprobe/ffmpeg inspection: codec, bitrate, duration, packets.
 - `internal/hdr` - colour, HDR and pixel-format fidelity.
+- `internal/chapters` - the chapter-parity gate: the output carries the source's chapter table.
 - `internal/deinterlace`, `internal/downscale` - what a `deinterlace` or a `max_height` value means: one filter
   expression the encoder, the perceptual gate and the terminal row all read.
 - `internal/vmaf` - libvmaf via ffmpeg; the perceptual gate.

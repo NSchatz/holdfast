@@ -115,3 +115,18 @@ row: skipped already-at-target-codec
 == crop/auto/letterbox
 (no invocation)
 row: skipped already-at-target-codec
+== keep-bit-depth/false/every-encoder
+(no invocation)
+row: skipped already-at-target-codec
+== keep-bit-depth/every-encoder
+(no invocation)
+row: skipped already-at-target-codec
+== keep-bit-depth/source-mpeg4/every-encoder
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== keep-bit-depth/source-ffv1-pq/every-encoder
+(no invocation)
+row: skipped exotic-pixel-format
+== keep-bit-depth/top-level/source-mpeg4
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty

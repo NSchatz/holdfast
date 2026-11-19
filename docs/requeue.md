@@ -16,7 +16,7 @@ configuration values **the decision that wrote it actually read**, and no others
 | `skipped / low-bitrate` | `min_bitrate_kbps` - the threshold the source was compared against |
 | `skipped / already-at-target-codec` | `target_codec` - what `encoder` resolves to (`cpu` -> `hevc`, `svtav1` -> `av1`) |
 | `skipped / better-codec-family` | `target_codec`, exactly as the row above: a new target codec offers the file back |
-| `skipped / exotic-pixel-format` | `pixel_format`; and `encoder` too where the skip was the encoder's (it lists no format carrying the plan's chroma and depth), so changing either offers the file back |
+| `skipped / exotic-pixel-format` | `pixel_format`; and `encoder` and `keep_bit_depth` too where the skip was the encoder's (it lists no format carrying the plan's chroma and depth), so changing any of them offers the file back (a row an older build wrote records no `keep_bit_depth`, and turning it on does not re-open that row: `requeue --guard exotic-pixel-format` does) |
 | `skipped / target-already-exists` | `container_ext` |
 | `done` | `target_codec`, `encoder`, `crf`, `preset` - the settings the encode was taken under, resolved for the **replacement's** path |
 | `skipped / undetermined-source-height` | `rules` - the band list its root carries. That guard read no threshold at all: what it read was that the root selects thresholds by a height nobody could establish |

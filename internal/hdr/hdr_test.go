@@ -260,6 +260,63 @@ func TestDerivePixFmt(t *testing.T) {
 	}
 }
 
+// TestDeriveOutputPixFmt_KeepDepthKeepsAndNeverLowers grades keep_bit_depth's derivation: an
+// 8-bit source keeps 8 bits in its own chroma, every deeper source keeps exactly the depth the
+// floor gives it (so a 10-bit HDR source is never pushed down), and every refusal is the
+// floor's. Without the key the answer is DerivePixFmt's, case for case.
+func TestDeriveOutputPixFmt_KeepDepthKeepsAndNeverLowers(t *testing.T) {
+	cases := []struct {
+		src    string
+		want   string
+		wantOk bool
+	}{
+		{"yuv420p", "yuv420p", true},
+		{"yuvj420p", "yuv420p", true},
+		{"yuv422p", "yuv422p", true},
+		{"yuv444p", "yuv444p", true},
+		{"yuv420p10le", "yuv420p10le", true},
+		{"yuv420p10be", "yuv420p10be", true},
+		{"yuv420p12le", "yuv420p12le", true},
+		{"yuv422p10le", "yuv422p10le", true},
+		{"yuv444p12le", "yuv444p12le", true},
+		{"yuv420p16le", "", false},
+		{"rgb24", "", false},
+		{"yuv411p", "", false},
+		{"gray", "", false},
+		{"", "", false},
+		{"nv12", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.src, func(t *testing.T) {
+			got, ok := DeriveOutputPixFmt(tc.src, true)
+			if ok != tc.wantOk || got != tc.want {
+				t.Errorf("DeriveOutputPixFmt(%q, keep) = (%q, %v), want (%q, %v)", tc.src, got, ok, tc.want, tc.wantOk)
+			}
+			floor, floorOK := DerivePixFmt(tc.src)
+			off, offOK := DeriveOutputPixFmt(tc.src, false)
+			if off != floor || offOK != floorOK {
+				t.Errorf("DeriveOutputPixFmt(%q, false) = (%q, %v), DerivePixFmt says (%q, %v)", tc.src, off, offOK, floor, floorOK)
+			}
+			if !ok {
+				return
+			}
+			kept, _ := ParsePixFmt(got)
+			src, _ := ParsePixFmt(tc.src)
+			floored, _ := ParsePixFmt(floor)
+			if kept.Depth != src.Depth || kept.Chroma != src.Chroma {
+				t.Errorf("keep: %q -> %q changes depth or chroma", tc.src, got)
+			}
+			if src.Depth >= 10 && got != floor {
+				t.Errorf("keep: a %d-bit source %q derives %q, the floor %q: keeping must never differ from the floor at 10 bits or more",
+					src.Depth, tc.src, got, floor)
+			}
+			if kept.Depth > floored.Depth {
+				t.Errorf("keep: %q is deeper than the floor's %q", got, floor)
+			}
+		})
+	}
+}
+
 // TestDeriveColor_TheDescriptionAndBothRenderingsExactly grades DeriveColor field by field and
 // both of its renderings byte for byte, for each shape of source the encoder meets. The
 // rendering is what every encode's command line carried before the description existed

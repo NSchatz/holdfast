@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/NSchatz/holdfast/internal/audio"
+	"github.com/NSchatz/holdfast/internal/chapters"
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/crop"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
@@ -203,6 +204,17 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 	}
 	if err := plan.CheckOutputAdding(outStreams, job.addedStreams()); err != nil {
 		return none, GateStreamParity, store.FailureDeterministic, err
+	}
+
+	// 5a. CHAPTER PARITY: the output carries the source's chapter table - the same chapters,
+	// titled and placed as the source's are - and every chapter the source places inside the
+	// film lies inside the output (docs/design/swap.md#chapter-parity). Chapters are not a
+	// stream, so the check above cannot count them, and nothing after it looks at them: an
+	// output whose chapters were dropped or pushed past its end passes every other gate. A
+	// remux is held to it too, since it copies the chapters exactly as an encode does.
+	// DETERMINISTIC: the same source, configuration and ffmpeg build write the same table.
+	if err := e.chapterParity(ctx, in, tmp); err != nil {
+		return none, GateChapters, store.FailureDeterministic, err
 	}
 
 	// 5b. OUTPUT FIDELITY: the output carries what the plan declares it carries - the bit
@@ -501,6 +513,36 @@ func (e *Engine) lengthParity(ctx context.Context, in, out string) (store.Failur
 		}
 	}
 	return "", nil
+}
+
+// chapterParity is gate 5a on its own: out carries in's chapter table (chapters.Check). A
+// table that cannot be read on either side REJECTS - an unknown table is not an empty one,
+// and an output whose chapters cannot be compared must not replace a source that has them.
+//
+// A source whose OWN table is malformed (a chapter past its end, ending before it starts,
+// overlapping the one before it) is not refused for it: the output reproducing that table
+// exactly has damaged nothing, so parity passes it, and the defect is logged so the operator
+// learns the table was already broken before the swap (docs/design/swap.md#chapter-parity).
+func (e *Engine) chapterParity(ctx context.Context, in, out string) error {
+	src, ok := e.Probe.Chapters(ctx, in)
+	if !ok {
+		return fmt.Errorf("chapter parity could not be established: the source's chapter table could not " +
+			"be read (ffprobe did not answer). The source is kept")
+	}
+	got, ok := e.Probe.Chapters(ctx, out)
+	if !ok {
+		return fmt.Errorf("chapter parity could not be established: the output's chapter table could not " +
+			"be read (ffprobe did not answer). The source is kept")
+	}
+	malformed, err := chapters.Check(src, got, e.Cfg.DurationToleranceSec)
+	if err != nil {
+		return fmt.Errorf("%w. The source is kept", err)
+	}
+	if len(malformed) > 0 && e.Log != nil {
+		e.Log.Warn("the source's own chapter table is malformed; the output reproduces it exactly, so the "+
+			"chapter gate passes it", "file", in, "defects", malformed)
+	}
+	return nil
 }
 
 // vmafGate measures the output (distorted) against the source (reference), in ONE pixel
