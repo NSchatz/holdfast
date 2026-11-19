@@ -106,7 +106,7 @@ func TestPlayback_AReopenedSwapKeepsItsEvidence(t *testing.T) {
 
 // TestPlayback_AReplacedOrRestoredFileSupersedesItsSwap: another file at the path, a restore, and
 // a newer swap each end the swap, at the earliest second the ledger shows for it; its sessions
-// are no longer evidence. A tie on the second goes to the greater fingerprint.
+// are no longer evidence. Between two rows in the same second, the one inserted last is newer.
 func TestPlayback_AReplacedOrRestoredFileSupersedesItsSwap(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
@@ -191,6 +191,69 @@ func TestPlayback_AReplacedOrRestoredFileSupersedesItsSwap(t *testing.T) {
 	}
 }
 
+// TestPlayback_ARequeueOfAnOlderFileDoesNotSupersedeTheSwap: a row an earlier file at the path
+// left, which a requeue re-opens, gets a transition time later than the swap's - it is still the
+// older file, and the swap stays current with its evidence. A swap whose mark the ledger no longer
+// supports is current again, on positive evidence only.
+func TestPlayback_ARequeueOfAnOlderFileDoesNotSupersedeTheSwap(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	// An earlier download failed at the path, then the file that replaced it was swapped.
+	seedJobRow(t, s, "/lib/film.mkv", "500:1", Failed, 100)
+	seedJobRow(t, s, "/lib/film.mkv", "300:2", Done, 1000)
+	if _, _, err := s.RecordSwaps(ctx, 1100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecordPlaybackSessions(ctx, []PlaybackSession{{Source: "tautulli", SessionID: "1",
+		Path: "/lib/film.mkv", Fingerprint: "300:2", StartedAt: 1200, RecordedAt: 1300}}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.Reopen(ctx, "/lib/film.mkv", "500:1", true); err != nil || !ok {
+		t.Fatalf("requeue the older row: %v %v", ok, err)
+	}
+	if _, superseded, err := s.RecordSwaps(ctx, 9_000_000_000); err != nil || superseded != 0 {
+		t.Fatalf("after the requeue: %d superseded, %v", superseded, err)
+	}
+	sameList(t, "swaps", swapsOf(t, s), []string{"/lib/film.mkv@300:2:1000:0:true"})
+	if ev, err := s.PlaybackEvidence(ctx); err != nil || len(ev) != 1 {
+		t.Errorf("evidence after the requeue: %+v, %v", ev, err)
+	}
+
+	// A mark nothing in the ledger supports any longer is lifted ...
+	if _, err := s.db.Exec(`UPDATE playback_swaps SET superseded_at = 5000`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.RecordSwaps(ctx, 9_000_000_001); err != nil {
+		t.Fatal(err)
+	}
+	sameList(t, "swaps after the mark is lifted", swapsOf(t, s), []string{"/lib/film.mkv@300:2:1000:0:true"})
+	// ... but only on positive evidence: with no jobs row at the path at all, or with a restore
+	// recorded, a superseded swap stays superseded.
+	seedJobRow(t, s, "/lib/gone.mkv", "1:1", Done, 1000)
+	if err := s.Retain(ctx, Retained{SourcePath: "/lib/kept.mkv", SwappedPath: "/lib/kept.mkv", RetainedPath: "/x",
+		SourceBytes: 1, SwappedFingerprint: "2:2", RetainedAt: 1000, ExpiresAt: 9000}); err != nil {
+		t.Fatal(err)
+	}
+	seedJobRow(t, s, "/lib/kept.mkv", "2:2", Done, 1000)
+	if _, _, err := s.RecordSwaps(ctx, 2000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM jobs WHERE path = '/lib/gone.mkv'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkRestored(ctx, "/lib/kept.mkv", 2500); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE playback_swaps SET superseded_at = 3000 WHERE path != '/lib/film.mkv'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.RecordSwaps(ctx, 4000); err != nil {
+		t.Fatal(err)
+	}
+	sameList(t, "swaps", swapsOf(t, s), []string{"/lib/film.mkv@300:2:1000:0:true",
+		"/lib/gone.mkv@1:1:1000:3000:false", "/lib/kept.mkv@2:2:1000:3000:false"})
+}
+
 // TestPlayback_SessionsAreRecordedOnceAndReadBackWithTheirNulls: a session already recorded is
 // left as it was and not counted again; a NULL reads back as nil and never as 0, which for an
 // offset would be a session that never left the first frame.
@@ -266,7 +329,7 @@ func TestPlayback_PollStateRoundTrips(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT covered_through FROM playback_polls`).Scan(&covered); err != nil || covered != nil {
 		t.Errorf("covered_through stored as %v (%v), want NULL", covered, err)
 	}
-	want := PlaybackPoll{Source: "tautulli", Cursor: 30, CoveredThrough: 25, LastAttemptAt: 40}
+	want := PlaybackPoll{Source: "tautulli", Cursor: 30, CoveredThrough: 25, LastAttemptAt: 40, Unresolved: 6}
 	if err := s.SetPlaybackPoll(ctx, want); err != nil {
 		t.Fatal(err)
 	}

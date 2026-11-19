@@ -1065,6 +1065,11 @@ dry_run: false
 #                              #   transcoding). tautulli_url is an ADDRESS and stays
 #                              #   plain; tautulli_api_key is a SECRET REFERENCE:
 #                              #     tautulli_api_key: file:/run/secrets/tautulli-key
+# tautulli_pause: true         # with Tautulli configured, pause new work while anything
+#                              #   streams (true, the default: what Tautulli has always
+#                              #   done here). false keeps Tautulli for playback evidence
+#                              #   only, so playback_source: tautulli does not also stop
+#                              #   reclamation whenever someone watches.
 # playback_source: tautulli   # playback evidence, OFF unset (the default). serve reads
 #                              #   Tautulli's session history (tautulli_url and
 #                              #   tautulli_api_key above, both required), ties each

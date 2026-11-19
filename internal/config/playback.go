@@ -11,6 +11,8 @@ import (
 // file a session must reach to count as played through. All of it is off until
 // playback_source is written.
 const (
+	// tautulliPauseKey turns the streaming pause off while keeping Tautulli configured.
+	tautulliPauseKey    = "tautulli_pause"
 	playbackSourceKey   = "playback_source"
 	playbackPollKey     = "playback_poll_minutes"
 	playbackFractionKey = "playback_played_fraction"
@@ -37,6 +39,11 @@ const DefaultPlaybackPlayedFraction = 0.9
 // MinPlaybackPlayedFraction is the lowest fraction accepted. A session that stopped half way
 // through is not a playback anybody would call complete.
 const MinPlaybackPlayedFraction = 0.5
+
+// TautulliPauseEnabled reports whether a configured Tautulli pauses new work while anything
+// streams: true unless tautulli_pause: false is written. It says nothing about whether Tautulli
+// is configured at all; a configuration with no tautulli_url pauses on nothing either way.
+func (c *Config) TautulliPauseEnabled() bool { return c.TautulliPause == nil || *c.TautulliPause }
 
 // PlaybackEnabled reports whether this configuration collects playback evidence.
 func (c *Config) PlaybackEnabled() bool { return strings.TrimSpace(c.PlaybackSource) != "" }

@@ -973,7 +973,19 @@ changes, and a file swapped since the last good read stays `unknown`.
 
 `playback_source` accepts `tautulli` only; `plex` is refused with the reason (Plex's own history
 records only completed views, so it cannot see a stall), and `tautulli` without both Tautulli keys
-refuses to start. The two figures refuse a value outside their range, naming the key. None of the
+refuses to start.
+
+Configuring Tautulli has always also turned on the **streaming pause**: no new work starts while
+Tautulli reports a stream. A library whose reclamation should not stop every evening someone
+watches writes `tautulli_pause: false` (the default is `true`, so an existing configuration pauses
+exactly as before): Tautulli is then read for playback evidence and nothing else.
+
+```yaml
+tautulli_url: http://tautulli:8181
+tautulli_api_key: file:/run/secrets/tautulli-api-key
+tautulli_pause: false        # read Tautulli for evidence; do not pause while anything streams
+playback_source: tautulli
+``` The two figures refuse a value outside their range, naming the key. None of the
 three is a library root knob or an encode setting, so none moves a profile digest. The reasoning,
 the verdicts and what is assumed about Tautulli are in
 [docs/design/playback-evidence.md](design/playback-evidence.md#playback-evidence).

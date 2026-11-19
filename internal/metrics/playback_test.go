@@ -50,7 +50,7 @@ func TestMetrics_PlaybackSeries(t *testing.T) {
 	st := openStore(t)
 	seedPlayback(t, st)
 	names := []string{"holdfast_playback_suspect_files ", "holdfast_playback_played_through_files ",
-		"holdfast_playback_history_read_timestamp_seconds "}
+		"holdfast_playback_history_read_timestamp_seconds ", "holdfast_playback_unresolved_sessions "}
 
 	m := New(st, nil)
 	absent := func(when string) {
@@ -71,12 +71,12 @@ func TestMetrics_PlaybackSeries(t *testing.T) {
 	absent("after a poll that never read the history to its end")
 
 	if err := st.SetPlaybackPoll(context.Background(), store.PlaybackPoll{Source: "tautulli", Cursor: 1,
-		CoveredThrough: 1_790_000_000, LastAttemptAt: 1_790_000_000}); err != nil {
+		CoveredThrough: 1_790_000_000, LastAttemptAt: 1_790_000_000, Unresolved: 3}); err != nil {
 		t.Fatal(err)
 	}
 	body := scrape(t, m)
 	for _, want := range []string{"holdfast_playback_suspect_files 1", "holdfast_playback_played_through_files 1",
-		"holdfast_playback_history_read_timestamp_seconds 1.79e+09"} {
+		"holdfast_playback_history_read_timestamp_seconds 1.79e+09", "holdfast_playback_unresolved_sessions 3"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the scrape does not carry %q", want)
 		}

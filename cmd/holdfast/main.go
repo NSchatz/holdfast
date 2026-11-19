@@ -1463,9 +1463,8 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	// only ever DELAYS work. The engine consults it (throttled) between files; Rescan
 	// consults it before starting a scan.
 	window, _ := schedule.ParseWindow(cfg.RunWindow) // already validated
-	tautulli := schedule.NewTautulli(cfg.TautulliURL,
-		cfg.SecretRef("tautulli_api_key"), secrets.Get("tautulli_api_key"))
-	sched := schedule.New(window, cfg.MaxLoad, tautulli, log)
+	tautulli, streamPause := tautulliClients(cfg, secrets)
+	sched := schedule.New(window, cfg.MaxLoad, streamPause, log)
 	ctrl.SetGate(func() (bool, string) { return sched.MayRun(ctx) })
 	eng.Paused = func() bool {
 		if ctrl.Paused() {
@@ -1582,7 +1581,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 			"notify", notifier.Enabled(),
 			"run_window", window.String(),
 			"max_load", cfg.MaxLoad,
-			"tautulli", tautulli != nil,
+			"tautulli", streamPause != nil,
 			"version", version.Version,
 		}
 		if cfg.NodesEnabled() {

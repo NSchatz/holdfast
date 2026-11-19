@@ -756,7 +756,8 @@ CREATE INDEX IF NOT EXISTS idx_node_leases_ended ON node_leases(ended_at);
 		//
 		// A poll row carries the cursor the next poll reads from, and covered_through, the time
 		// the newest poll that read the history to its end began; it is NULL until one has, so
-		// a file nobody could ask about reads as unknown and never as unplayed.
+		// a file nobody could ask about reads as unknown and never as unplayed. unresolved_rows
+		// is how many sessions the newest successful poll could tie to no file.
 		name: "playback evidence",
 		// Three empty tables and one index. A swap and a session are recorded by the daemon's
 		// poll, never by a migration, and a fabricated one would be evidence about a playback
@@ -769,6 +770,7 @@ CREATE TABLE IF NOT EXISTS playback_polls (
 	covered_through INTEGER,
 	last_attempt_at INTEGER NOT NULL,
 	last_failure    TEXT NOT NULL,
+	unresolved_rows INTEGER NOT NULL,
 	schema_version  INTEGER
 );
 CREATE TABLE IF NOT EXISTS playback_swaps (

@@ -59,6 +59,9 @@ type Poller struct {
 	failing bool
 	// stuck is how many polls in a row stopped at their page bound without moving the cursor.
 	stuck int
+	// resume is where the last stored incomplete read stopped. It moves only once a read's
+	// sessions are in the ledger, so a read whose sessions were lost is read again.
+	resume Resume
 	// reported is the files already reported as suspected stalls, so each is said once per
 	// process and again only after it stopped being one.
 	reported map[fileKey]bool
@@ -106,6 +109,9 @@ type PollResult struct {
 	Read, Recorded int
 	// Complete is whether the history was read to its end.
 	Complete bool
+	// Named is how many of the rows read named an item, and Unresolved how many of those the
+	// source resolved to no single file.
+	Named, Unresolved int
 	// Failure is the class the poll failed with, "" when it did not.
 	Failure string
 	// Suspects is every file the evidence now says stalls.
@@ -160,13 +166,13 @@ func (p *Poller) PollOnce(ctx context.Context) PollResult {
 	state.Source, state.LastAttemptAt = p.Source.Name(), start.Unix()
 
 	res.Asked = true
-	rows, read, err := p.Source.Sessions(ctx, time.Unix(since, 0))
+	rows, read, err := p.Source.Sessions(ctx, time.Unix(since, 0), p.resume)
 	if err != nil {
 		res.Failure = ClassOf(err)
 		p.fail(ctx, state, res.Failure, err)
 		return res
 	}
-	res.Read, res.Complete = len(rows), read.Complete
+	res.Read, res.Complete, res.Named, res.Unresolved = len(rows), read.Complete, read.Named, read.Unresolved
 
 	sessions := p.attribute(rows, swaps, start.Unix())
 	n, err := p.Writes.RecordPlaybackSessions(ctx, sessions)
@@ -176,6 +182,7 @@ func (p *Poller) PollOnce(ctx context.Context) PollResult {
 		return res
 	}
 	res.Recorded = n
+	p.resume = read.Resume
 
 	// Where the next poll reads from. A poll that read to the end covers everything up to the
 	// moment it began, and the next reads again from the overlap before that. One that stopped
@@ -183,6 +190,7 @@ func (p *Poller) PollOnce(ctx context.Context) PollResult {
 	// so a run of music or of rows before since cannot hold it in place - with no overlap, so a
 	// backlog is always read forward.
 	state.LastFailure = ""
+	state.Unresolved = int64(read.Unresolved)
 	switch {
 	case read.Complete:
 		state.Cursor = start.Add(-HistoryOverlap).Unix()
@@ -214,6 +222,16 @@ func (p *Poller) PollOnce(ctx context.Context) PollResult {
 	if !read.Complete {
 		p.Log.Info("playback evidence: the history is longer than one poll reads; the next poll continues from here",
 			"source", p.Source.Name(), "history_rows_read", len(rows))
+	}
+	switch {
+	case read.Unresolved > 0 && read.Unresolved == read.Named:
+		p.Log.Warn("playback evidence: no session read this poll could be tied to a file, because the source "+
+			"named none for any of their items; a Tautulli that cannot reach Plex answers this way, and until "+
+			"it can, no session is evidence", "source", p.Source.Name(), "sessions_without_a_file", read.Unresolved)
+	case read.Unresolved > 0:
+		p.Log.Info("playback evidence: some sessions named an item the source resolved to no single file "+
+			"(several versions, an item it no longer knows, or an answer it refused); they are evidence about nothing",
+			"source", p.Source.Name(), "sessions_without_a_file", read.Unresolved, "sessions_with_an_item", read.Named)
 	}
 	res.Suspects = p.reportSuspects(ctx, start.Unix())
 	return res

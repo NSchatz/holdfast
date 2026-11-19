@@ -45,7 +45,9 @@ the file it ended, which is the one fact a stall is made of. The client is the T
 streaming pause already holds (`tautulli_url`, `tautulli_api_key`), so the key is the one resolved
 at start, it travels in the query string as before, and every failure leaves through the same
 sanitizer, naming the command and the key's reference and never the request URL
-([docs/secrets.md](../secrets.md)).
+([docs/secrets.md](../secrets.md)). Configuring Tautulli has always turned the streaming pause on;
+`tautulli_pause: false` keeps the client for evidence alone, so collecting evidence does not also
+stop new work whenever someone watches.
 
 Two commands are sent, both reads:
 
@@ -110,8 +112,16 @@ codec, `x265_open_gop`, `keep_bit_depth`) or a `requeue` re-opens it, and the gu
 its first scan, records every done row and every live retention's swapped file as a swap - path,
 fingerprint and the second it committed - in `playback_swaps`, and a swap stays **current** while:
 
-- the newest jobs row at its path, of ANY status, still carries its fingerprint (or there is none);
+- the jobs row INSERTED last at its path, of ANY status, still carries its fingerprint (or there is
+  none);
 - and no restore of it is recorded.
+
+Insertion order is the row's `rowid`, which no update moves. Ordering by transition time instead
+would let a `requeue` of a row an earlier download left at the path - which bumps that row's time -
+read as a new file and erase the evidence. A new row at the path is a scan meeting a file with
+another fingerprint there. A swap marked superseded that the ledger shows current again (its
+fingerprint on the row inserted last, no restore) is unmarked; the mere absence of rows is not
+enough.
 
 When either stops holding - an operator restored the original, or another file arrived at the path
 and the scan recorded it - the swap is superseded at the earliest second the ledger shows for that,
@@ -189,8 +199,15 @@ the streaming pause shares small.
   covered until one reaches its end. Each continues from the newest row the last one went through,
   SKIPPED rows included, so a run of music or of rows before the cursor cannot hold it in place;
   and because Tautulli's `after` is a whole date, a read under the same date as an incomplete one
-  continues from the row offset that one reached rather than from the first row of the day. If
-  three polls in a row stop at the bound without moving, one `warn` record says so.
+  continues from the row offset that one reached rather than from the first row of the day. That
+  offset moves only once the read's sessions are in the ledger: a read whose sessions could not be
+  stored is read again, not skipped. If three polls in a row stop at the bound without moving, one
+  `warn` record says so.
+- **Sessions tied to no file are counted.** A session whose item Tautulli resolves to no single
+  file is evidence about nothing; how many there were in the newest successful poll is recorded,
+  reported, and said - at `info` when some, at `warn` when every session of the poll, because
+  that is what a Tautulli that cannot reach Plex answers. An answer that names no file is kept for
+  one read only, so evidence resumes as soon as Tautulli can name the file again.
 - **When nothing is swapped**, Tautulli is not asked.
 - **It fails open.** A request that fails, an answer that is not the documented shape and a result
   other than `success` end the poll with a failure class (`request-failed`, `unparseable-response`,
@@ -213,8 +230,9 @@ the streaming pause shares small.
   collected, where the poll has got to, every current swap counted by verdict, and every suspected
   stall with its cluster, its sessions and the restore command where it applies
   ([docs/api-reference.md](../api-reference.md#playback)).
-- **Metrics:** `holdfast_playback_suspect_files`, `holdfast_playback_played_through_files` and
-  `holdfast_playback_history_read_timestamp_seconds`, read at scrape time through the reporting
+- **Metrics:** `holdfast_playback_suspect_files`, `holdfast_playback_played_through_files`,
+  `holdfast_playback_unresolved_sessions` and `holdfast_playback_history_read_timestamp_seconds`,
+  read at scrape time through the reporting
   door - never on the one write connection the engine's claims and finishes go through - and
   absent until a poll has read the history to its end: a library nobody has asked about is not a
   library with no stalls.

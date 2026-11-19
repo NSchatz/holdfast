@@ -126,3 +126,43 @@ func TestPlayback_ZeroMeansTheDefault(t *testing.T) {
 		t.Error("a blank source enabled playback evidence")
 	}
 }
+
+// TestTautulliPause_OnUnlessWrittenOff: the streaming pause stays what it always was unless
+// tautulli_pause: false is written, in the file or the environment; a value that is not a boolean
+// refuses to start, naming the key; and a Config built in Go with nothing set pauses.
+func TestTautulliPause_OnUnlessWrittenOff(t *testing.T) {
+	cfg, err := loadHealthYAML(t, tautulliKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.TautulliPauseEnabled() {
+		t.Error("a configuration that does not write tautulli_pause does not pause")
+	}
+	cfg, err = loadHealthYAML(t, tautulliKeys+"tautulli_pause: false\nplayback_source: tautulli\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TautulliPauseEnabled() || !cfg.PlaybackEnabled() {
+		t.Errorf("tautulli_pause: false: pause %v, evidence %v", cfg.TautulliPauseEnabled(), cfg.PlaybackEnabled())
+	}
+	if cfg, err := loadHealthYAML(t, tautulliKeys+"tautulli_pause: true\n"); err != nil || !cfg.TautulliPauseEnabled() {
+		t.Errorf("tautulli_pause: true: %v", err)
+	}
+	if _, err := loadHealthYAML(t, tautulliKeys+"tautulli_pause: sometimes\n"); err == nil ||
+		!strings.Contains(err.Error(), "tautulli_pause") {
+		t.Errorf("a value that is not a boolean: %v", err)
+	}
+	t.Setenv("HOLDFAST_TAUTULLI_PAUSE", "false")
+	if cfg, err := loadHealthYAML(t, tautulliKeys); err != nil || cfg.TautulliPauseEnabled() {
+		t.Errorf("HOLDFAST_TAUTULLI_PAUSE=false: %v", err)
+	}
+	var c Config
+	if !c.TautulliPauseEnabled() {
+		t.Error("a Config built in Go does not pause")
+	}
+	off := false
+	c.TautulliPause = &off
+	if c.TautulliPauseEnabled() {
+		t.Error("false did not turn the pause off")
+	}
+}

@@ -6,7 +6,22 @@ import (
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/playback"
 	"github.com/NSchatz/holdfast/internal/schedule"
+	"github.com/NSchatz/holdfast/internal/secret"
 )
+
+// tautulliClients builds the one Tautulli client from tautulli_url and the resolved
+// tautulli_api_key, and says which of its two readers gets it. The client is nil when Tautulli is
+// not configured. pause is the client the scheduler pauses new work on while anything streams:
+// the client itself under tautulli_pause: true (the default, what every configuration did before
+// the key existed), and nil under tautulli_pause: false, so playback evidence can read Tautulli's
+// history without reclamation stopping every evening someone watches.
+func tautulliClients(cfg *config.Config, secrets *secret.Set) (client, pause *schedule.Tautulli) {
+	client = schedule.NewTautulli(cfg.TautulliURL, cfg.SecretRef("tautulli_api_key"), secrets.Get("tautulli_api_key"))
+	if client != nil && cfg.TautulliPauseEnabled() {
+		pause = client
+	}
+	return client, pause
+}
 
 // newPlaybackPoller builds the daemon's playback evidence poller, or nil when the configuration
 // collects none (playback_source unset, the default) - docs/design/playback-evidence.md.

@@ -40,7 +40,8 @@ func TestReport_CountsEveryCurrentSwapByVerdict(t *testing.T) {
 			on("/lib/partial.mkv", "1:1", at("q", 1000, film)),
 			on("/lib/tie.mkv", "b", at("t", film, film)),
 		},
-		poll: &store.PlaybackPoll{Source: "tautulli", Cursor: 1, CoveredThrough: 500, LastAttemptAt: 700, LastFailure: ClassRequest},
+		poll: &store.PlaybackPoll{Source: "tautulli", Cursor: 1, CoveredThrough: 500, LastAttemptAt: 700, LastFailure: ClassRequest,
+			Unresolved: 7},
 		retained: map[string]store.Retained{
 			"/lib/stall.mkv": {SourcePath: "/lib/stall.mkv", SwappedPath: "/lib/stall.mkv", SwappedFingerprint: "new"},
 		},
@@ -58,7 +59,7 @@ func TestReport_CountsEveryCurrentSwapByVerdict(t *testing.T) {
 		t.Errorf("rules %+v", rep.Rules)
 	}
 	if rep.LastAttemptAt == nil || *rep.LastAttemptAt != 700 || rep.LastFailure == nil || *rep.LastFailure != ClassRequest ||
-		rep.CoveredThrough == nil || *rep.CoveredThrough != 500 {
+		rep.CoveredThrough == nil || *rep.CoveredThrough != 500 || rep.UnresolvedSessions == nil || *rep.UnresolvedSessions != 7 {
 		t.Errorf("poll %v %v %v", rep.LastAttemptAt, rep.LastFailure, rep.CoveredThrough)
 	}
 	// stall, played, partial (unplayed), covered (unplayed, no session), late (unknown: swapped
@@ -100,7 +101,7 @@ func TestReport_OffAndEmptyIsStatedAsSuch(t *testing.T) {
 	}
 	b, _ := json.Marshal(rep)
 	for _, want := range []string{`"enabled":false`, `"source":""`, `"poll_minutes":0`, `"last_attempt_at":null`,
-		`"last_failure":null`, `"covered_through":null`, `"suspects":[]`, `"played_fraction":0.9`} {
+		`"last_failure":null`, `"covered_through":null`, `"unresolved_sessions":null`, `"suspects":[]`, `"played_fraction":0.9`} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("%s does not carry %s", b, want)
 		}

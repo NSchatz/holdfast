@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,5 +60,91 @@ func TestPlaybackPoller_OffUnlessASourceIsWritten(t *testing.T) {
 	}
 	if p := newPlaybackPoller(cfg, nil, st, st, log); p != nil || !strings.Contains(buf.String(), "resolved to an empty value") {
 		t.Errorf("no client: poller %v, records %q", p, buf.String())
+	}
+}
+
+// TestTautulliPause_OffKeepsEvidenceWithoutHoldingWork: with tautulli_pause: false a configured
+// Tautulli that reports a stream holds no new work, while playback evidence still reads its
+// history through the same client; with the key unset (the default) the stream holds work as it
+// always did.
+func TestTautulliPause_OffKeepsEvidenceWithoutHoldingWork(t *testing.T) {
+	var historyReads int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("cmd") {
+		case "get_activity":
+			_, _ = w.Write([]byte(`{"response":{"result":"success","data":{"stream_count":"1"}}}`))
+		case "get_history":
+			historyReads++
+			_, _ = w.Write([]byte(`{"response":{"result":"success","data":{"recordsFiltered":0,"data":[]}}}`))
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "tautulli-key")
+	if err := os.WriteFile(keyFile, []byte("SYNTHETIC-KEY\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	load := func(extra string) (*config.Config, *secret.Set) {
+		t.Helper()
+		p := filepath.Join(dir, "config.yaml")
+		body := "library_roots: [" + filepath.Join(dir, "lib") + "]\ntautulli_url: " + srv.URL +
+			"\ntautulli_api_key: file:" + keyFile + "\nplayback_source: tautulli\n" + extra
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		refs, err := cfg.SecretRefs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		secrets, err := secret.Resolve(context.Background(), refs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg, secrets
+	}
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	cfg, secrets := load("tautulli_pause: false\n")
+	client, pause := tautulliClients(cfg, secrets)
+	if client == nil || pause != nil {
+		t.Fatalf("tautulli_pause: false: client %v, pause %v", client, pause)
+	}
+	if ok, why := schedule.New(schedule.Window{}, 0, pause, log).MayRun(ctx); !ok {
+		t.Errorf("a stream held new work with the pause off: %s", why)
+	}
+	src := newPlaybackPoller(cfg, client, nil, nil, log)
+	if src == nil {
+		t.Fatal("no evidence poller with the pause off")
+	}
+	if _, _, err := src.Source.Sessions(ctx, time.Unix(1_790_000_000, 0), playback.Resume{}); err != nil || historyReads != 1 {
+		t.Errorf("evidence did not read the history: %v, %d reads", err, historyReads)
+	}
+
+	cfg, secrets = load("")
+	client, pause = tautulliClients(cfg, secrets)
+	if client == nil || pause != client {
+		t.Fatalf("the default: client %v, pause %v", client, pause)
+	}
+	if ok, why := schedule.New(schedule.Window{}, 0, pause, log).MayRun(ctx); ok || !strings.Contains(why, "streaming") {
+		t.Errorf("the default pause did not hold new work during a stream: %v %q", ok, why)
+	}
+
+	// No Tautulli at all: neither.
+	if client, pause := tautulliClients(&config.Config{}, nil); client != nil || pause != nil {
+		t.Errorf("no Tautulli: %v %v", client, pause)
 	}
 }

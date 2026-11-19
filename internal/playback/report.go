@@ -103,6 +103,10 @@ type Report struct {
 	LastAttemptAt  *int64  `json:"last_attempt_at"`
 	LastFailure    *string `json:"last_failure"`
 	CoveredThrough *int64  `json:"covered_through"`
+	// UnresolvedSessions is how many sessions the newest successful poll read whose item the
+	// source resolved to no single file, null before any poll. All of a poll's sessions here is
+	// what a Tautulli that cannot reach Plex looks like.
+	UnresolvedSessions *int64 `json:"unresolved_sessions"`
 	// Counts is every current swapped file by verdict.
 	Counts ReportCounts `json:"counts"`
 	// Suspects is every suspected stall, path order.
@@ -200,6 +204,7 @@ func BuildReport(ctx context.Context, r Reader, cfg *config.Config, now time.Tim
 		}
 		if ok {
 			rep.LastAttemptAt = &poll.LastAttemptAt
+			rep.UnresolvedSessions = &poll.Unresolved
 			if poll.LastFailure != "" {
 				f := poll.LastFailure
 				rep.LastFailure = &f

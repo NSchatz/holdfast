@@ -60,7 +60,7 @@ var knownKeys = map[string]bool{
 	"server_addr": true, "server_auth_token": true, "server_read_token": true,
 	"scan_interval_sec": true,
 	"metrics_enable":    true, "notify_url": true, "run_window": true,
-	"max_load": true, "tautulli_url": true, "tautulli_api_key": true,
+	"max_load": true, "tautulli_url": true, "tautulli_api_key": true, tautulliPauseKey: true,
 	"bitrate_kbps": true, "encode_profiles": true,
 	"scratch_dir": true, "scratch_min_free_gb": true,
 	queueOrderKey:          true,
@@ -155,6 +155,9 @@ func defaultLayer() map[string]any {
 		"max_load":          0.0,
 		"tautulli_url":      "",
 		"tautulli_api_key":  "",
+		// The streaming pause is ON wherever Tautulli is configured, as it always was: an
+		// existing configuration pauses exactly as it did before this key existed.
+		tautulliPauseKey: true,
 		// The health sweep is OFF unless an interval is written (I5): an existing
 		// configuration schedules no decode it did not schedule before.
 		healthSweepIntervalKey: 0,
@@ -809,6 +812,11 @@ type Config struct {
 	// startup REFUSAL.
 	TautulliURL    string `yaml:"tautulli_url"`
 	TautulliAPIKey string `yaml:"tautulli_api_key"`
+	// TautulliPause says whether a configured Tautulli pauses new work while anything streams.
+	// nil and true (the default) do, as they always have; false keeps the Tautulli client for
+	// playback evidence alone, so `playback_source: tautulli` does not also pause reclamation
+	// every evening someone watches. See TautulliPauseEnabled.
+	TautulliPause *bool `yaml:"tautulli_pause"`
 
 	// --- the library health sweep (`serve` only; docs/design/health-sweep.md) ---
 

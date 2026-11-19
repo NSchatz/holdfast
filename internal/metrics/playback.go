@@ -41,10 +41,10 @@ func (m *Metrics) SetPlayback(source string, rules playback.Rules, reads Playbac
 // playbackCollector reports the suspected stalls, the files played through, and how far the
 // history has been read.
 type playbackCollector struct {
-	log                     *slog.Logger
-	cfg                     atomic.Pointer[playbackConfig]
-	now                     func() time.Time
-	suspect, played, polled *prometheus.Desc
+	log                                 *slog.Logger
+	cfg                                 atomic.Pointer[playbackConfig]
+	now                                 func() time.Time
+	suspect, played, polled, unresolved *prometheus.Desc
 }
 
 func newPlaybackCollector(log *slog.Logger) *playbackCollector {
@@ -57,6 +57,8 @@ func newPlaybackCollector(log *slog.Logger) *playbackCollector {
 			"Swapped files a session has played through since the swap, and no stall is suspected in. Absent until a poll has read the history to its end.", nil, nil),
 		polled: prometheus.NewDesc("holdfast_playback_history_read_timestamp_seconds",
 			"Unix time the newest poll that read the playback history to its end began. Absent until one has.", nil, nil),
+		unresolved: prometheus.NewDesc("holdfast_playback_unresolved_sessions",
+			"Sessions the newest successful playback poll read whose item the source resolved to no single file, so they are evidence about nothing. All of a poll's sessions here is what a Tautulli that cannot reach Plex looks like. Absent until a poll has read the history to its end.", nil, nil),
 	}
 }
 
@@ -64,6 +66,7 @@ func (c *playbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.suspect
 	ch <- c.played
 	ch <- c.polled
+	ch <- c.unresolved
 }
 
 func (c *playbackCollector) Collect(ch chan<- prometheus.Metric) {
@@ -91,4 +94,5 @@ func (c *playbackCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.suspect, prometheus.GaugeValue, float64(suspect))
 	ch <- prometheus.MustNewConstMetric(c.played, prometheus.GaugeValue, float64(played))
 	ch <- prometheus.MustNewConstMetric(c.polled, prometheus.GaugeValue, float64(poll.CoveredThrough))
+	ch <- prometheus.MustNewConstMetric(c.unresolved, prometheus.GaugeValue, float64(poll.Unresolved))
 }

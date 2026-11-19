@@ -174,7 +174,7 @@ func TestTautulli_ReadsEveryPageInOrderWithTheDocumentedParameters(t *testing.T)
 	}
 	src, _ := newFake(t, f)
 	src.PageSize = 2
-	rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0))
+	rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{})
 	if err != nil || !read.Complete {
 		t.Fatalf("Sessions: read %+v, err %v", read, err)
 	}
@@ -222,7 +222,7 @@ func TestTautulli_TheReadEndsAtRecordsFilteredOrAtItsPageBound(t *testing.T) {
 	f := mk()
 	src, _ := newFake(t, f)
 	src.PageSize = 2
-	if rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0)); err != nil || !read.Complete || len(rows) != 4 {
+	if rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{}); err != nil || !read.Complete || len(rows) != 4 {
 		t.Fatalf("exact pages: %d rows, read %+v, %v", len(rows), read, err)
 	}
 	if len(f.history) != 2 {
@@ -233,7 +233,7 @@ func TestTautulli_TheReadEndsAtRecordsFilteredOrAtItsPageBound(t *testing.T) {
 	f.noTotal = true
 	src, _ = newFake(t, f)
 	src.PageSize = 2
-	if rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0)); err != nil || !read.Complete || len(rows) != 4 {
+	if rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{}); err != nil || !read.Complete || len(rows) != 4 {
 		t.Fatalf("no total: %d rows, read %+v, %v", len(rows), read, err)
 	}
 	if len(f.history) != 3 {
@@ -243,7 +243,7 @@ func TestTautulli_TheReadEndsAtRecordsFilteredOrAtItsPageBound(t *testing.T) {
 	f = mk()
 	src, _ = newFake(t, f)
 	src.PageSize, src.MaxPages = 1, 3
-	rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0))
+	rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{})
 	if err != nil || read.Complete || len(rows) != 3 || rows[2].ID != "3" || read.Newest != since+2 {
 		t.Fatalf("page bound: %d rows, read %+v, %v", len(rows), read, err)
 	}
@@ -301,7 +301,7 @@ func TestTautulli_RowsItCannotUseAreSkippedOrKeptWithNoFile(t *testing.T) {
 		noLength, stringStarted, noKey, zeroStopped, negative, full, over, under, gone}
 	f.items["6"] = "absent" // answered with no data at all
 	src, _ := newFake(t, f)
-	rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0))
+	rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{})
 	if err != nil || !read.Complete {
 		t.Fatalf("Sessions: %+v %v", read, err)
 	}
@@ -382,7 +382,7 @@ func TestTautulli_AFailedReadIsAFailureOfItsClassAndCarriesNoKey(t *testing.T) {
 			f := ok()
 			tc.break_(f)
 			src, _ := newFake(t, f)
-			rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0))
+			rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{})
 			if err == nil || rows != nil || read != (Read{}) {
 				t.Fatalf("rows %v, read %+v, err %v", rows, read, err)
 			}
@@ -403,7 +403,7 @@ func TestTautulli_AFailedReadIsAFailureOfItsClassAndCarriesNoKey(t *testing.T) {
 	src, _ := newFake(t, f)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := src.Sessions(ctx, time.Unix(since, 0)); err == nil || len(f.history) != 0 {
+	if _, _, err := src.Sessions(ctx, time.Unix(since, 0), Resume{}); err == nil || len(f.history) != 0 {
 		t.Errorf("a cancelled read: %v, %d requests", err, len(f.history))
 	}
 	if ClassOf(errors.New("plain")) != ClassRequest {
@@ -441,8 +441,8 @@ func TestTautulli_NumbersInEveryShape(t *testing.T) {
 }
 
 // TestTautulli_ARefusedItemNamesNoFileAndFailsNothing: an item Tautulli refuses (a 500, an error
-// result) or answers in a shape this does not read names no file for its rows, the read goes on,
-// and the next row of that item asks again; only a request it never answers fails the read.
+// result) or answers in a shape this does not read names no file for its rows, the read goes on
+// and counts them, and the next read asks again; only a request it never answers fails the read.
 func TestTautulli_ARefusedItemNamesNoFileAndFailsNothing(t *testing.T) {
 	for name, breakIt := range map[string]func(f *fakeTautulli){
 		"a 500":                func(f *fakeTautulli) { f.items["77"] = "fail500" },
@@ -454,15 +454,22 @@ func TestTautulli_ARefusedItemNamesNoFileAndFailsNothing(t *testing.T) {
 				rows: []map[string]any{row(1, since, 77, 5), row(2, since+1, 78, 5), row(3, since+2, 77, 5)}}
 			breakIt(f)
 			src, _ := newFake(t, f)
-			rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0))
+			rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{})
 			if err != nil || !read.Complete || len(rows) != 3 {
 				t.Fatalf("rows %+v, read %+v, err %v", rows, read, err)
 			}
 			if rows[0].File != "" || rows[1].File != "/m/G.mkv" || rows[2].File != "" {
 				t.Errorf("files %q %q %q", rows[0].File, rows[1].File, rows[2].File)
 			}
-			if f.meta["77"] != 2 {
-				t.Errorf("a refused item was asked %d times for two rows, want 2 (it is not kept)", f.meta["77"])
+			if read.Named != 3 || read.Unresolved != 2 {
+				t.Errorf("named %d, unresolved %d; want 3 and 2", read.Named, read.Unresolved)
+			}
+			if f.meta["77"] != 1 {
+				t.Errorf("a refused item was asked %d times in one read, want once", f.meta["77"])
+			}
+			// The next read asks again: a refusal is not kept.
+			if _, _, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{}); err != nil || f.meta["77"] != 2 {
+				t.Errorf("the next read: asked %d times, %v", f.meta["77"], err)
 			}
 		})
 	}
@@ -478,8 +485,8 @@ func TestTautulli_NewestCountsEveryRowGoneThrough(t *testing.T) {
 	f := &fakeTautulli{items: map[string]any{"77": filmItem(film, "/m/F.mkv")},
 		rows: []map[string]any{row(1, since, 77, 5), music, noStart}}
 	src, _ := newFake(t, f)
-	rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0))
-	if err != nil || len(rows) != 1 || read != (Read{Complete: true, Newest: since + 50}) {
+	rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{})
+	if err != nil || len(rows) != 1 || read != (Read{Complete: true, Newest: since + 50, Named: 1}) {
 		t.Fatalf("rows %d, read %+v, err %v", len(rows), read, err)
 	}
 	if f.meta["9"] != 0 {
@@ -487,7 +494,7 @@ func TestTautulli_NewestCountsEveryRowGoneThrough(t *testing.T) {
 	}
 	// A read that went through no row says 0.
 	f.rows = nil
-	if _, read, err := src.Sessions(context.Background(), time.Unix(since, 0)); err != nil || read != (Read{Complete: true}) {
+	if _, read, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{}); err != nil || read != (Read{Complete: true}) {
 		t.Errorf("an empty history: %+v %v", read, err)
 	}
 }
@@ -504,11 +511,13 @@ func TestTautulli_AnIncompleteReadContinuesFromItsOffsetUnderTheSameDate(t *test
 	src.PageSize, src.MaxPages = 1, 2
 	var ids []string
 	var completes []bool
+	var from Resume
 	for i := 0; i < 4; i++ {
-		rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0))
+		rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0), from)
 		if err != nil {
 			t.Fatal(err)
 		}
+		from = read.Resume
 		for _, r := range rows {
 			ids = append(ids, r.ID)
 		}
@@ -524,9 +533,17 @@ func TestTautulli_AnIncompleteReadContinuesFromItsOffsetUnderTheSameDate(t *test
 	if strings.Join(starts, ",") != "0,1,2,3,4,0,1" {
 		t.Errorf("page starts %v", starts)
 	}
-	// Under another date the offset does not apply.
+	// Under another date the offset does not apply, and a read that did not continue from the
+	// incomplete one starts at the beginning: the source keeps no offset of its own.
 	f.history = nil
-	if _, _, err := src.Sessions(context.Background(), time.Unix(since+3*86400, 0)); err != nil {
+	if _, read, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{}); err != nil || read.Resume.Start != 2 {
+		t.Fatalf("a fresh read: %+v %v", read, err)
+	}
+	if f.history[0].Get("start") != "0" {
+		t.Errorf("a fresh read started at %s", f.history[0].Get("start"))
+	}
+	f.history = nil
+	if _, _, err := src.Sessions(context.Background(), time.Unix(since+3*86400, 0), Resume{After: "2001-01-01", Start: 4}); err != nil {
 		t.Fatal(err)
 	}
 	if f.history[0].Get("start") != "0" {
@@ -544,10 +561,10 @@ func TestTautulli_AnItemIsAskedOncePerNewSession(t *testing.T) {
 	src, _ := newFake(t, f)
 	clock := since + 100
 	src.now = func() time.Time { return time.Unix(clock, 0) }
-	if _, _, err := src.Sessions(context.Background(), time.Unix(since, 0)); err != nil {
+	if _, _, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := src.Sessions(context.Background(), time.Unix(since, 0)); err != nil {
+	if _, _, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{}); err != nil {
 		t.Fatal(err)
 	}
 	if f.meta["77"] != 1 {
@@ -559,7 +576,7 @@ func TestTautulli_AnItemIsAskedOncePerNewSession(t *testing.T) {
 	f.rows = append(f.rows, row(3, since+200, 77, 5))
 	f.mu.Unlock()
 	clock = since + 300
-	rows, _, err := src.Sessions(context.Background(), time.Unix(since, 0))
+	rows, _, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -570,11 +587,11 @@ func TestTautulli_AnItemIsAskedOncePerNewSession(t *testing.T) {
 	f.mu.Lock()
 	f.rows = append(f.rows, row(4, since+300, 77, 5))
 	f.mu.Unlock()
-	if _, _, err := src.Sessions(context.Background(), time.Unix(since, 0)); err != nil || f.meta["77"] != 2 {
+	if _, _, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{}); err != nil || f.meta["77"] != 2 {
 		t.Errorf("a session that started the second it was asked: asked %d times, %v", f.meta["77"], err)
 	}
 	// A read from after the ask drops it, and the next row asks again.
-	if _, _, err := src.Sessions(context.Background(), time.Unix(since+301, 0)); err != nil {
+	if _, _, err := src.Sessions(context.Background(), time.Unix(since+301, 0), Resume{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(src.items) != 0 {
@@ -590,7 +607,7 @@ func TestTautulli_ARowCarriesItsClientItsPlayTimeAndWhetherItsOffsetWasRead(t *t
 	derived["play_duration"] = -1
 	f := &fakeTautulli{items: map[string]any{"77": filmItem(8_700_000, "/m/F.mkv")}, rows: []map[string]any{read, derived}}
 	src, _ := newFake(t, f)
-	rows, _, err := src.Sessions(context.Background(), time.Unix(since, 0))
+	rows, _, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{})
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("rows %+v %v", rows, err)
 	}
@@ -599,5 +616,27 @@ func TestTautulli_ARowCarriesItsClientItsPlayTimeAndWhetherItsOffsetWasRead(t *t
 	}
 	if r := rows[1]; r.Client != "" || r.PlayedSeconds != nil || !r.OffsetDerived || *r.OffsetMS != 2_001_000 {
 		t.Errorf("a row with its offset from the percent: %+v", r)
+	}
+}
+
+// TestTautulli_AnAnswerNamingNoFileIsKeptForOneReadOnly: an empty answer - what Tautulli gives
+// while it cannot reach Plex - is asked once per read and asked again by the next, so the file is
+// found as soon as Tautulli can name it; every row of it is counted unresolved.
+func TestTautulli_AnAnswerNamingNoFileIsKeptForOneReadOnly(t *testing.T) {
+	f := &fakeTautulli{items: map[string]any{"77": map[string]any{}},
+		rows: []map[string]any{row(1, since, 77, 5), row(2, since+1, 77, 5), row(3, since+2, nil, 5)}}
+	src, _ := newFake(t, f)
+	clock := since + 100
+	src.now = func() time.Time { return time.Unix(clock, 0) }
+	rows, read, err := src.Sessions(context.Background(), time.Unix(since, 0), Resume{})
+	if err != nil || rows[0].File != "" || read.Named != 2 || read.Unresolved != 2 || f.meta["77"] != 1 {
+		t.Fatalf("Plex unreachable: %+v, asked %d, %v", read, f.meta["77"], err)
+	}
+	f.mu.Lock()
+	f.items["77"] = filmItem(film, "/m/F.mkv")
+	f.mu.Unlock()
+	rows, read, err = src.Sessions(context.Background(), time.Unix(since, 0), Resume{})
+	if err != nil || rows[0].File != "/m/F.mkv" || read.Unresolved != 0 || f.meta["77"] != 2 {
+		t.Errorf("Plex back: %+v, file %q, asked %d, %v", read, rows[0].File, f.meta["77"], err)
 	}
 }

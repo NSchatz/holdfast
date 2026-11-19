@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -17,20 +18,24 @@ import (
 // fakeSource is a history that answers what it is given and records each since it was asked.
 // Its read's Newest is newest where set, and otherwise the newest start among its rows.
 type fakeSource struct {
-	rows     []Observed
-	complete bool
-	newest   int64
-	err      error
-	asked    []int64
+	rows              []Observed
+	complete          bool
+	newest            int64
+	resume            Resume
+	named, unresolved int
+	err               error
+	asked             []int64
+	from              []Resume
 }
 
 func (f *fakeSource) Name() string { return "tautulli" }
-func (f *fakeSource) Sessions(_ context.Context, since time.Time) ([]Observed, Read, error) {
+func (f *fakeSource) Sessions(_ context.Context, since time.Time, from Resume) ([]Observed, Read, error) {
 	f.asked = append(f.asked, since.Unix())
+	f.from = append(f.from, from)
 	if f.err != nil {
 		return nil, Read{}, f.err
 	}
-	read := Read{Complete: f.complete, Newest: f.newest}
+	read := Read{Complete: f.complete, Newest: f.newest, Resume: f.resume, Named: f.named, Unresolved: f.unresolved}
 	for _, r := range f.rows {
 		if f.newest == 0 {
 			read.Newest = max(read.Newest, r.Started)
@@ -325,6 +330,55 @@ func TestPoller_LedgerFailuresAreFailuresOfTheirOwn(t *testing.T) {
 	}
 }
 
+// TestPoller_TheResumePointMovesOnlyOnceTheRowsAreStored: a read whose sessions the ledger could
+// not take is read again from where it began, not from where it stopped; a stored one moves on.
+func TestPoller_TheResumePointMovesOnlyOnceTheRowsAreStored(t *testing.T) {
+	led := &memLedger{swaps: []store.SwappedFile{{Path: "/lib/a.mkv", Fingerprint: "1:1", SwappedAt: 3000}},
+		recordErr: errors.New("disk full")}
+	src := &fakeSource{rows: []Observed{obs("1", "/lib/a.mkv", 4000, 5)}, resume: Resume{After: "d", Start: 200}}
+	p, _ := newTestPoller(src, led, nil, 9000)
+	if res := p.PollOnce(context.Background()); res.Failure != ClassLedger {
+		t.Fatalf("result %+v", res)
+	}
+	p.PollOnce(context.Background())
+	led.recordErr = nil
+	p.PollOnce(context.Background())
+	p.PollOnce(context.Background())
+	want := []Resume{{}, {}, {}, {After: "d", Start: 200}}
+	if fmt.Sprint(src.from) != fmt.Sprint(want) {
+		t.Errorf("reads continued from %v, want %v", src.from, want)
+	}
+}
+
+// TestPoller_SessionsTiedToNoFileAreCountedAndSaid: the count is kept in the poll state; some is
+// an info record, all of them a warn record that names the likely cause, none says nothing.
+func TestPoller_SessionsTiedToNoFileAreCountedAndSaid(t *testing.T) {
+	led := &memLedger{swaps: []store.SwappedFile{{Path: "/lib/a.mkv", Fingerprint: "1:1", SwappedAt: 3000}}}
+	src := &fakeSource{complete: true, named: 4, unresolved: 1}
+	p, buf := newTestPoller(src, led, nil, 9000)
+	res := p.PollOnce(context.Background())
+	if res.Named != 4 || res.Unresolved != 1 || led.poll.Unresolved != 1 {
+		t.Errorf("result %+v, state %+v", res, led.poll)
+	}
+	if !strings.Contains(buf.String(), "level=INFO") || !strings.Contains(buf.String(), "sessions_without_a_file=1") ||
+		strings.Contains(buf.String(), "cannot reach Plex") {
+		t.Errorf("some unresolved:\n%s", buf)
+	}
+	src.unresolved = 4
+	buf.Reset()
+	p.PollOnce(context.Background())
+	if !strings.Contains(buf.String(), "level=WARN") || !strings.Contains(buf.String(), "cannot reach Plex") ||
+		led.poll.Unresolved != 4 {
+		t.Errorf("all unresolved:\n%s", buf)
+	}
+	src.named, src.unresolved = 0, 0
+	buf.Reset()
+	p.PollOnce(context.Background())
+	if strings.Contains(buf.String(), "without_a_file") || led.poll.Unresolved != 0 {
+		t.Errorf("none unresolved:\n%s", buf)
+	}
+}
+
 // TestPoller_ASessionIsAttributedToTheSwapWhoseBytesItPlayed: through the Plex path map in
 // reverse; to the newest swap at or before it started; never to a swap after it (it played the
 // source), to a file the map does not cover, or to a file with no name or a relative one.
@@ -461,12 +515,12 @@ type signalSource struct {
 	asked chan struct{}
 }
 
-func (s *signalSource) Sessions(ctx context.Context, since time.Time) ([]Observed, Read, error) {
+func (s *signalSource) Sessions(ctx context.Context, since time.Time, from Resume) ([]Observed, Read, error) {
 	select {
 	case s.asked <- struct{}{}:
 	default:
 	}
-	return s.fakeSource.Sessions(ctx, since)
+	return s.fakeSource.Sessions(ctx, since, from)
 }
 
 // TestPoller_RunPollsAtOnceAndStopsWithItsContext. The test reads the ledger and the source only
@@ -647,5 +701,51 @@ func TestPoller_ABoundOfMusicCannotHoldTheReadInPlace(t *testing.T) {
 	}
 	if got := f.history[2].Get("start"); got != "200" {
 		t.Errorf("the second poll's first page started at row %s, want 200", got)
+	}
+}
+
+// failingWrites is a ledger whose session write fails the given number of times.
+type failingWrites struct {
+	*store.SQLite
+	fails int
+}
+
+func (f *failingWrites) RecordPlaybackSessions(ctx context.Context, ss []store.PlaybackSession) (int, error) {
+	if f.fails > 0 {
+		f.fails--
+		return 0, errors.New("disk full")
+	}
+	return f.SQLite.RecordPlaybackSessions(ctx, ss)
+}
+
+// TestPoller_ALostReadIsReadAgain: 250 sessions, 2 pages of 100 a poll, and the ledger refuses the
+// first poll's sessions. The next poll reads those rows again rather than continuing past them,
+// and every session is recorded.
+func TestPoller_ALostReadIsReadAgain(t *testing.T) {
+	st, swapped := e2eSwap(t)
+	ctx := context.Background()
+	f := &fakeTautulli{items: map[string]any{"77": filmItem(film, "/data/movies/Film/Film.mkv")}}
+	for i := 0; i < 250; i++ {
+		f.rows = append(f.rows, e2eRow(1+i, swapped+10+int64(i), film, 8700, fmt.Sprint("c", i)))
+	}
+	src, _ := newFake(t, f)
+	src.PageSize, src.MaxPages = 100, 2
+	writes := &failingWrites{SQLite: st, fails: 1}
+	p := NewPoller(src, st, writes, config.PathMap{{From: "/media", To: "/data"}}, rules, time.Minute,
+		slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	p.now = func() time.Time { return time.Unix(swapped+1000, 0) }
+	if res := p.PollOnce(ctx); res.Failure != ClassLedger {
+		t.Fatalf("first poll %+v", res)
+	}
+	recorded := 0
+	for i := 0; i < 3; i++ {
+		res := p.PollOnce(ctx)
+		if res.Failure != "" {
+			t.Fatalf("poll %d: %+v", i+2, res)
+		}
+		recorded += res.Recorded
+	}
+	if recorded != 250 {
+		t.Errorf("recorded %d of 250 sessions", recorded)
 	}
 }

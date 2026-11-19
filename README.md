@@ -451,7 +451,8 @@ through the same guards, gates and swap as a scanned one ([docs/profiles.md](doc
 Three host-fair holds, all off by default, only ever delay the hand-out of new files and never
 interrupt an encode in flight: a daily `run_window` (unset: always), a per-core load cap `max_load`
 (`0`: none), and a pause while Tautulli reports an active stream (`tautulli_url` with a
-`tautulli_api_key` reference; unset). Prometheus metrics are on (`metrics_enable: true`, at
+`tautulli_api_key` reference; unset; `tautulli_pause: false` keeps Tautulli for playback evidence
+without the pause). Prometheus metrics are on (`metrics_enable: true`, at
 `/metrics`), and notifications are off until `notify_url` carries a reference
 ([docs/api-reference.md](docs/api-reference.md)).
 

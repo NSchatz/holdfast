@@ -636,6 +636,7 @@ operator runs, and there is no endpoint that restores, re-encodes or releases a 
 | `last_attempt_at` | Unix seconds of the newest poll, `null` before the first |
 | `last_failure` | the class the newest poll failed with - `request-failed`, `error-result`, `unparseable-response` or `ledger-failed` - or `null` when it succeeded |
 | `covered_through` | Unix seconds the newest poll that read the history to its end began, `null` until one has. A file swapped before it has had every session since its swap read |
+| `unresolved_sessions` | how many sessions the newest successful poll read whose item Tautulli resolved to no single file - several versions, an item it no longer knows, or an answer it refused - so they are evidence about nothing; `null` before any poll. Every session of a poll here is what a Tautulli that cannot reach Plex looks like |
 | `counts` | every current swap - the newest swap of each path that is still the file there, whatever its jobs row's status ([swap identity](design/playback-evidence.md#swap-identity)) - by verdict: `swapped` (the total), `suspect_stall`, `played_through`, `unplayed` and `unknown` ([the verdicts](design/playback-evidence.md#verdicts)) |
 | `suspects` | every suspected stall, path order (`[]` when none) |
 
@@ -671,9 +672,10 @@ through and one no session has played (the paths are synthetic):
     "retry_window_seconds": 300,
     "stall_window_days": 60
   },
-  "last_attempt_at": 1795492371,
+  "last_attempt_at": 1795493994,
   "last_failure": null,
-  "covered_through": 1795492371,
+  "covered_through": 1795493994,
+  "unresolved_sessions": 0,
   "counts": {
     "swapped": 3,
     "suspect_stall": 1,
@@ -685,7 +687,7 @@ through and one no session has played (the paths are synthetic):
     {
       "path": "/media/movies/Film (2001)/Film (2001).mkv",
       "fingerprint": "3200000000:1790000000",
-      "swapped_at": 1795060371,
+      "swapped_at": 1795061994,
       "verdict": "suspect-stall",
       "sessions": 3,
       "played_through": 0,
@@ -699,8 +701,8 @@ through and one no session has played (the paths are synthetic):
       "restore": "holdfast restore '/media/movies/Film (2001)/Film (2001).mkv'",
       "stalled_sessions": [
         {
-          "started_at": 1795319571,
-          "stopped_at": 1795321971,
+          "started_at": 1795321194,
+          "stopped_at": 1795323594,
           "offset_seconds": 1999,
           "offset_from_percent": false,
           "played_seconds": 2400,
@@ -709,8 +711,8 @@ through and one no session has played (the paths are synthetic):
           "decision": "copy"
         },
         {
-          "started_at": 1795326771,
-          "stopped_at": 1795329371,
+          "started_at": 1795328394,
+          "stopped_at": 1795330994,
           "offset_seconds": 2040,
           "offset_from_percent": false,
           "played_seconds": 2600,
@@ -719,8 +721,8 @@ through and one no session has played (the paths are synthetic):
           "decision": "transcode"
         },
         {
-          "started_at": 1795405971,
-          "stopped_at": 1795406171,
+          "started_at": 1795407594,
+          "stopped_at": 1795407794,
           "offset_seconds": 2042,
           "offset_from_percent": false,
           "played_seconds": 200,
@@ -1276,6 +1278,7 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   | `holdfast_health_sweep_last_completed_timestamp_seconds` | Unix time the newest health sweep finished, read at scrape time | whether the sweep is keeping up. Older than the interval plus a sweep's length means it is not; absent until one has finished |
   | `holdfast_playback_suspect_files` | swapped files whose playback evidence is a suspected stall - recent sessions ending at one point well before the end, on two or more clients or with a resume that got nowhere - read at scrape time through the reporting door | replacements real viewers cannot get through. Alert on any rise: each is named, with the restore command while its original is retained, on `GET /api/playback` and in a `warn` record. Absent unless `playback_source` is set and until a poll has read the history to its end |
   | `holdfast_playback_played_through_files` | swapped files a session has played through since the swap and no stall is suspected in, read at scrape time | context for the figure above: how much of what was swapped has been watched to the end. Absent on the same terms |
+  | `holdfast_playback_unresolved_sessions` | sessions the newest successful poll read whose item Tautulli resolved to no single file, read at scrape time | evidence being lost. A few is several versions of one film; all of a poll's sessions, poll after poll, is a Tautulli that cannot reach Plex, and no stall is seen until it can. Absent on the same terms as the two above |
   | `holdfast_playback_history_read_timestamp_seconds` | Unix time the newest poll that read Tautulli's history to its end began, read at scrape time | whether the evidence is current. Older than a few poll intervals means Tautulli is not answering (`GET /api/playback` says how); absent on the same terms |
 
   The `outcome` label set is `done | skipped | failed | would-transcode | indeterminate |
@@ -1319,7 +1322,8 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   URL is a credential, and a failure names the key and its reference rather than any part of the destination.
   See [docs/secrets.md](secrets.md).
 - **Host-fair scheduling**: a daily `run_window` (`HH:MM-HH:MM`), a per-core `max_load` cap, and an optional
-  Tautulli-aware pause (`tautulli_url` plus a `tautulli_api_key` **reference**) that holds off while someone
+  Tautulli-aware pause (`tautulli_url` plus a `tautulli_api_key` **reference**; `tautulli_pause: false` turns it
+  off and keeps Tautulli for playback evidence alone) that holds off while someone
   is streaming.
   Scheduling only ever **delays** new work - it never interrupts an in-flight encode or bypasses a gate, and
   a Tautulli outage **fails open** (never halts transcoding). **Known limitation:** Plex-aware pause needs an

@@ -68,6 +68,9 @@ type PlaybackPoll struct {
 	CoveredThrough int64
 	LastAttemptAt  int64
 	LastFailure    string
+	// Unresolved is how many sessions the newest successful poll read whose item the source
+	// resolved to no single file.
+	Unresolved int64
 }
 
 // PlaybackLedger is playback evidence's half of the store. Nothing in the encode pipeline reads
@@ -91,24 +94,41 @@ type PlaybackLedger interface {
 	SetPlaybackPoll(ctx context.Context, p PlaybackPoll) error
 }
 
-// stillAtPath is the one statement of whether a recorded swap, aliased as w, is still the file
-// at its path in the ledger as it is now: no restore of it is recorded, and the newest jobs row
-// at the path - of ANY status - carries its fingerprint, or there is none. Any status, because a
-// changed encoder setting or a requeue re-opens the done row and the guard records it skipped
-// under the same key: the bytes are the swap's, and so is the evidence about them.
-func stillAtPath(w string) string {
-	return `COALESCE((SELECT j.fingerprint FROM jobs j WHERE j.path = ` + w + `.path
-			ORDER BY j.updated_at DESC, j.fingerprint DESC LIMIT 1), ` + w + `.fingerprint) = ` + w + `.fingerprint
-		AND NOT EXISTS (SELECT 1 FROM retained_originals r WHERE r.swapped_path = ` + w + `.path
+// newestAtPath is the fingerprint of the jobs row most recently INSERTED at w's path, of any
+// status: the file the ledger last met there. Insertion order is the rowid's, which no UPDATE
+// moves - a claim, a finish, a skip and a requeue's re-open rewrite a row in place, and nothing in
+// this store replaces or vacuums jobs rows - so an older file's row that a requeue re-opens does
+// not become "newer" than the swap by having its transition time bumped. A new row at the path is
+// a scan meeting a file with another fingerprint there: different bytes.
+func newestAtPath(w string) string {
+	return `(SELECT j.fingerprint FROM jobs j WHERE j.path = ` + w + `.path ORDER BY j.rowid DESC LIMIT 1)`
+}
+
+// notRestored is the statement that no restore of the swap aliased as w is recorded.
+func notRestored(w string) string {
+	return `NOT EXISTS (SELECT 1 FROM retained_originals r WHERE r.swapped_path = ` + w + `.path
 			AND r.swapped_fingerprint = ` + w + `.fingerprint AND r.restored_at IS NOT NULL)`
+}
+
+// stillAtPath is the one statement of whether a recorded swap, aliased as w, is still the file
+// at its path in the ledger as it is now: no restore of it is recorded, and the jobs row inserted
+// last at the path - of ANY status - carries its fingerprint, or there is none. Any status,
+// because a changed encoder setting or a requeue re-opens the done row and the guard records it
+// skipped under the same key: the bytes are the swap's, and so is the evidence about them.
+func stillAtPath(w string) string {
+	return `COALESCE(` + newestAtPath(w) + `, ` + w + `.fingerprint) = ` + w + `.fingerprint AND ` + notRestored(w)
 }
 
 // RecordSwaps is documented on PlaybackLedger. One transaction, so a poll that reads the swaps
 // after it sees all of what it did or none.
 //
-// The second a swap was superseded is the earliest of: the first transition recorded for
-// another file at the path at or after the swap's second, the restore of it, and now. A row's time is its
-// LATEST transition, so this can be later than the moment the other file arrived, never earlier.
+// The second a swap was superseded is the earliest of: the transition time of the row inserted
+// last at the path (the other file's), the restore of it, and now. A row's time is its LATEST
+// transition, so this can be later than the moment the other file arrived, never earlier.
+//
+// A swap marked superseded is current again when the row inserted last at its path carries its
+// fingerprint once more and no restore of it is recorded - positive evidence, never the mere
+// absence of rows - so a mark the ledger no longer supports does not erase the evidence for good.
 func (s *SQLite) RecordSwaps(ctx context.Context, now int64) (int, int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -134,10 +154,17 @@ func (s *SQLite) RecordSwaps(ctx context.Context, now int64) (int, int, error) {
 		}
 		added += int(n)
 	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE playback_swaps SET superseded_at = NULL, schema_version = ?
+		 WHERE superseded_at IS NOT NULL AND `+newestAtPath("playback_swaps")+` = playback_swaps.fingerprint
+		   AND `+notRestored("playback_swaps"),
+		currentStamp()); err != nil {
+		return 0, 0, fmt.Errorf("store: restore swaps: %w", err)
+	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE playback_swaps SET schema_version = ?, superseded_at = MIN(?,
-			COALESCE((SELECT MIN(j.updated_at) FROM jobs j WHERE j.path = playback_swaps.path
-				AND j.fingerprint != playback_swaps.fingerprint AND j.updated_at >= playback_swaps.swapped_at), ?),
+			COALESCE((SELECT j.updated_at FROM jobs j WHERE j.path = playback_swaps.path
+				AND j.fingerprint != playback_swaps.fingerprint ORDER BY j.rowid DESC LIMIT 1), ?),
 			COALESCE((SELECT MIN(r.restored_at) FROM retained_originals r WHERE r.swapped_path = playback_swaps.path
 				AND r.swapped_fingerprint = playback_swaps.fingerprint AND r.restored_at IS NOT NULL), ?))
 		 WHERE superseded_at IS NULL AND NOT (`+stillAtPath("playback_swaps")+`)`,
@@ -259,8 +286,9 @@ func (s *SQLite) PlaybackPollOf(ctx context.Context, source string) (PlaybackPol
 	var p PlaybackPoll
 	var covered sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT source, cursor, covered_through, last_attempt_at, last_failure FROM playback_polls WHERE source = ?`,
-		source).Scan(&p.Source, &p.Cursor, &covered, &p.LastAttemptAt, &p.LastFailure)
+		`SELECT source, cursor, covered_through, last_attempt_at, last_failure, unresolved_rows
+		 FROM playback_polls WHERE source = ?`,
+		source).Scan(&p.Source, &p.Cursor, &covered, &p.LastAttemptAt, &p.LastFailure, &p.Unresolved)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PlaybackPoll{}, false, nil
 	}
@@ -279,15 +307,17 @@ func (s *SQLite) SetPlaybackPoll(ctx context.Context, p PlaybackPoll) error {
 		covered = p.CoveredThrough
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO playback_polls (source, cursor, covered_through, last_attempt_at, last_failure, schema_version)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO playback_polls (source, cursor, covered_through, last_attempt_at, last_failure, unresolved_rows,
+			schema_version)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(source) DO UPDATE SET
 			cursor = excluded.cursor,
 			covered_through = excluded.covered_through,
 			last_attempt_at = excluded.last_attempt_at,
 			last_failure = excluded.last_failure,
+			unresolved_rows = excluded.unresolved_rows,
 			schema_version = excluded.schema_version`,
-		p.Source, p.Cursor, covered, p.LastAttemptAt, p.LastFailure, currentStamp()); err != nil {
+		p.Source, p.Cursor, covered, p.LastAttemptAt, p.LastFailure, p.Unresolved, currentStamp()); err != nil {
 		return fmt.Errorf("store: set playback poll: %w", err)
 	}
 	return nil
