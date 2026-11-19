@@ -153,13 +153,21 @@ decoder exits 0, prints no error at all at `-v error`, and produces at least one
 printed beside a clean exit fails it: a decoder starting at a picture whose references it never
 decoded prints `Could not find ref with POC` and conceals, and that is exactly the failure the
 gate is for. ffprobe lists packets and is never the decoder a verdict is read from: it swallows
-decode errors and exits 0.
+decode errors and exits 0. Each decoder keeps every picture at the stream's own time base on its
+way to the null muxer (`-enc_time_base:v demux`): re-timed onto the frame rate ffmpeg guesses from
+the pipe, a variable frame rate stream (24, then 60, then 30 fps) puts two pictures on one tick and
+the muxer prints "non monotonically increasing dts", an error about a timestamp ffmpeg invented
+rather than about the stream. HDR10 and Dolby Vision profile 8.1 outputs print nothing at any cold
+start, so every error line the decoder prints still fails it.
 
 A failure keeps the source. A decode that ran and failed, a stream that cannot be listed, and a
 stream that cannot be remuxed into fragmented MP4 are **deterministic**: the same output fails the
 same way again, so the file parks at once. A check that could not be run at all (a binary that did
 not start, a process killed by a signal, a cancelled run, an answer this build could not read) is
-**transient**. The reason names the check, where it failed ("the keyframe at 2069.069 s", "segment
+**transient**, and so is a remux that did not carry the stream the listing describes: a picture
+for every listed packet, in one fragment per keyframe. A remux that drifted from the listing leaves
+part of the stream undecoded by the checks, which proves nothing about that part. The reason names
+the check, where it failed ("the keyframe at 2069.069 s", "segment
 12 (decode time 66.000 s)") and the decoder's first error line.
 
 A remux is not held to the gate: its video is the source's own, bit for bit (the video-identity
@@ -173,7 +181,13 @@ keyframe, and the segment that starts there, decode a picture whose references t
 (`TestColdStart_AKeyframeFlaggedOnATrailingPictureFails`,
 `TestSegments_AFragmentStartingAtATrailingPictureFails`,
 `TestPlayability_AnOutputThatDoesNotStartAtAKeyframeIsRefused`). The same output passes every gate
-and replaces its source with both keys off (`TestPlayability_TheKeysTurnItOff`).
+and replaces its source with both keys off (`TestPlayability_TheKeysTurnItOff`). A second fixture
+keeps the keyframes and changes the pictures: an open-GOP stream whose RASL pictures are relabelled
+RADL in place decodes linearly frame for frame, and a decoder starting at a keyframe decodes
+pictures that reference one it never saw (`TestColdStart_RASLPicturesRelabelledRADLFail`, in
+Matroska, MP4 and MPEG-TS). Every shape an encoder writes - open and closed GOPs, HEVC, H.264 and
+AV1, a variable frame rate, HDR10, Dolby Vision profile 8.1, in Matroska, MP4 and MPEG-TS - passes
+with a cold start at every keyframe (`TestCheck_EveryShapeAnEncoderWritesPasses`).
 
 ### What it costs
 

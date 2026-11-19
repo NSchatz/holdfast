@@ -107,6 +107,33 @@ func (c Checker) decodeFragments(ctx context.Context, file string, s *Stream, n 
 		return &Unrun{What: "a cold start", Err: fmt.Errorf("%d keyframe(s) the cold starts were aimed at did "+
 			"not start a fragment of the remux", len(rt.targets))}
 	}
+	if s != nil {
+		if err := s.covered(rt.fragments, rt.next); err != nil {
+			return &Unrun{What: "the remux into fragmented MP4", Err: err}
+		}
+	}
+	return nil
+}
+
+// covered checks that a remux of the stream carried all of it, as the decoders were handed it:
+// a picture for every packet the stream lists, in one fragment per keyframe (and one ahead of
+// the first keyframe where the stream does not start at one). Anything else means the decodes
+// did not cover the stream the listing describes - pictures the remux dropped or added, a
+// fragment cut where no keyframe is, a keyframe it did not cut at - and nothing was proved about
+// the part that drifted: a measurement that could not be taken, never a pass.
+func (s *Stream) covered(fragments, pictures int) error {
+	starts := 0
+	for i, p := range s.Packets {
+		if p.Key || i == 0 {
+			starts++
+		}
+	}
+	switch {
+	case pictures != len(s.Packets):
+		return fmt.Errorf("the remux carried %d pictures and the stream lists %d packets", pictures, len(s.Packets))
+	case fragments != starts:
+		return fmt.Errorf("the remux cut %d fragments and the stream's keyframes start %d", fragments, starts)
+	}
 	return nil
 }
 
@@ -120,9 +147,16 @@ func remuxArgs(file string) []string {
 // decoderArgs is one decoder: an initialisation segment and fragments on stdin, decoded with
 // -xerror and -err_detect +explode, one -stats_enc_pre line written per decoded picture (the
 // wrapped_avframe encoder costs nothing).
+//
+// -enc_time_base:v demux keeps each picture at the stream's own time base on its way to the
+// null muxer. Without it ffmpeg re-times the pictures at the frame rate it guessed from the
+// pipe, and on a variable frame rate stream (24, then 60 fps) two pictures closer together
+// than the guess land on one tick: the muxer prints "non monotonically increasing dts", and
+// every decode error line fails a decode here, so a stream that decodes cleanly would be
+// refused for a timestamp ffmpeg itself invented.
 func decoderArgs() []string {
 	return []string{"-hide_banner", "-nostdin", "-v", "error", "-xerror", "-err_detect", "+explode",
-		"-f", "mp4", "-i", "pipe:0", "-map", "0:v:0", "-c:v", "wrapped_avframe",
+		"-f", "mp4", "-i", "pipe:0", "-map", "0:v:0", "-c:v", "wrapped_avframe", "-enc_time_base:v", "demux",
 		"-stats_enc_pre", "pipe:1", "-stats_enc_pre_fmt", "{n}", "-f", "null", "-"}
 }
 

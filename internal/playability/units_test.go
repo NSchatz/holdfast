@@ -528,3 +528,27 @@ func TestDecodeFragments_NothingAskedForRunsNothing(t *testing.T) {
 		t.Errorf("a remux that cannot start: %v", err)
 	}
 }
+
+func TestCovered_TheRemuxCarriedTheWholeStream(t *testing.T) {
+	s := pkts([]int64{0, 100, 200, 300, 400, 500}, 0, 3) // keyframes at 0 and 3: two fragments
+	late := pkts([]int64{0, 100, 200, 300}, 2)           // no keyframe first: a fragment ahead of it
+	for _, tc := range []struct {
+		name                string
+		s                   *Stream
+		fragments, pictures int
+		want                string
+	}{
+		{"every picture, a fragment per keyframe", s, 2, 6, ""},
+		{"a stream that does not start at a keyframe", late, 2, 4, ""},
+		{"a picture dropped", s, 2, 5, "the remux carried 5 pictures and the stream lists 6 packets"},
+		{"a picture added", s, 2, 7, "the remux carried 7 pictures and the stream lists 6 packets"},
+		{"a fragment cut where no keyframe is", s, 3, 6, "the remux cut 3 fragments and the stream's keyframes start 2"},
+		{"a keyframe not cut at", s, 1, 6, "the remux cut 1 fragments and the stream's keyframes start 2"},
+		{"no fragment ahead of a late keyframe", late, 1, 4, "the remux cut 1 fragments and the stream's keyframes start 2"},
+	} {
+		err := tc.s.covered(tc.fragments, tc.pictures)
+		if (tc.want == "") != (err == nil) || (err != nil && err.Error() != tc.want) {
+			t.Errorf("%s: covered = %v, want %q", tc.name, err, tc.want)
+		}
+	}
+}

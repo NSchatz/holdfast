@@ -54,7 +54,29 @@ const (
 	noBFrames = "nob.mkv"    // libx265 with no B pictures: nothing reordered
 	crafted   = "crafted.mp4"
 	craftedMK = "crafted.mkv"
+
+	// A variable frame rate stream, 24 then 60 then 30 fps, encoded with its timestamps
+	// passed through: the frame interval changes twice, so a decoder that guessed one rate
+	// from the first pictures sees intervals shorter than its guess.
+	vfrMKV = "vfr.mkv"
+	vfrMP4 = "vfr.mp4"
+	vfrTS  = "vfr.ts"
+	// HDR10: PQ, BT.2020, mastering display and content light SEI on every keyframe.
+	hdr10 = "hdr10.mkv"
+	// Dolby Vision profile 8.1: an RPU on every picture, the open-GOP structure of openGOP.
+	dv81 = "dv81.mkv"
+	// The open-GOP stream with its RASL pictures relabelled RADL (mislabel): a linear decode
+	// decodes the same frames, and a decoder starting at a keyframe decodes pictures that
+	// reference one it never saw.
+	mislabelMKV = "mislabel.mkv"
+	mislabelMP4 = "mislabel.mp4"
+	mislabelTS  = "mislabel.ts"
 )
+
+// hdr10Params are the HDR10 fixtures' colour description and static metadata in x265's spelling.
+const hdr10Params = "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:" +
+	"master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):" +
+	"max-cll=1000,400:hdr10-opt=1:repeat-headers=1"
 
 // craftedAt is the presentation time, in the closed-GOP stream's MP4 ticks, of the trailing
 // picture the crafted fixtures flag as a keyframe in place of the IDR at 6 s.
@@ -125,6 +147,23 @@ func writeFixtures(c Checker) (string, error) {
 			return err
 		},
 		func() error { return run(c.FFmpeg, "-i", p(crafted), "-c", "copy", p(craftedMK)) },
+		// The VFR stream: a 120 fps pattern thinned to every fifth picture for 2 s, every second
+		// for 2 s and every fourth for 2 s, its timestamps carried through the encoder in the
+		// source's own time base.
+		func() error {
+			return run(c.FFmpeg, "-f", "lavfi", "-i", "testsrc2=duration=6:size=160x128:rate=120",
+				"-vf", `select='if(lt(t\,2)\,not(mod(n\,5))\,if(lt(t\,4)\,not(mod(n\,2))\,not(mod(n\,4))))'`,
+				"-fps_mode", "passthrough", "-enc_time_base:v", "demux",
+				"-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error:keyint=24:min-keyint=24:scenecut=0",
+				"-pix_fmt", "yuv420p10le", p(vfrMKV))
+		},
+		func() error { return run(c.FFmpeg, "-i", p(vfrMKV), "-c", "copy", p(vfrMP4)) },
+		func() error { return run(c.FFmpeg, "-i", p(vfrMKV), "-c", "copy", p(vfrTS)) },
+		func() error { return x265(p(hdr10), "4", "open-gop=1:bframes=4:"+hdr10Params) },
+		func() error { return writeDV81(c.FFmpeg, dir, p(dv81)) },
+		func() error { return mislabel(c, p(openGOP), p(mislabelMKV), "matroska") },
+		func() error { return run(c.FFmpeg, "-i", p(mislabelMKV), "-c", "copy", p(mislabelMP4)) },
+		func() error { return run(c.FFmpeg, "-i", p(mislabelMKV), "-c", "copy", p(mislabelTS)) },
 	}
 	for _, step := range steps {
 		if err := step(); err != nil {
@@ -185,10 +224,13 @@ func linearDecodeOK(t *testing.T, ffmpeg, file string) bool {
 
 // TestCheck_EveryShapeAnEncoderWritesPasses: every check over every shape of stream holdfast's
 // encoders write - open and closed GOPs, reordered and not, HEVC, H.264 and AV1, in Matroska,
-// MP4 and MPEG-TS - passes, with a cold start at EVERY keyframe.
+// MP4 and MPEG-TS, a variable frame rate, HDR10 and Dolby Vision profile 8.1 - passes, with a
+// cold start at EVERY keyframe. A decode error line ffmpeg prints about something other than
+// the pictures (a timestamp it guessed, side data it could not attach) would fail one of these.
 func TestCheck_EveryShapeAnEncoderWritesPasses(t *testing.T) {
 	c := tools(t)
-	for _, name := range []string{openGOP, closedGOP, openMP4, openTS, h264, av1, noBFrames} {
+	for _, name := range []string{openGOP, closedGOP, openMP4, openTS, closedMP4, h264, av1, noBFrames,
+		vfrMKV, vfrMP4, vfrTS, hdr10, dv81} {
 		t.Run(name, func(t *testing.T) {
 			if err := c.Check(context.Background(), fixture(t, name), nil, Options{ColdStarts: 1000, Segments: true}); err != nil {
 				t.Fatalf("a file an encoder wrote failed: %v", err)
@@ -259,6 +301,28 @@ func TestColdStart_AKeyframeFlaggedOnATrailingPictureFails(t *testing.T) {
 			}
 			if strings.Contains(f.Reason, " @ 0x") {
 				t.Errorf("the reason carries a memory address: %q", f.Reason)
+			}
+		})
+	}
+}
+
+// TestColdStart_RASLPicturesRelabelledRADLFail is #204's proving fixture: the open-GOP stream
+// with its RASL pictures relabelled RADL. Every picture keeps its bytes and references, so the
+// linear decode is clean; a decoder starting at a keyframe decodes the relabelled pictures,
+// which reference the picture before the keyframe, and fails, in Matroska, MP4 and MPEG-TS.
+func TestColdStart_RASLPicturesRelabelledRADLFail(t *testing.T) {
+	c := tools(t)
+	for _, name := range []string{mislabelMKV, mislabelMP4, mislabelTS} {
+		t.Run(name, func(t *testing.T) {
+			file := fixture(t, name)
+			if !linearDecodeOK(t, c.FFmpeg, file) {
+				t.Fatal("fixture drifted: the linear decode fails, so this proves nothing a linear decode does not")
+			}
+			err := c.Check(context.Background(), file, nil, Options{ColdStarts: DefaultColdStarts})
+			var f *Failure
+			if !errors.As(err, &f) || f.Check != "cold start" || !strings.HasPrefix(f.At, "the keyframe at ") ||
+				!strings.Contains(f.Reason, "Could not find ref with POC") {
+				t.Fatalf("got %v, want a cold start failing on a missing reference", err)
 			}
 		})
 	}
@@ -376,6 +440,38 @@ func TestChecks_ABinaryThatCannotRunIsUnrunNotAFailure(t *testing.T) {
 			var u *Unrun
 			if !errors.As(err, &u) || IsFailure(err) {
 				t.Fatalf("got %v, want an *Unrun", err)
+			}
+		})
+	}
+}
+
+// TestCheck_AListingTheRemuxDoesNotMatchIsUnrun: the remux must carry exactly the stream the
+// packet listing describes. A listing with a packet the file does not have, or a keyframe it
+// does not flag, means the decodes did not cover what was listed: a measurement that could not
+// be taken, reported as an *Unrun and never as a pass or a verdict about the file.
+func TestCheck_AListingTheRemuxDoesNotMatchIsUnrun(t *testing.T) {
+	c := tools(t)
+	file := fixture(t, closedGOP)
+	for name, drift := range map[string]func(s *Stream){
+		"a packet the file does not carry": func(s *Stream) { s.Packets = append(s.Packets, Packet{PTS: 1 << 40, HasPTS: true}) },
+		"a keyframe the file flags, unlisted": func(s *Stream) {
+			keys := s.Keyframes()
+			s.Packets[keys[len(keys)-1]].Key = false
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, err := c.ReadStream(context.Background(), file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Check(context.Background(), file, s, Options{ColdStarts: 1, Segments: true}); err != nil {
+				t.Fatalf("the listing as read does not pass: %v", err)
+			}
+			drift(s)
+			err = c.Check(context.Background(), file, s, Options{ColdStarts: 1, Segments: true})
+			var u *Unrun
+			if !errors.As(err, &u) || IsFailure(err) || !strings.Contains(err.Error(), "the remux ") {
+				t.Fatalf("got %v, want an *Unrun naming the remux's drift from the listing", err)
 			}
 		})
 	}
