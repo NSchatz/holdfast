@@ -578,7 +578,7 @@ func oneFrameFlipped(t *testing.T, elementary, mux string) []byte {
 	}
 	frame := units[len(units)/2]
 	at := bytes.Index(b, frame[:64])
-	if at < 4 || bytes.Index(b[at+1:], frame[:64]) >= 0 || !bytes.Equal(b[at:at+len(frame)], frame) {
+	if at < 4 || bytes.Contains(b[at+1:], frame[:64]) || !bytes.Equal(b[at:at+len(frame)], frame) {
 		t.Fatalf("the middle frame is not stored once, whole, in the mux (at %d) - the damage could not be placed", at)
 	}
 	for i := at - 4; i < at+len(frame); i++ {
