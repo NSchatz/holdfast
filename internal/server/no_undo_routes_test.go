@@ -8,11 +8,15 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// localOnly is the words no route pattern may contain: the local commands.
+var localOnly = []string{"restore", "requeue", "reroot"}
+
 // The web UI drives exactly the controls this router offers, so what the router does not
-// serve the UI cannot reach. `restore` overwrites a library file with older bytes and
-// `requeue` re-opens a row a terminal decision already answered: both are LOCAL commands
-// by ratified operator decision (docs/design/web-ui.md#controls), and neither word may
-// appear in any route pattern this server registers, under any method, at any depth.
+// serve the UI cannot reach. `restore` overwrites a library file with older bytes,
+// `requeue` re-opens a row a terminal decision already answered, and `reroot` rewrites
+// every path the ledger records under a moved library root: all three are LOCAL commands
+// (docs/design/web-ui.md#controls), and none of the words may appear in any route pattern
+// this server registers, under any method, at any depth.
 //
 // The walk is over the ROUTER, not over a list of paths somebody thought to try, so a
 // route added tomorrow is judged the day it lands.
@@ -32,7 +36,7 @@ func TestRoutes_NoRestoreOrRequeueRouteIsRegistered(t *testing.T) {
 	}
 
 	for _, route := range served {
-		for _, word := range []string{"restore", "requeue"} {
+		for _, word := range localOnly {
 			if strings.Contains(strings.ToLower(route), word) {
 				t.Errorf("the HTTP surface registers %q, whose pattern contains %q. That command is local "+
 					"only: it changes what happens to a library file, and no credential this API issues "+
@@ -63,7 +67,7 @@ func TestRoutes_NoRestoreOrRequeueRouteIsRegistered(t *testing.T) {
 }
 
 // The check above must be able to fail. A router carrying such a route is walked the same
-// way and the same test for the two words finds it.
+// way and the same test for the words finds each one.
 func TestRoutes_TheRestoreAndRequeueWalkBites(t *testing.T) {
 	r := chi.NewRouter()
 	r.Route("/api", func(r chi.Router) {
@@ -74,18 +78,23 @@ func TestRoutes_TheRestoreAndRequeueWalkBites(t *testing.T) {
 		r.Group(func(r chi.Router) {
 			r.Put("/undo/restore", func(http.ResponseWriter, *http.Request) {})
 		})
+		r.Route("/roots", func(r chi.Router) {
+			r.Post("/{root}/reroot", func(http.ResponseWriter, *http.Request) {})
+		})
 	})
 	hits := 0
 	if err := chi.Walk(r, func(_, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
 		low := strings.ToLower(route)
-		if strings.Contains(low, "restore") || strings.Contains(low, "requeue") {
-			hits++
+		for _, word := range localOnly {
+			if strings.Contains(low, word) {
+				hits++
+			}
 		}
 		return nil
 	}); err != nil {
 		t.Fatalf("walking the routes: %v", err)
 	}
-	if hits != 2 {
-		t.Fatalf("the walk found %d of the 2 planted routes; a nested or grouped route is escaping it", hits)
+	if hits != 3 {
+		t.Fatalf("the walk found %d of the 3 planted routes; a nested or grouped route is escaping it", hits)
 	}
 }

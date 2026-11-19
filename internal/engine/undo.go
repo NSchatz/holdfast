@@ -36,6 +36,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
@@ -473,6 +474,16 @@ type ReleaseReport struct {
 	Released      int
 	BytesReturned int64
 	Unrestorable  int
+
+	// Unrooted counts the expired retentions whose retained original was not on disk AND
+	// lies under no configured library root. Their records are KEPT, and UnrootedExample
+	// names one of them. A path under no root is not evidence that the file is gone: the
+	// commonest way to get one is to mount the same library at a new path and edit
+	// library_roots to match, and a record dropped then is an original nothing can ever
+	// restore or release again - the scan never enumerates a retention area. `holdfast
+	// reroot` carries such records to the new path.
+	Unrooted        int
+	UnrootedExample string
 }
 
 // ReleaseExpired releases every retention whose window has closed. It runs at the
@@ -507,6 +518,12 @@ func (u *UndoWindow) ReleaseExpired(ctx context.Context) ReleaseReport {
 			if err := u.Store.DropRetained(ctx, r.SourcePath); err != nil {
 				u.Log.Warn("could not drop the record of a retained original that is no longer on disk", "path", r.SourcePath, "err", err)
 			}
+		case releasedUnrooted:
+			// Kept, deliberately: see ReleaseReport.Unrooted.
+			rep.Unrooted++
+			if rep.UnrootedExample == "" {
+				rep.UnrootedExample = r.RetainedPath
+			}
 		case releasedFailed:
 			// Left in place deliberately: the record still describes a real retained
 			// original, so the next pass tries again rather than forgetting a file the
@@ -517,6 +534,14 @@ func (u *UndoWindow) ReleaseExpired(ctx context.Context) ReleaseReport {
 		u.Log.Info("undo window: released retained original(s)",
 			"released", rep.Released, "bytes_returned", rep.BytesReturned, "unrestorable", rep.Unrestorable)
 	}
+	if rep.Unrooted > 0 {
+		u.Log.Warn("undo window: kept the records of expired retained original(s) that lie under no configured library root",
+			"records", rep.Unrooted,
+			"example", rep.UnrootedExample,
+			"tried", "releasing each expired retention at the path its record names",
+			"next", "the records are kept and released on a later pass once their path is reachable; "+
+				"if that library root moved, `holdfast reroot --from <old root> --to <new root>` carries them to it")
+	}
 	return rep
 }
 
@@ -524,10 +549,11 @@ func (u *UndoWindow) ReleaseExpired(ctx context.Context) ReleaseReport {
 type releaseKind int
 
 const (
-	releasedFreed   releaseKind = iota // the last name went; the space came back
-	releasedShared                     // the name went; the data survives elsewhere, so nothing came back
-	releasedMissing                    // there was nothing there to release
-	releasedFailed                     // the name could not be removed; the record stays
+	releasedFreed    releaseKind = iota // the last name went; the space came back
+	releasedShared                      // the name went; the data survives elsewhere, so nothing came back
+	releasedMissing                     // there was nothing there to release
+	releasedUnrooted                    // not there, and under no configured root; the record stays
+	releasedFailed                      // the name could not be removed; the record stays
 )
 
 // releaseOne removes one retained name and reports what that actually returned.
@@ -542,6 +568,17 @@ const (
 func (u *UndoWindow) releaseOne(r store.Retained) (int64, releaseKind) {
 	fi, err := os.Stat(r.RetainedPath)
 	if err != nil {
+		// Only an answer that the file is NOT THERE licenses dropping the record. A stat
+		// that failed for any other reason (a permission, an I/O error, a stale handle) is
+		// no finding about the file at all, and the record stays for the next pass.
+		if !notThere(err) {
+			u.Log.Warn("could not read the retained original (will retry next pass)",
+				"path", r.SourcePath, "retained", r.RetainedPath, "err", err)
+			return 0, releasedFailed
+		}
+		if !u.underARoot(r.RetainedPath) {
+			return 0, releasedUnrooted
+		}
 		u.Log.Warn("the retained original is no longer on disk - nothing to release",
 			"path", r.SourcePath, "retained", r.RetainedPath)
 		return 0, releasedMissing
@@ -588,7 +625,30 @@ var (
 	// ErrOriginalPathOccupied means a file has appeared at the original's own path
 	// since a container-changing swap removed it.
 	ErrOriginalPathOccupied = errors.New("a file already exists at the original's path")
+	// ErrRetentionUnrooted means the record's retained original is not on disk and lies
+	// under no configured library root, so its absence says nothing about the file. The
+	// record is KEPT (see ReleaseReport.Unrooted): `holdfast reroot` carries it to the
+	// root's new path, where it can be restored.
+	ErrRetentionUnrooted = errors.New("the retained original lies under no configured library root")
+	// ErrRetentionUnreadable means the retained original could not be read for a reason
+	// other than its absence (a permission, an I/O error, a stale handle). The record is
+	// KEPT: that is no finding about the file.
+	ErrRetentionUnreadable = errors.New("the retained original could not be read")
 )
+
+// notThere reports whether a stat error says the path does not exist: no entry at it, or a
+// component of it that is not a directory. Every other error leaves that open.
+func notThere(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+}
+
+// underARoot reports whether p lies under one of the configured library roots: the test
+// that tells a retained original that is gone from one whose record names a tree this
+// configuration no longer mounts.
+func (u *UndoWindow) underARoot(p string) bool {
+	_, ok := u.Cfg.RootFor(p)
+	return ok
+}
 
 // List returns the live retentions, oldest expiry first - what `holdfast restore`
 // with no argument prints.
@@ -615,6 +675,18 @@ func (u *UndoWindow) Restore(ctx context.Context, path string) (RestoreResult, e
 	res.Record = r
 
 	if _, err := os.Stat(r.RetainedPath); err != nil {
+		// A stat that failed for any reason but the file not being there says nothing
+		// about the file, so the record is kept (see releaseOne).
+		if !notThere(err) {
+			return res, fmt.Errorf("%w: %s (%v); the record is kept", ErrRetentionUnreadable, r.RetainedPath, err)
+		}
+		// Under no configured root, the absence is not a finding about the file: the
+		// record is kept and the refusal names the command that carries it.
+		if !u.underARoot(r.RetainedPath) {
+			return res, fmt.Errorf("%w: %s is not on disk under that path (recorded for %s); the record is kept - "+
+				"if that library root moved, `holdfast reroot --from <old root> --to <new root>` carries it to the new path",
+				ErrRetentionUnrooted, r.RetainedPath, r.SourcePath)
+		}
 		// AC13: report it, drop the record, return nothing. A record promising a
 		// restore it cannot perform is worse than no record: it is the ledger lying
 		// about what is recoverable.
