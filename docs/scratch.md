@@ -151,8 +151,9 @@ folders - is the one for a library spread over several drives whose folders a me
 server watches: the encoder's writes stay out of the watched folders, and no drive's
 encodes are carried to another drive and back. Nothing else changes. Each value is held
 to every rule below, the same file is never checked twice when roots share it, each is
-swept at start, and the swap is the copy back and the same same-directory rename, even
-though the two directories share a filesystem: one swap shape on every mount
+swept by every whole-library pass ([housekeeping](#housekeeping)), and the swap is the copy
+back and the same same-directory rename, even though the two directories share a
+filesystem: one swap shape on every mount
 ([design/swap.md](design/swap.md#swap-invariant)). The copy costs a write and a read of
 the accepted encode on that drive, once per transcode.
 
@@ -247,10 +248,22 @@ for a week.
 
 ## Housekeeping
 
-Working files a killed run left in a scratch directory are discarded when the next
-run starts, in every scratch directory some root's files are written to - a directory the
-configuration no longer names, at the top level or in any entry, is not swept, and what a
-killed run left there stays until it is removed by hand. They are discarded under the same hold-back exceptions the in-place sweep applies: a path a
+Working files a killed run left in a scratch directory are discarded by every
+whole-library pass: the first one when a run starts, and each later scan of a daemon
+(`scan_interval_sec`). A run bounded by `--limit`, `--limit-encodes` or `--file` does not
+sweep a scratch directory. The sweep reaches every scratch directory some root's files are
+written to - a directory the configuration no longer names, at the top level or in any
+entry, is not swept, and what a killed run left there stays until it is removed by hand.
+
+A pass's sweep leaves the working file of a job in flight in the same process, and the
+pre-pass and picture files named after it, and logs each one it leaves at `info`
+("leaving a temp file in place: a job in flight in this process is writing it"): a
+daemon's scan can start while its watch or its submission queue is encoding. A job of
+another holdfast process is not seen: a whole-library pass of one process removes the
+working file of a job another process is writing into the same scratch directory, and that
+job fails with its source untouched.
+
+The rest is discarded under the same hold-back exceptions the in-place sweep applies: a path a
 live record holds back is left alone, and so is a replacement holdfast retained. The
 copy made beside the source is built by the existing temp construction, so the
 stale-temp sweep, the record-based hold-backs and the record-free stray-replacement

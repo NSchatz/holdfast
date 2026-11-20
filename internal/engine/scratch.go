@@ -268,6 +268,17 @@ func fileDigest(path string) (string, int64, error) {
 // cleanScratch discards the working files a prior killed run left in the configured
 // scratch directory, under the same hold-back exceptions the in-place sweep applies.
 //
+// It runs on EVERY whole-library pass, the first one at start and each later one (a daemon's
+// scan_interval_sec scan), so it can meet a job of this process in flight: one the watch or
+// the submission queue started. A working file such a job holds (holdWorkingPath), and a
+// pre-pass or picture file named after one (ownerKey), is that job's work in progress and is
+// left, asked before the hold-backs as decideTemp asks it. Removing it would not stop the
+// encoder, which writes on into the unlinked file, and the job would fail at its gates on a
+// working file that is no longer there. A job of ANOTHER process is not seen here: a scratch
+// working file has no owner record (ownTemp covers a temp beside a source), so a
+// whole-library pass of a second process sharing this directory still removes it, and that
+// job fails with its source untouched.
+//
 // The scratch directory is not under a library root, or is inside a directory its root's
 // exclude_paths prune, so the coverage-bounded sweep cannot reach it: coverage is the
 // startup walk's record of the directories BENEATH THE ROOTS it traversed, and a working
@@ -317,6 +328,11 @@ func (e *Engine) cleanScratchDir(ctx context.Context, dir string) {
 			continue
 		}
 		if !isTempName(ent.Name()) {
+			continue
+		}
+		if workingPathHeld(ownerKey(p)) {
+			e.Log.Info("leaving a temp file in place: a job in flight in this process is writing it",
+				"file", p, "sweep", string(sweepUnbounded), "scratch_dir", dir)
 			continue
 		}
 		if why, ok := e.heldBack(p); ok {

@@ -47,6 +47,10 @@ type realEncode struct {
 	// one moment at which "nothing has been written under the source's directory
 	// yet" is a question with an answer.
 	before func(in, out string)
+	// after, when non-nil, is called with (in, out) once the encode has written out and
+	// before the job's gates read it: the job is still in flight and its working file is
+	// complete on disk.
+	after func(in, out string)
 }
 
 func (r *realEncode) Encode(ctx context.Context, in, out string, props *probe.VideoProps) error {
@@ -59,7 +63,13 @@ func (r *realEncode) Encode(ctx context.Context, in, out string, props *probe.Vi
 	if r.before != nil {
 		r.before(in, out)
 	}
-	return r.enc.Encode(ctx, in, out, props)
+	if err := r.enc.Encode(ctx, in, out, props); err != nil {
+		return err
+	}
+	if r.after != nil {
+		r.after(in, out)
+	}
+	return nil
 }
 
 func (r *realEncode) outFor(t *testing.T, in string) string {
@@ -465,6 +475,103 @@ func TestScratch_TheSweepDiscardsOrphansAndHoldsWhatTheExistingRulesHold(t *test
 	}
 	if !exists(stranger) {
 		t.Errorf("the sweep removed a file that is not this build's construction at all: %s", stranger)
+	}
+}
+
+// The scratch sweep runs on every whole-library pass, not only the first, so a daemon's
+// periodic scan sweeps the scratch directory while a job of this process is encoding into it.
+// The working file that job's picker holds, and the pre-pass file named after it, are its
+// work in progress and are left; a dead run's orphan beside them is still discarded.
+func TestScratch_TheSweepLeavesTheWorkingFileOfAJobInFlight(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root, scratch := scratchDirs(t)
+
+	eng := buildEngine(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) { c.ScratchDir = scratch })
+	work, err := eng.pickScratchPath(scratch, filepath.Join(root, "encoding.mkv"), "mkv")
+	if err != nil {
+		t.Fatalf("pickScratchPath: %v", err)
+	}
+	// What the job's own deferred release does, for the case the test ends before it.
+	t.Cleanup(func() { releaseWorkingPath(work) })
+	prePass := dynamicTempPath(work, dynamicJSON)
+	orphan := scratchWorkPath(scratch, filepath.Join(root, "gone.mkv"), "mkv", 0)
+	for _, p := range []string{work, prePass, orphan} {
+		if err := os.WriteFile(p, []byte("an encode in progress"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	eng.cleanScratch(context.Background())
+
+	if !exists(work) {
+		t.Errorf("the sweep removed %s while a job of this process held it", work)
+	}
+	if !exists(prePass) {
+		t.Errorf("the sweep removed %s, a pre-pass file of the job in flight", prePass)
+	}
+	if exists(orphan) {
+		t.Errorf("a prior run's orphaned working file survived the sweep: %s", orphan)
+	}
+
+	// Anti-vacuity: released, the same files are an ordinary orphan's and are discarded.
+	releaseWorkingPath(work)
+	eng.cleanScratch(context.Background())
+	if exists(work) || exists(prePass) {
+		t.Fatalf("files nobody holds were not swept, so the case above proves nothing: %v", listDir(t, scratch))
+	}
+}
+
+// The regression the sweep above guards, end to end: a whole-library pass (a daemon's
+// scan_interval_sec scan) runs while a job of this process is between its encode and its
+// gates, its working file complete in the scratch directory. The job reaches its own verdict,
+// an accepted encode and a swap, and not the verify gate's "temp missing or empty" about a
+// file the pass's sweep removed under it. The job enters through ProcessFile, the door the
+// watch and the submission queue take, so it holds no slot the pass's scan waits for.
+func TestScratch_AWholeLibraryPassDuringAnEncodeLeavesTheJobItsWorkingFile(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root, scratch := scratchDirs(t)
+	src := filepath.Join(root, "film.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	// A dead run's orphan, which shows the pass did sweep the scratch directory.
+	orphan := scratchWorkPath(scratch, filepath.Join(root, "gone.mkv"), "mkv", 0)
+	if err := os.WriteFile(orphan, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	eng, ts := buildEngineAndStore(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) { c.ScratchDir = scratch })
+	var passes int
+	var passErr error
+	var afterPass []string
+	rec := &realEncode{enc: FFmpegEncoder{FFmpeg: ffmpeg, Cfg: eng.Cfg, Probe: eng.Probe}}
+	rec.after = func(in, out string) {
+		passes++
+		passErr = eng.RunOneshot(context.Background())
+		afterPass = listDir(t, scratch)
+	}
+	eng.Enc = rec
+	if err := eng.ProcessFile(context.Background(), "w0", src); err != nil {
+		t.Fatalf("ProcessFile: %v", err)
+	}
+
+	if passes != 1 || passErr != nil {
+		t.Fatalf("the pass during the encode ran %d time(s), err %v; want once, without error", passes, passErr)
+	}
+	if exists(orphan) {
+		t.Fatalf("the pass left a dead run's orphan in the scratch directory, so it did not sweep it and the case proves nothing")
+	}
+	work := filepath.Base(rec.outFor(t, src))
+	if len(afterPass) != 1 || afterPass[0] != work {
+		t.Errorf("after the pass the scratch directory held %v, want the job's working file %s alone", afterPass, work)
+	}
+	out, status, ok := outcomeFor(t, ts, src)
+	if !ok || status != store.Done {
+		t.Fatalf("status = %q (found=%v), reason %q; want done - the job did not reach its own verdict", status, ok, out.Reason)
+	}
+	if got := codecOf(t, ffprobe, src); got != "hevc" {
+		t.Fatalf("the swapped file is %q, want hevc", got)
+	}
+	if got := listDir(t, scratch); len(got) != 0 {
+		t.Fatalf("the scratch directory holds %v after a completed job, want nothing", got)
 	}
 }
 
