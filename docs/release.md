@@ -18,9 +18,11 @@ green.
 
 ## Where this repository actually stands
 
-**`v0.5.0` is the newest published version, and its run is the third in a row to run every
-step of the path green.** Read this before anything below: several of the steps are already
-done, and the ones that are done are in the irreversible set.
+**`v0.7.2` is the newest published version, and its run ran every step of the path green, as
+the runs of `v0.3.0`, `v0.4.0`, `v0.5.0`, `v0.6.1` and `v0.7.1` did.** `v0.6.0` and `v0.7.0`
+are tags whose runs failed before the promotion: neither became `:latest` and neither has a
+GitHub release. Read this before anything below: several of the steps are already done, and
+the ones that are done are in the irreversible set.
 
 | fact | evidence |
 |---|---|
@@ -30,18 +32,23 @@ done, and the ones that are done are in the irreversible set.
 | `v0.3.0` has been released | run `35461530675`, tag push, 2026-09-19 18:33Z, green END TO END. Every step of both jobs ran and succeeded, `publish/resolve-compose` and `publish/github-release` included - the first run ever to reach them. The dry run before it is `35460830277`, dispatched on `main` the same day, green with the publishing steps skipped. |
 | `v0.4.0` has been released | run `37168110898`, tag push, 2026-10-04 01:28Z, green END TO END: every step of both jobs ran and succeeded. The dry run before it is `37166751433`, dispatched on `main` at the same commit (`c95dbb9`) the same day, green with the `publish` job skipped. It is the first release cut by the program that plans this repository (T37) and not by the owner's hand. |
 | `v0.5.0` has been released | run `37505485830`, tag push, 2026-10-06, green END TO END. The dry run before it is `37501855960`, dispatched on `main` at the same commit (`dbe2be1`) the same day, green with the `publish` job skipped. |
-| the newest image is published | `ghcr.io/nschatz/holdfast:v0.5.0` at `sha256:cc991456834900f03a29e43716a9c73ccd765cebfc8514b604515070a8d1e8a1` - the multi-arch index, `linux/amd64` and `linux/arm64` - pulled back and re-smoked on both arches by run `37505485830`. `v0.4.0` stays published at `sha256:019f4a722222428f95d285d96c63c9e2d15882c7d0941681d6f19b8cc9288c8b`, `v0.3.0` stays published at `sha256:7c588db698a86b1b789bed38a3916ed34b2d065c97cc5ca2a23ff66792bf9a34`, `v0.2.0` at `sha256:cb5125e1e95c93ee05256a37a8878c30349b75bb2ee2918c6e7b0ee9b4a5ec32` and `v0.1.0` at `sha256:302242b66f9c160e69b1e7c37d57925ec593bc7ed0ee9df851af0ec58c7cd4b2`. |
-| `:latest` points at it | `ghcr.io/nschatz/holdfast:latest` resolves to `sha256:cc991456834900f03a29e43716a9c73ccd765cebfc8514b604515070a8d1e8a1`, the same index digest as `v0.5.0`. That promotion was asserted against the registry by `publish/resolve-compose` in the same run rather than left to a later check. |
-| the two steps no run had ever taken have now run three times | `publish/resolve-compose` and `publish/github-release` both show `success` on run `35461530675`, on run `37168110898` and on run `37505485830`. So the reference `docker-compose.yml` pins has been resolved against the registry by a release, and the `v0.3.0`, `v0.4.0` and `v0.5.0` release objects were cut by the workflow rather than by hand. |
-| the example deployment pins the newest version | `docker-compose.yml` pins `ghcr.io/nschatz/holdfast:v0.5.0` by that index digest, so both architectures resolve under it. |
-| a GitHub release exists for each | tag `v0.1.0`, cut by the workflow token. tag `v0.2.0`, cut BY HAND because `publish/github-release` was skipped. tag `v0.3.0`, cut by the workflow in run `35461530675`, carrying `holdfast_v0.3.0_linux_amd64.tar.gz`, `holdfast_v0.3.0_linux_arm64.tar.gz` and `SHA256SUMS` from that run's own `build` job. tag `v0.4.0`, cut by the workflow in run `37168110898`, carrying `holdfast_v0.4.0_linux_amd64.tar.gz`, `holdfast_v0.4.0_linux_arm64.tar.gz` and `SHA256SUMS` the same way, and tag `v0.5.0` in run `37505485830` likewise. |
+| `v0.6.0` was tagged, and its run failed after the push | run `44449730229`, tag push, 2026-11-19 03:11Z, conclusion `failure`. Its `build` job is green; its `publish` job pushed the version tag (`publish/push-version` green) and then failed at `publish/resmoke`, in its `linux/arm64` pass (the smoke could not load `/usr/lib/x86_64-linux-gnu/dri/iHD_drv_video.so` inside the image). `publish/promote-latest`, `publish/resolve-compose` and `publish/github-release` were skipped, so the `v0.6.0` image is published but was never promoted, and no GitHub release carries it. The dry run before it is `44445516673`, at the same commit (`3224137`), green with the `publish` job skipped. |
+| `v0.6.1` has been released | run `44456526125`, tag push, 2026-11-19 04:10Z, green END TO END. The dry run before it is `44453979509`, at the same commit (`0ac6781`), green with the `publish` job skipped. |
+| `v0.7.0` was tagged, and its run published nothing | run `44476111401`, tag push, 2026-11-19 06:58Z, conclusion `failure`: its `build` job failed in the full gate (`make check`, `TestCoverArt_AC9_AFailedInvocationLeavesNothingBehind` in `internal/engine`), so its `publish` job was skipped. There is no `v0.7.0` image and no `v0.7.0` GitHub release, and `:latest` did not move. The dry run before it, `44473079664` at the same commit (`85c29d2`), passed that gate. |
+| `v0.7.1` has been released | run `44488001865`, tag push, 2026-11-19 08:29Z, green END TO END. The dry run before it is `44484797056`, at the same commit (`7305a82`), green with the `publish` job skipped. |
+| `v0.7.2` has been released | run `44828442185`, tag push, 2026-11-20 22:22Z, green END TO END. The dry run before it is `44823994562`, at the same commit (`eb22104`), green with the `publish` job skipped. |
+| the newest image is published | `ghcr.io/nschatz/holdfast:v0.7.2` at `sha256:6155fbbcdd3f0d8d8c1d435309b7bb58f4978e75362180373b89f990ed725a1e` - the multi-arch index, `linux/amd64` and `linux/arm64` - pulled back and re-smoked on both arches by run `44828442185`. `v0.7.1` stays published at `sha256:a664e73ac6943a3c17a91eb54b71e99d3f45df50ad49d46c7d8cfa9cb3745061`, `v0.6.1` at `sha256:ef0335a005ab0dfdbf933a87ecbe9d8580b6aadbd7a0ec08f9e7ed16ac0d1c00`, `v0.5.0` at `sha256:cc991456834900f03a29e43716a9c73ccd765cebfc8514b604515070a8d1e8a1`, `v0.4.0` at `sha256:019f4a722222428f95d285d96c63c9e2d15882c7d0941681d6f19b8cc9288c8b`, `v0.3.0` stays published at `sha256:7c588db698a86b1b789bed38a3916ed34b2d065c97cc5ca2a23ff66792bf9a34`, `v0.2.0` at `sha256:cb5125e1e95c93ee05256a37a8878c30349b75bb2ee2918c6e7b0ee9b4a5ec32` and `v0.1.0` at `sha256:302242b66f9c160e69b1e7c37d57925ec593bc7ed0ee9df851af0ec58c7cd4b2`. `v0.6.0` is published at `sha256:44f5647d37b9cb73754aa8b4c560086dfaafd1b8ad81ab181a3964e08c8244de` but failed its re-smoke and was never promoted; `v0.7.0` has no image. |
+| `:latest` points at it | `ghcr.io/nschatz/holdfast:latest` resolves to `sha256:6155fbbcdd3f0d8d8c1d435309b7bb58f4978e75362180373b89f990ed725a1e`, the same index digest as `v0.7.2`. That promotion was asserted against the registry by `publish/resolve-compose` in the same run rather than left to a later check. |
+| the two steps no run had ever taken have now run six times | `publish/resolve-compose` and `publish/github-release` both show `success` on runs `35461530675`, `37168110898`, `37505485830`, `44456526125`, `44488001865` and `44828442185`. So the reference `docker-compose.yml` pins has been resolved against the registry by a release, and the `v0.3.0`, `v0.4.0`, `v0.5.0`, `v0.6.1`, `v0.7.1` and `v0.7.2` release objects were cut by the workflow rather than by hand. |
+| the example deployment pins the newest version | `docker-compose.yml` pins `ghcr.io/nschatz/holdfast:v0.7.2` by that index digest, so both architectures resolve under it. |
+| a GitHub release exists for each, except `v0.6.0` and `v0.7.0` | tag `v0.1.0`, cut by the workflow token. tag `v0.2.0`, cut BY HAND because `publish/github-release` was skipped. tag `v0.3.0`, cut by the workflow in run `35461530675`, carrying `holdfast_v0.3.0_linux_amd64.tar.gz`, `holdfast_v0.3.0_linux_arm64.tar.gz` and `SHA256SUMS` from that run's own `build` job. tag `v0.4.0`, cut by the workflow in run `37168110898`, carrying `holdfast_v0.4.0_linux_amd64.tar.gz`, `holdfast_v0.4.0_linux_arm64.tar.gz` and `SHA256SUMS` the same way, tag `v0.5.0` in run `37505485830` likewise, tag `v0.6.1` in run `44456526125`, tag `v0.7.1` in run `44488001865` and tag `v0.7.2` in run `44828442185`. Tags `v0.6.0` and `v0.7.0` have none: neither run reached `publish/github-release`. |
 | the repository is public | `NSchatz/holdfast`, `visibility: public`. |
-| the annotated tags are on origin | `refs/tags/v0.1.0` -> `3468562c`, pointing at commit `38fb8b3`. `refs/tags/v0.2.0` -> `2b109243`, pointing at commit `f525a9e`. `refs/tags/v0.3.0` -> `93823d06`, pointing at commit `7aed827`. `refs/tags/v0.4.0` -> `c6ca619a`, pointing at commit `c95dbb9`. `refs/tags/v0.5.0` -> `df612320`, pointing at commit `dbe2be1`. |
+| the annotated tags are on origin | `refs/tags/v0.1.0` -> `3468562c`, pointing at commit `38fb8b3`. `refs/tags/v0.2.0` -> `2b109243`, pointing at commit `f525a9e`. `refs/tags/v0.3.0` -> `93823d06`, pointing at commit `7aed827`. `refs/tags/v0.4.0` -> `c6ca619a`, pointing at commit `c95dbb9`. `refs/tags/v0.5.0` -> `df612320`, pointing at commit `dbe2be1`. `refs/tags/v0.6.0` -> `c9e126ed`, pointing at commit `3224137`. `refs/tags/v0.6.1` -> `995d70fd`, pointing at commit `0ac6781`. `refs/tags/v0.7.0` -> `2f49f30a`, pointing at commit `85c29d2`. `refs/tags/v0.7.1` -> `ea24f1a5`, pointing at commit `7305a82`. `refs/tags/v0.7.2` -> `acf68f89`, pointing at commit `eb22104`. |
 
 Re-derive any of it:
 
 ```sh
-gh run list --workflow=release.yml --limit 10 --json conclusion,event,headBranch,createdAt
+gh run list --workflow=release.yml --limit 30 --json conclusion,event,headBranch,createdAt
 gh run view 34350141882 --json jobs --jq '.jobs[] | {name, steps: [.steps[] | {name, conclusion}]}'
 gh api repos/NSchatz/holdfast/releases --jq '.[] | {tag_name, assets: [.assets[].name]}'
 gh api repos/NSchatz/holdfast --jq '{name:.full_name, visibility:.visibility}'
@@ -49,14 +56,14 @@ docker buildx imagetools inspect ghcr.io/nschatz/holdfast:latest --format '{{.Ma
 ```
 
 What this means for the steps below. Steps **1, 3 and 5** are done for good; they are
-one-time acts and they have been taken. Steps **2 and 7** have each run five times and run
-again per release. Step **8** has been confirmed for `v0.5.0` against the registry from an
-unauthenticated client, and a release asserts the compose reference on its own. So the
-NEXT release is the same sequence it has always been: dispatch the dry run (2), pick a
-version HIGHER THAN `v0.5.0` (4, 6), push that tag (7), confirm the pull (8), regenerate and
-commit the API surface baseline (9). `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0` and `v0.5.0` are all spent:
-a released version's contents "MUST NOT be modified" (semver.org), and nothing here can
-un-publish any of them.
+one-time acts and they have been taken. Steps **2 and 7** run again per release; step 7 has
+run ten times, `v0.1.0` to `v0.7.2`. Step **8** has been confirmed for `v0.7.2` against the
+registry from an unauthenticated client, and a release asserts the compose reference on its
+own. So the NEXT release is the same sequence it has always been: dispatch the dry run (2),
+pick a version HIGHER THAN `v0.7.2` (4, 6), push that tag (7), confirm the pull (8),
+regenerate and commit the API surface baseline (9). Every tag from `v0.1.0` to `v0.7.2` is
+spent, `v0.6.0` and `v0.7.0` included: a released version's contents "MUST NOT be modified"
+(semver.org), a pushed tag is not taken back, and nothing here can un-publish any of them.
 
 ## The irreversible set
 
@@ -122,7 +129,10 @@ Status: done on 2026-07-18 (run `29646149489`), on 2026-09-19 (run `35460830277`
 publishing steps skipped) before the `v0.3.0` tag, and on 2026-10-04 (run `37166751433`, green, the
 `publish` job skipped, the plan line `publish=false  version=0.0.0-dev-c95dbb9`) before the
 `v0.4.0` tag, and on 2026-10-06 (run `37501855960`, green, the plan line
-`publish=false  version=0.0.0-dev-dbe2be1`) before the `v0.5.0` tag. Dispatch it again after any change
+`publish=false  version=0.0.0-dev-dbe2be1`) before the `v0.5.0` tag, and before each later tag:
+`44445516673` (`v0.6.0`), `44453979509` (`v0.6.1`), `44473079664` (`v0.7.0`), `44484797056`
+(`v0.7.1`) and `44823994562` (`v0.7.2`, the plan line `publish=false  version=0.0.0-dev-eb22104`),
+each green with the `publish` job skipped. Dispatch it again after any change
 to `release.yml` or to the gate: it is free, it publishes nothing, and it is the only way to
 see the whole path run before a tag commits you to it.
 
@@ -178,7 +188,7 @@ that pins the tag a release MOVES: the example deployment pins a version, and `:
 published rather than depended on.
 
 Status: done. The repository is `NSchatz/holdfast` and `docker-compose.yml` pins
-`ghcr.io/nschatz/holdfast:v0.5.0` by digest, which is the multi-arch index `v0.5.0` published
+`ghcr.io/nschatz/holdfast:v0.7.2` by digest, which is the multi-arch index `v0.7.2` published
 under.
 
 The window for this closed with the first release. A rename now would not just be
@@ -195,8 +205,8 @@ release it was undone by renaming back.
 
 ## 4. Pick a version nothing has used
 
-`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0` and `v0.5.0` are all taken (the table at the top names each tag
-object and its commit). An annotated `v0.1.0` is on origin (`3468562c`,
+Every tag from `v0.1.0` to `v0.7.2` is taken, `v0.6.0` and `v0.7.0` included (the table at
+the top names each tag object and its commit). An annotated `v0.1.0` is on origin (`3468562c`,
 pointing at commit `38fb8b3`) and an annotated `v0.2.0` is too (`2b109243`, pointing at
 commit `f525a9e`); a release run stands behind each, and a GitHub release and a published
 image carry each name.
@@ -273,7 +283,7 @@ permission, so nothing else could publish in its place. On the first release
 now on it means `:latest` keeps resolving to the previous release, which is the property
 `make check` asserts by re-deciding every guard with the run marked failed.
 
-Status: done four times. For `v0.1.0` on 2026-07-18 (run `29646482337`), which ran in
+Status: done ten times. For `v0.1.0` on 2026-07-18 (run `29646482337`), which ran in
 exactly the order above. For `v0.2.0` on 2026-09-09 (run `34350141882`), which ran that order
 as far as the promotion and then reported FAILURE at `publish/promote-latest` over a promotion
 that had landed, so `publish/resolve-compose` and `publish/github-release` were skipped and
@@ -281,7 +291,12 @@ that release object was cut by hand afterwards. For `v0.3.0` on 2026-09-19 (run
 `35461530675`), which ran the whole order green, the two skipped steps included. For `v0.4.0`
 on 2026-10-04 (run `37168110898`), which ran the whole order green again, on the commit the dry
 run and CI had both passed. For `v0.5.0` on 2026-10-06 (run `37505485830`), green the same
-way. Doing it again means a higher version, per step 4.
+way. For `v0.6.0` on 2026-11-19 (run `44449730229`), which pushed the version tag and then
+failed at `publish/resmoke`, so `:latest` stayed where it was and no release object was cut.
+For `v0.6.1` the same day (run `44456526125`), green. For `v0.7.0` the same day (run
+`44476111401`), which failed in the `build` job's gate and published nothing. For `v0.7.1` the
+same day (run `44488001865`), green. For `v0.7.2` on 2026-11-20 (run `44828442185`), green, on
+the commit its dry run had passed. Doing it again means a higher version, per step 4.
 
 Undone by: nothing. See the table above.
 
@@ -305,14 +320,14 @@ the release if `:latest` does not resolve to the digest the run just gated, and 
 the reference `docker-compose.yml` pins does not resolve at all), so this is confirmation,
 not the only check.
 
-Status: confirmed for `v0.5.0`, from an unauthenticated client with no Docker daemon: an
-anonymous registry token and a manifest HEAD for `ghcr.io/nschatz/holdfast:v0.5.0` and
-`:latest` both answer `sha256:cc991456834900f03a29e43716a9c73ccd765cebfc8514b604515070a8d1e8a1`, so the package is public and
-a stranger can pull it. Run `37505485830` also resolved the reference `docker-compose.yml`
-pins against the registry. What is NOT yet confirmed is the rest
-of the sentence below: nobody has pointed `v0.5.0` at a real library on a machine that is not
-the builder's. If a pull ever 401s or 404s, the package has been made private again: link it
-to the repository and set it public in the package settings.
+Status: confirmed for `v0.7.2`, from an unauthenticated client: an anonymous registry token
+and a manifest HEAD for `ghcr.io/nschatz/holdfast:v0.7.2` and `:latest` both answer
+`sha256:6155fbbcdd3f0d8d8c1d435309b7bb58f4978e75362180373b89f990ed725a1e`, so the package is public and a stranger can
+pull it. The `v0.7.2` reference `docker-compose.yml` now pins resolves to that same index
+digest. What this record does NOT confirm is the rest of the sentence below: that a release
+has been pointed at a real library on a machine that is not the builder's. If a pull ever 401s
+or 404s, the package has been made private again: link it to the repository and set it public
+in the package settings.
 
 Then point it at a real library and let it run. That is the north star, and until this step
 passes on someone else's machine, nothing above proves it.
@@ -359,12 +374,13 @@ Undone by: `git revert` of that commit. Nothing has left the machine - the file 
 this repository keeps about itself, and no published artefact reads it. It is the only step
 after the tag push that is fully reversible.
 
-Status: done for `v0.5.0` on 2026-10-06 - `docs/api-schema.json` records 36 endpoints at
-`holdfast v0.5.0` (36 at `v0.4.0`, 23 at `v0.3.0`), regenerated on the tag and committed to `main` as a commit
-of its own inside the pull request that records the release: since 2026-10-03 nothing but a
-goal ledger is pushed to `main` directly, so "commit it on its own" now means its own commit
-on a branch that CI gates. `.api-schema-breaks.yaml` is empty, which is its correct state: this
-release carried no recorded break, and `make api-schema-diff` reports no difference.
+Status: done for `v0.7.2` on 2026-11-20 - `docs/api-schema.json` records 38 endpoints at
+`holdfast v0.7.2` (36 at `v0.5.0` and at `v0.4.0`, 23 at `v0.3.0`), regenerated on the tag and
+committed to `main` through a pull request of its own (#229), which CI gates. The
+baseline was not regenerated for `v0.6.1` or `v0.7.1`, so it moved from `v0.5.0` straight to
+`v0.7.2`; every difference between the two is additive (`GET /api/playback`,
+`QUERY /metrics`). `.api-schema-breaks.yaml` is empty, which is its correct state: no release
+since `v0.5.0` carried a recorded break.
 
 ## Known limits
 
