@@ -1,7 +1,7 @@
 {
   "schema": "holdfast.http-surface",
   "schema_version": "1",
-  "holdfast_version": "v0.5.0",
+  "holdfast_version": "v0.7.2",
   "endpoints": [
     {
       "method": "GET",
@@ -3298,6 +3298,381 @@
           "media_type": "",
           "body": {
             "kind": "empty"
+          }
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/playback",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "enabled",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "source",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "poll_minutes",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rules",
+                "required": true,
+                "type": {
+                  "kind": "object",
+                  "fields": [
+                    {
+                      "name": "played_fraction",
+                      "required": true,
+                      "type": {
+                        "kind": "number"
+                      }
+                    },
+                    {
+                      "name": "end_margin_seconds",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "stall_before",
+                      "required": true,
+                      "type": {
+                        "kind": "number"
+                      }
+                    },
+                    {
+                      "name": "stall_tolerance_seconds",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "stall_min_sessions",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "retry_window_seconds",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "stall_window_days",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "last_attempt_at",
+                "required": true,
+                "type": {
+                  "kind": "integer",
+                  "nullable": true
+                }
+              },
+              {
+                "name": "last_failure",
+                "required": true,
+                "type": {
+                  "kind": "string",
+                  "nullable": true
+                }
+              },
+              {
+                "name": "covered_through",
+                "required": true,
+                "type": {
+                  "kind": "integer",
+                  "nullable": true
+                }
+              },
+              {
+                "name": "unresolved_sessions",
+                "required": true,
+                "type": {
+                  "kind": "integer",
+                  "nullable": true
+                }
+              },
+              {
+                "name": "counts",
+                "required": true,
+                "type": {
+                  "kind": "object",
+                  "fields": [
+                    {
+                      "name": "swapped",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "suspect_stall",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "played_through",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "unplayed",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "unknown",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "suspects",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "fingerprint",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "swapped_at",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "verdict",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "sessions",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "played_through",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "duration_seconds",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "stall_at_seconds",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "stall_from_seconds",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "stall_to_seconds",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "stall_sessions",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "stall_clients",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "stall_retries",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "restore",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "stalled_sessions",
+                        "required": true,
+                        "type": {
+                          "kind": "array",
+                          "nullable": true,
+                          "elem": {
+                            "kind": "object",
+                            "fields": [
+                              {
+                                "name": "started_at",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer"
+                                }
+                              },
+                              {
+                                "name": "stopped_at",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "offset_seconds",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer"
+                                }
+                              },
+                              {
+                                "name": "offset_from_percent",
+                                "required": true,
+                                "type": {
+                                  "kind": "boolean"
+                                }
+                              },
+                              {
+                                "name": "played_seconds",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer",
+                                  "nullable": true
+                                }
+                              },
+                              {
+                                "name": "platform",
+                                "required": true,
+                                "type": {
+                                  "kind": "string"
+                                }
+                              },
+                              {
+                                "name": "player",
+                                "required": true,
+                                "type": {
+                                  "kind": "string"
+                                }
+                              },
+                              {
+                                "name": "decision",
+                                "required": true,
+                                "type": {
+                                  "kind": "string"
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
           }
         }
       ]
@@ -8821,6 +9196,19 @@
     },
     {
       "method": "PUT",
+      "path": "/metrics",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "text/plain",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "QUERY",
       "path": "/metrics",
       "responses": [
         {
