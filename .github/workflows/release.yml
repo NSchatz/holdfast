@@ -149,7 +149,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "publish=$publish  version=$version  prerelease=$prerelease  image=$image  date=$date"
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: ${{ env.GO_VERSION }}
           check-latest: false
@@ -319,7 +319,7 @@ jobs:
       # reader of docker-compose.yml's image reference. `make check` and its own setup-go are
       # in the `build` job, which is a different runner, so without this the last step of a
       # release would depend on whatever Go `ubuntu-latest` happens to ship.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         id: setup-go
         with:
           go-version: ${{ env.GO_VERSION }}
